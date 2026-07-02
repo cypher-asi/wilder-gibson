@@ -48,7 +48,7 @@ export function CameraRig() {
       lastY = event.clientY;
       // Clamp so total pitch (zoom base + offset) stays in the allowed band.
       cameraState.pitchOffset = THREE.MathUtils.clamp(
-        cameraState.pitchOffset - dy * 0.005,
+        cameraState.pitchOffset + dy * 0.005,
         PITCH_MIN - basePitch.current,
         PITCH_MAX - basePitch.current,
       );
