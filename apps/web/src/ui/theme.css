@@ -157,21 +157,121 @@ body {
   z-index: 5;
 }
 
-.hud-top-left {
+/* Top-middle vitals: shield bar over health bar. */
+.vitals {
   position: absolute;
-  top: 16px;
-  left: 16px;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 340px;
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 8px;
-  padding: 10px 16px;
-  min-width: 210px;
+  padding: 8px 12px 10px;
 }
 
-.hud-name {
+.vitals-name {
+  text-align: center;
+  font-size: 13px;
   font-weight: 700;
-  font-size: 14px;
+  letter-spacing: 0.12em;
   margin-bottom: 6px;
+  text-shadow: 0 0 12px rgba(64, 232, 255, 0.35);
+}
+
+.vitals-level {
+  margin-left: 8px;
+  font-size: 10px;
+  color: var(--accent);
+  letter-spacing: 0.15em;
+}
+
+.vital-bar {
+  position: relative;
+  height: 16px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.vital-bar.shield {
+  height: 12px;
+  margin-bottom: 4px;
+}
+
+.vital-bar.shield.depleted {
+  opacity: 0.45;
+}
+
+.vital-fill {
+  height: 100%;
+  transition: width 0.25s;
+}
+
+.vital-fill.health {
+  background: linear-gradient(90deg, #29d98c, #7cf5c0);
+}
+
+.vital-fill.shield {
+  background: linear-gradient(90deg, #1899c9, #40e8ff);
+}
+
+.vital-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #eaf6ff;
+  text-shadow: 0 1px 2px #000;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Top-right minimap panel. */
+.minimap-panel {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.minimap-ring {
+  position: relative;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 2px solid rgba(64, 232, 255, 0.35);
+  box-shadow:
+    0 0 28px rgba(64, 232, 255, 0.15),
+    inset 0 0 22px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.minimap-ring:hover {
+  border-color: var(--accent);
+}
+
+.minimap-key {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: rgba(12, 17, 24, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  line-height: normal;
 }
 
 .hp-bar {
@@ -188,40 +288,130 @@ body {
 }
 
 .hud-pos {
-  margin-top: 6px;
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
+  background: rgba(10, 12, 18, 0.7);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  padding: 3px 8px;
 }
 
 .hud-hint {
   position: absolute;
-  bottom: 14px;
+  bottom: 92px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: 10px;
   letter-spacing: 0.08em;
   color: var(--text-dim);
-  background: rgba(10, 12, 18, 0.7);
-  padding: 6px 14px;
+  background: rgba(10, 12, 18, 0.55);
+  padding: 4px 12px;
   border-radius: 6px;
+  white-space: nowrap;
 }
 
-.chat {
+/* Left tabbed chat/combat/status window. */
+.chatwin {
   position: absolute;
-  bottom: 16px;
-  left: 16px;
-  width: 360px;
+  left: 12px;
+  bottom: 122px;
+  width: 350px;
   pointer-events: auto;
+  opacity: 0.6;
+  transition: opacity 0.2s;
 }
 
-.chat-lines {
-  max-height: 180px;
+.chatwin:hover,
+.chatwin.open {
+  opacity: 1;
+}
+
+.chatwin-tabs {
+  display: flex;
+  gap: 2px;
+}
+
+.chatwin-tab {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  padding: 4px 12px;
+  background: rgba(13, 16, 24, 0.7);
+  border: 1px solid var(--panel-border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.chatwin-tab.active {
+  color: var(--accent);
+  background: rgba(13, 16, 24, 0.92);
+}
+
+.chatwin-body {
+  background: rgba(13, 16, 24, 0.78);
+  border: 1px solid var(--panel-border);
+  border-radius: 0 8px 8px 8px;
+  padding: 6px;
+}
+
+.chatwin-lines {
+  max-height: 150px;
   overflow-y: auto;
-  font-size: 13px;
-  margin-bottom: 6px;
+  font-size: 12px;
   display: flex;
   flex-direction: column-reverse;
+}
+
+.chat-line.combat-out {
+  color: #ffe9b0;
+}
+
+.chat-line.combat-in {
+  color: #ff8a9d;
+}
+
+.chat-line.combat-info {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.chat-line.status-good {
+  color: #29d98c;
+}
+
+.chat-line.status-bad {
+  color: #ff5d7a;
+}
+
+.chat-line.status-info {
+  color: #cfe6f5;
+}
+
+.chatwin-buffs {
+  display: flex;
+  gap: 6px;
+  padding: 4px 4px 6px;
+}
+
+.buff-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #1affc4;
+  border: 1px solid rgba(26, 255, 196, 0.4);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.buff-glyph {
+  font-size: 11px;
 }
 
 .chat-line {
@@ -304,48 +494,165 @@ body {
   color: var(--accent);
 }
 
-/* Bottom-right weapon / ammo / XP readout (The Ascent style). */
-.weapon-hud {
+/* Bottom-center action bar (roll / abilities / consumables). */
+.action-bar {
   position: absolute;
-  right: 16px;
-  bottom: 16px;
-  min-width: 230px;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  pointer-events: auto;
+  box-shadow: 0 0 30px rgba(64, 232, 255, 0.06);
+}
+
+.action-slot {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.5);
+}
+
+.action-slot:hover {
+  border-color: var(--accent);
+}
+
+.action-slot.active {
+  border-color: #1affc4;
+  box-shadow:
+    0 0 14px rgba(26, 255, 196, 0.5),
+    inset 0 0 10px rgba(26, 255, 196, 0.2);
+}
+
+.action-slot.empty {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.action-glyph {
+  font-size: 21px;
+  color: #cfe6f5;
+  text-shadow: 0 0 10px rgba(64, 232, 255, 0.45);
+}
+
+.action-key {
+  position: absolute;
+  top: -6px;
+  right: -5px;
+  font-size: 8px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: #0c1118;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
+  padding: 1px 4px;
+  line-height: normal;
+}
+
+.action-cd {
+  position: absolute;
+  inset: 0;
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.action-cd-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  color: #fff;
+  text-shadow: 0 1px 3px #000;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.action-count {
+  position: absolute;
+  bottom: 2px;
+  right: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.action-sep {
+  width: 1px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.16);
+  margin: 0 3px;
+}
+
+/* Bottom-left weapon dock. */
+.weapon-dock {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  min-width: 260px;
   background: linear-gradient(160deg, rgba(20, 8, 12, 0.85), rgba(10, 6, 10, 0.9));
   border: 1px solid rgba(255, 48, 64, 0.35);
-  border-radius: 6px;
-  padding: 10px 14px 12px;
+  border-radius: 8px;
+  padding: 10px 12px;
   box-shadow: 0 0 30px rgba(255, 48, 64, 0.08);
+  pointer-events: auto;
 }
 
-.weapon-hud-row {
+.weapon-dock-main {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 16px;
+  align-items: center;
+  gap: 10px;
 }
 
-.weapon-hud-name {
-  font-size: 15px;
+.weapon-dock-slot {
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(255, 48, 64, 0.45);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.55);
+}
+
+.weapon-dock-glyph {
+  font-size: 24px;
+  color: #ff3040;
+  text-shadow: 0 0 12px rgba(255, 48, 64, 0.6);
+}
+
+.weapon-dock-name {
+  font-size: 13px;
   font-weight: 800;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.16em;
   color: #f4dede;
   text-shadow: 0 0 12px rgba(255, 48, 64, 0.5);
 }
 
-.weapon-hud-icon {
-  color: #ff3040;
-  margin-right: 8px;
-}
-
-.weapon-hud-ammo {
-  font-size: 26px;
+.weapon-dock-ammo {
+  font-size: 22px;
   font-weight: 800;
   color: #ffe9b0;
   font-variant-numeric: tabular-nums;
   text-shadow: 0 0 14px rgba(255, 210, 122, 0.4);
 }
 
-.weapon-hud-ammo.empty {
+.weapon-dock-ammo.empty {
   color: #ff3040;
   animation: ammo-blink 1s steps(2) infinite;
 }
@@ -356,27 +663,133 @@ body {
   }
 }
 
-.weapon-hud-ammo-label {
-  font-size: 10px;
+.weapon-dock-ammo-label {
+  font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.15em;
   color: var(--text-dim);
   margin-left: 5px;
 }
 
-.weapon-hud-xp {
+.weapon-dock-swaps {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.weapon-swap-slot {
+  width: 32px;
+  height: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.weapon-swap-slot:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.weapon-dock-xp {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 9px;
 }
 
-.weapon-hud-level {
+.weapon-dock-level {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.12em;
   color: #ff9daa;
   white-space: nowrap;
+}
+
+.weapon-dock-xp-num {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Bottom-right backpack quick-grid + inventory button. */
+.backpack {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  pointer-events: auto;
+}
+
+.backpack-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 26px);
+  grid-auto-rows: 26px;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.backpack-slot {
+  position: relative;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.backpack-slot.filled {
+  border-color: rgba(64, 232, 255, 0.35);
+}
+
+.backpack-abbrev {
+  font-size: 9px;
+  font-weight: 700;
+  color: #cfe6f5;
+}
+
+.backpack-btn {
+  position: relative;
+  width: 52px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.backpack-btn:hover,
+.backpack-btn.open {
+  border-color: var(--accent);
+}
+
+.backpack-btn-glyph {
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.backpack-btn-count {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
 }
 
 .xp-bar {
@@ -391,13 +804,6 @@ body {
   height: 100%;
   background: linear-gradient(90deg, #ff3040, #ff8a5c);
   transition: width 0.3s;
-}
-
-.weapon-hud-xp-num {
-  font-size: 9px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
 }
 
 /* Floating damage numbers (rendered via drei Html inside the canvas). */

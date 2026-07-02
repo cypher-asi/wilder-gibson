@@ -153,5 +153,7 @@ fn new_character(account: AccountId, name: String, appearance: Appearance) -> Ch
         xp: 0,
         health: 100.0,
         max_health: 100.0,
+        shield: 0.0,
+        max_shield: 0.0,
     }
 }

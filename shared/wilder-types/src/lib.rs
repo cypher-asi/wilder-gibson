@@ -72,6 +72,11 @@ pub struct Character {
     pub xp: u32,
     pub health: f32,
     pub max_health: f32,
+    /// Energy shield granted by equipped armor. Absorbs damage before health.
+    #[serde(default)]
+    pub shield: f32,
+    #[serde(default)]
+    pub max_shield: f32,
 }
 
 impl Character {
@@ -177,6 +182,30 @@ impl ItemKind {
     }
 }
 
+/// Active player abilities (hotbar Q/E/R). Resolved server-side with cooldowns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AbilityKind {
+    /// AoE pulse: damage + knockback to nearby NPCs.
+    Shockwave,
+    /// Heal over time + brief move speed boost.
+    Stim,
+    /// Brief weapon damage multiplier.
+    Overcharge,
+}
+
+impl AbilityKind {
+    pub const ALL: [AbilityKind; 3] =
+        [AbilityKind::Shockwave, AbilityKind::Stim, AbilityKind::Overcharge];
+
+    pub fn index(&self) -> usize {
+        match self {
+            AbilityKind::Shockwave => 0,
+            AbilityKind::Stim => 1,
+            AbilityKind::Overcharge => 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ItemStack {
     pub kind: ItemKind,
@@ -247,6 +276,9 @@ pub struct EntitySnapshot {
     pub yaw: f32,
     pub anim: AnimState,
     pub health_pct: f32,
+    /// Shield fraction (0-1 of max shield); 0 for entities without shields.
+    #[serde(default)]
+    pub shield_pct: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

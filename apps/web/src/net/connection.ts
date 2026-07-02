@@ -1,7 +1,7 @@
 // WebSocket game connection: handshake, message dispatch, input sending.
 
 import { playSfx } from "../assets/audio";
-import { game, spawnEntity, useGame } from "../state/game";
+import { armorShield, game, initialAbilities, spawnEntity, useGame } from "../state/game";
 import { C2S, decode, encode, S2C } from "./protocol";
 
 export class GameConnection {
@@ -79,6 +79,9 @@ export class GameConnection {
           characterName: msg.d.character.name,
           health: msg.d.character.health,
           maxHealth: msg.d.character.max_health,
+          shield: msg.d.character.shield ?? 0,
+          maxShield: msg.d.character.max_shield ?? 0,
+          abilities: initialAbilities(),
           level: msg.d.character.level,
           xp: msg.d.character.xp ?? 0,
           nextLevelXp: msg.d.character.level * 100,
@@ -128,18 +131,23 @@ export class GameConnection {
           if (snap.id === game.localEntityId) {
             // Reconciliation: server state + replay of unacked inputs.
             this.reconcile(snap.position[0], snap.position[2], msg.d.last_input_seq);
-            // Health is authoritative from our own snapshot.
-            const maxHealth = useGame.getState().maxHealth;
+            // Health/shield are authoritative from our own snapshot.
+            const { maxHealth, maxShield } = useGame.getState();
             const health = Math.round(snap.health_pct * maxHealth);
-            if (health !== useGame.getState().health) {
-              ui.set({ health });
+            const shield = Math.round((snap.shield_pct ?? 0) * maxShield);
+            const cur = useGame.getState();
+            if (health !== cur.health || shield !== cur.shield) {
+              ui.set({ health, shield });
             }
           }
         }
         break;
       }
       case "InventoryUpdate": {
-        ui.set({ inventory: msg.d });
+        // Shield capacity follows equipped armor (mirrors the server rule).
+        const maxShield = armorShield(msg.d.equipped_armor);
+        const shield = Math.min(useGame.getState().shield, maxShield);
+        ui.set({ inventory: msg.d, maxShield, shield });
         break;
       }
       case "StashUpdate": {
@@ -189,6 +197,12 @@ export class GameConnection {
           if (dead) {
             game.fx.push({ type: "death", x: dead.x, y: dead.y + 1, z: dead.z, at: now });
           }
+        } else if (ev.t === "Shockwave") {
+          void playSfx("sfx_hit", 0.5);
+          const source = game.entities.get(ev.d.source);
+          if (source) {
+            game.fx.push({ type: "shockwave", x: source.x, y: 0.1, z: source.z, at: now });
+          }
         }
         if (game.fx.length > 64) game.fx.splice(0, game.fx.length - 64);
         break;
@@ -202,6 +216,17 @@ export class GameConnection {
         if (msg.d.gained > 0) {
           ui.pushChat({ from: "system", text: `+${msg.d.gained} XP`, system: true });
         }
+        break;
+      }
+      case "AbilityUpdate": {
+        const now = performance.now();
+        const abilities = { ...useGame.getState().abilities };
+        abilities[msg.d.ability] = {
+          readyAt: now + msg.d.cooldown * 1000,
+          cooldown: msg.d.cooldown,
+          activeUntil: msg.d.active > 0 ? now + msg.d.active * 1000 : 0,
+        };
+        ui.set({ abilities });
         break;
       }
       case "Died": {

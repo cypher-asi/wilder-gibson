@@ -15,7 +15,8 @@ import {
   WALK_SPEED,
 } from "../game/collision";
 import { GameConnection } from "../net/connection";
-import { game, useGame } from "../state/game";
+import { AbilityKind } from "../net/protocol";
+import { consumableHotbar, game, useGame } from "../state/game";
 import { cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
 
@@ -73,16 +74,23 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         useGame.getState().toggleMap();
       }
       if (event.code === "Enter") {
+        // Prevent the same key stroke from submitting the just-focused input.
+        event.preventDefault();
         useGame.getState().set({ chatOpen: true });
       }
       if (event.code === "Space" && !event.repeat) {
         event.preventDefault();
         startRoll();
       }
-      if (event.code === "KeyC" && !event.repeat) {
+      if ((event.code === "ControlLeft" || event.code === "KeyC") && !event.repeat) {
         event.preventDefault();
         toggleCrouch();
       }
+      if (event.code === "KeyQ" && !event.repeat) useAbility("Shockwave");
+      if (event.code === "KeyE" && !event.repeat) useAbility("Stim");
+      if (event.code === "KeyR" && !event.repeat) useAbility("Overcharge");
+      const digit = /^Digit([1-4])$/.exec(event.code);
+      if (digit && !event.repeat) useConsumable(Number(digit[1]) - 1);
     };
     const up = (event: KeyboardEvent) => {
       keys.current[event.code] = false;
@@ -177,6 +185,23 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     connection.send({ t: "SetCrouch", d: { on: game.crouching } });
   }
 
+  /** Q/E/R: fire an ability if it's off cooldown (server re-validates). */
+  function useAbility(ability: AbilityKind) {
+    if (game.localEntityId === 0) return;
+    const state = useGame.getState().abilities[ability];
+    if (performance.now() < state.readyAt) return;
+    const seq = game.nextSeq++;
+    connection.send({ t: "UseAbility", d: { seq, ability } });
+  }
+
+  /** Keys 1-4: use the matching consumable hotbar slot. */
+  function useConsumable(index: number) {
+    if (game.localEntityId === 0) return;
+    const entry = consumableHotbar(useGame.getState().inventory)[index];
+    if (!entry) return;
+    connection.send({ t: "UseItem", d: { slot: entry.slot } });
+  }
+
   useFrame((_, dt) => {
     updateAim();
     updateFire();
@@ -186,7 +211,34 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       accumulator.current -= TICK_DT;
       stepInput();
     }
+    // Live input state for the local anim controller (Entities.tsx).
+    game.input.moving = moveDirection() !== null;
+    game.input.run = !!(keys.current.ShiftLeft || keys.current.ShiftRight);
+    updateRendered(dt);
   });
+
+  /**
+   * Ease the visual position toward the 20 Hz sim so the character doesn't
+   * step across the screen; the sim itself stays discrete for reconciliation.
+   */
+  function updateRendered(dt: number) {
+    const r = game.rendered;
+    const p = game.predicted;
+    if (Math.hypot(p.x - r.x, p.z - r.z) > 2) {
+      // Teleport/respawn: don't glide across the map.
+      r.x = p.x;
+      r.z = p.z;
+      r.yaw = p.yaw;
+      return;
+    }
+    const t = 1 - Math.exp(-dt * 18);
+    r.x += (p.x - r.x) * t;
+    r.z += (p.z - r.z) * t;
+    let dy = p.yaw - r.yaw;
+    while (dy > Math.PI) dy -= Math.PI * 2;
+    while (dy < -Math.PI) dy += Math.PI * 2;
+    r.yaw += dy * t;
+  }
 
   /** Put the gun away after a few seconds without shooting. */
   function updateHolster() {
@@ -202,8 +254,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       game.aim.active = false;
       return;
     }
-    const px = game.predicted.x;
-    const pz = game.predicted.z;
+    // Aim relative to the smoothed (on-screen) position so the ring and the
+    // aim line stay glued to the character.
+    const px = game.rendered.x;
+    const pz = game.rendered.z;
     groundPlane.current.constant = -groundHeightAt(px, pz);
     raycaster.current.setFromCamera(
       new THREE.Vector2(pointer.current.x, pointer.current.y),
@@ -270,7 +324,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (!dir) return;
     const [dx, dz] = dir;
 
-    const run = !k.ShiftLeft && !k.ShiftRight; // run by default, shift walks
+    const run = !!(k.ShiftLeft || k.ShiftRight); // walk by default, shift sprints
     const speed = game.crouching ? CROUCH_SPEED : run ? RUN_SPEED : WALK_SPEED;
 
     const seq = game.nextSeq++;
@@ -313,7 +367,7 @@ function GroundClickPlane({
 }) {
   const ref = useRef<THREE.Mesh>(null);
   useFrame(() => {
-    ref.current?.position.set(game.predicted.x, 0, game.predicted.z);
+    ref.current?.position.set(game.rendered.x, 0, game.rendered.z);
   });
   return (
     <mesh
@@ -365,8 +419,8 @@ function AimRing() {
     const visible = game.localEntityId !== 0 && game.aim.active;
     group.current.visible = visible;
     if (!visible) return;
-    const px = game.predicted.x;
-    const pz = game.predicted.z;
+    const px = game.rendered.x;
+    const pz = game.rendered.z;
     group.current.position.set(px, groundHeightAt(px, pz) + 0.05, pz);
     // Flat group: local +X maps to world +X, local +Y to world -Z, so a world
     // yaw of φ is a local rotation of -φ (see Euler XYZ order: Z applies first).

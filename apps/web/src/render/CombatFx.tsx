@@ -12,6 +12,7 @@ const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   tracer: 170,
   hit: 800,
   death: 600,
+  shockwave: 550,
 };
 
 interface ActiveFx {
@@ -51,6 +52,8 @@ export function CombatFx() {
           <Tracer key={id} ev={ev} />
         ) : ev.type === "hit" ? (
           <HitFx key={id} ev={ev} />
+        ) : ev.type === "shockwave" ? (
+          <ShockwaveRing key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -131,6 +134,37 @@ function HitFx({ ev }: { ev: Extract<CombatFxEvent, { type: "hit" }> }) {
         <div className="dmg-float">{Math.round(ev.damage)}</div>
       </Html>
     </group>
+  );
+}
+
+/** Shockwave ability: cyan ring expanding to the damage radius. */
+function ShockwaveRing({ ev }: { ev: Extract<CombatFxEvent, { type: "shockwave" }> }) {
+  const ring = useRef<THREE.Mesh>(null);
+  const RADIUS = 4; // mirrors wilder-combat SHOCKWAVE_RADIUS
+
+  useFrame(() => {
+    if (!ring.current) return;
+    const t = (performance.now() - ev.at) / LIFETIME_MS.shockwave;
+    ring.current.visible = t < 1;
+    if (t < 1) {
+      const ease = 1 - (1 - t) * (1 - t);
+      ring.current.scale.setScalar(0.3 + ease * RADIUS);
+      (ring.current.material as THREE.MeshBasicMaterial).opacity =
+        THREE.MathUtils.clamp(1 - t, 0, 1) * 0.85;
+    }
+  });
+
+  return (
+    <mesh ref={ring} position={[ev.x, 0.08, ev.z]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[0.82, 1.0, 48]} />
+      <meshBasicMaterial
+        color="#40e8ff"
+        transparent
+        opacity={0.85}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+      />
+    </mesh>
   );
 }
 

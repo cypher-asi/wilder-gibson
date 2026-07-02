@@ -32,6 +32,8 @@ pub enum C2S {
     InventoryAction(InventoryAction),
     /// Attack: melee swings at facing, ranged fires toward a point.
     Attack { seq: u32, tx: f32, tz: f32 },
+    /// Trigger an active ability (hotbar Q/E/R). Server validates cooldowns.
+    UseAbility { seq: u32, ability: AbilityKind },
     /// Use a consumable item from a slot.
     UseItem { slot: u16 },
     /// Craft a recipe at a nearby (or personal) station. Phase 2+.
@@ -93,6 +95,8 @@ pub enum S2C {
     CombatEvent(CombatEvent),
     /// XP/level progression changed (kills grant XP; sent on join too).
     XpUpdate { xp: u32, level: u32, next_level_xp: u32, gained: u32 },
+    /// Authoritative ability state for the receiving player (on use + join).
+    AbilityUpdate { ability: AbilityKind, cooldown: f32, active: f32 },
     Died { by: Option<String>, lost_items: bool },
     ExtractStart { seconds: f32 },
     ExtractCancel,
@@ -115,6 +119,8 @@ pub enum CombatEvent {
     Miss { attacker: EntityId },
     MuzzleFlash { attacker: EntityId, tx: f32, tz: f32 },
     EntityDied { id: EntityId },
+    /// Shockwave ability pulse originating at an entity (VFX broadcast).
+    Shockwave { source: EntityId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +180,7 @@ mod tests {
                 yaw: 0.5,
                 anim: AnimState::Run,
                 health_pct: 1.0,
+                shield_pct: 0.0,
             }],
         };
         let text = encode(&msg);

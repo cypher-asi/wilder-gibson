@@ -8,6 +8,7 @@
 import { create } from "zustand";
 import { ChunkStore } from "../game/collision";
 import {
+  AbilityKind,
   AnimState,
   EntityKind,
   EntitySpawnData,
@@ -67,7 +68,8 @@ export type CombatFxEvent =
       at: number;
     }
   | { type: "hit"; x: number; y: number; z: number; damage: number; at: number }
-  | { type: "death"; x: number; y: number; z: number; at: number };
+  | { type: "death"; x: number; y: number; z: number; at: number }
+  | { type: "shockwave"; x: number; y: number; z: number; at: number };
 
 /** Non-reactive game world (read from useFrame). */
 export const game = {
@@ -75,8 +77,15 @@ export const game = {
   entities: new Map<number, GameEntity>(),
   localEntityId: 0,
   worldSeed: 0,
-  /** Local prediction state. */
+  /** Local prediction state (advances in discrete 20 Hz sim steps). */
   predicted: { x: 0, z: 0, yaw: 0 },
+  /**
+   * Per-frame smoothed copy of `predicted` used for everything visual (mesh,
+   * aim ring, camera target); keeps the 20 Hz sim from stepping on screen.
+   */
+  rendered: { x: 0, z: 0, yaw: 0 },
+  /** Live WASD state this frame (drives the local player's anim locally). */
+  input: { moving: false, run: false },
   pendingInputs: [] as PendingInput[],
   nextSeq: 1,
   /** ms timestamp of the last direct (WASD) input; used to pick predict vs follow. */
@@ -102,6 +111,8 @@ export const game = {
     this.chunks.clear();
     this.entities.clear();
     this.localEntityId = 0;
+    this.input.moving = false;
+    this.input.run = false;
     this.pendingInputs = [];
     this.nextSeq = 1;
     this.moveMarker = null;
@@ -152,12 +163,63 @@ export interface ChatLine {
   system?: boolean;
 }
 
+/** Per-ability hotbar state (ms timestamps from performance.now()). */
+export interface AbilityUiState {
+  /** When the ability comes off cooldown. */
+  readyAt: number;
+  /** Full cooldown length (seconds) for the sweep animation. */
+  cooldown: number;
+  /** When the active effect (buff) ends; 0 when instant/inactive. */
+  activeUntil: number;
+}
+
+/** Item kinds usable from the consumable hotbar (sent as UseItem). */
+export const CONSUMABLE_KINDS: import("../net/protocol").ItemKind[] = ["Medkit"];
+
+/**
+ * Map inventory contents to the 4 consumable hotbar slots (keys 1-4): first
+ * occurrence of each consumable kind, in inventory order.
+ */
+export function consumableHotbar(
+  inv: Inventory | null,
+): ({ slot: number; stack: ItemStack } | null)[] {
+  const out: ({ slot: number; stack: ItemStack } | null)[] = [null, null, null, null];
+  if (!inv) return out;
+  let i = 0;
+  const seen = new Set<string>();
+  inv.slots.forEach((stack, slot) => {
+    if (i >= 4 || !stack || !CONSUMABLE_KINDS.includes(stack.kind) || seen.has(stack.kind))
+      return;
+    seen.add(stack.kind);
+    out[i++] = { slot, stack };
+  });
+  return out;
+}
+
+/** Client mirror of wilder-combat::armor_shield (shield capacity per armor). */
+export function armorShield(armor: import("../net/protocol").ItemKind | null): number {
+  if (armor === "JacketArmor") return 25;
+  if (armor === "PlateArmor") return 50;
+  return 0;
+}
+
+export const initialAbilities = (): Record<AbilityKind, AbilityUiState> => ({
+  Shockwave: { readyAt: 0, cooldown: 0, activeUntil: 0 },
+  Stim: { readyAt: 0, cooldown: 0, activeUntil: 0 },
+  Overcharge: { readyAt: 0, cooldown: 0, activeUntil: 0 },
+});
+
 interface UiState {
   connected: boolean;
   joined: boolean;
   characterName: string;
   health: number;
   maxHealth: number;
+  /** Energy shield from equipped armor (absorbs damage before health). */
+  shield: number;
+  maxShield: number;
+  /** Ability cooldowns / active buffs (server-authoritative). */
+  abilities: Record<AbilityKind, AbilityUiState>;
   level: number;
   /** XP progress into the current level. */
   xp: number;
@@ -207,6 +269,9 @@ export const useGame: import("zustand").UseBoundStore<
   characterName: "",
   health: 100,
   maxHealth: 100,
+  shield: 0,
+  maxShield: 0,
+  abilities: initialAbilities(),
   level: 1,
   xp: 0,
   nextLevelXp: 100,

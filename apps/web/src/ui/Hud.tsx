@@ -1,37 +1,38 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { ROLL_COOLDOWN } from "../game/collision";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
-import { ItemKind } from "../net/protocol";
-import { game, useGame } from "../state/game";
+import { AbilityKind, ItemKind } from "../net/protocol";
+import { consumableHotbar, game, useGame } from "../state/game";
+import { ChatWindow } from "./ChatWindow";
 import { MapOverlay } from "./MapOverlay";
+import { Minimap } from "./Minimap";
 
 export function Hud({ connection }: { connection: GameConnection }) {
-  const { connected, joined, characterName, health, maxHealth, chat, inventoryOpen } =
-    useGame();
+  const connected = useGame((s) => s.connected);
+  const joined = useGame((s) => s.joined);
+  const inventoryOpen = useGame((s) => s.inventoryOpen);
 
   return (
     <div className="hud">
       {!connected && <div className="disconnect-banner">RECONNECTING…</div>}
       {joined && (
         <>
-          <div className="hud-top-left">
-            <div className="hud-name">{characterName}</div>
-            <div className="hp-bar">
-              <div
-                className="hp-fill"
-                style={{ width: `${(health / Math.max(maxHealth, 1)) * 100}%` }}
-              />
-            </div>
+          <VitalsPanel />
+          <div className="minimap-panel">
+            <Minimap />
             <PositionReadout />
           </div>
           <ExtractionBar />
           <ExtractHint />
           <div className="hud-hint">
-            WASD move · MOUSE aim · LMB draw/shoot · SPACE roll · C crouch ·
-            RMB move / drag look · Q/E rotate · M map · I inventory · ENTER chat
+            WASD move · SHIFT run · MOUSE aim · LMB shoot · SPACE roll · Q/E/R abilities ·
+            1-4 items · CTRL crouch · Z/X rotate · M map · I inventory · ENTER chat
           </div>
-          <WeaponHud />
-          <Chat lines={chat} connection={connection} />
+          <ActionBar connection={connection} />
+          <WeaponDock connection={connection} />
+          <BackpackBar />
+          <ChatWindow connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
@@ -50,8 +51,165 @@ const WEAPON_LABEL: Record<string, string> = {
 };
 const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
 
-/** Bottom-right weapon / ammo / XP readout (The Ascent style). */
-function WeaponHud() {
+/** Top-middle vitals: shield bar over health bar with numeric overlays. */
+function VitalsPanel() {
+  const characterName = useGame((s) => s.characterName);
+  const health = useGame((s) => s.health);
+  const maxHealth = useGame((s) => s.maxHealth);
+  const shield = useGame((s) => s.shield);
+  const maxShield = useGame((s) => s.maxShield);
+  const level = useGame((s) => s.level);
+
+  return (
+    <div className="vitals">
+      <div className="vitals-name">
+        {characterName}
+        <span className="vitals-level">LV {level}</span>
+      </div>
+      <div className={`vital-bar shield${maxShield === 0 ? " depleted" : ""}`}>
+        <div
+          className="vital-fill shield"
+          style={{ width: `${maxShield > 0 ? (shield / maxShield) * 100 : 0}%` }}
+        />
+        <span className="vital-num">
+          {maxShield > 0 ? `${Math.round(shield)} / ${Math.round(maxShield)}` : "NO SHIELD"}
+        </span>
+      </div>
+      <div className="vital-bar health">
+        <div
+          className="vital-fill health"
+          style={{ width: `${(health / Math.max(maxHealth, 1)) * 100}%` }}
+        />
+        <span className="vital-num">
+          {Math.round(health)} / {Math.round(maxHealth)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+const ABILITY_DEF: Record<AbilityKind, { glyph: string; label: string; keybind: string }> = {
+  Shockwave: { glyph: "◎", label: "Shockwave — AoE pulse", keybind: "Q" },
+  Stim: { glyph: "✚", label: "Stim — heal + speed", keybind: "E" },
+  Overcharge: { glyph: "↯", label: "Overcharge — weapon damage", keybind: "R" },
+};
+
+/** Bottom-center action bar: roll + abilities + consumable slots 1-4. */
+function ActionBar({ connection }: { connection: GameConnection }) {
+  const abilities = useGame((s) => s.abilities);
+  const inventory = useGame((s) => s.inventory);
+  const [, force] = useState(0);
+
+  // Tick cooldown sweeps (~10 Hz is plenty for a radial wipe).
+  useEffect(() => {
+    const timer = setInterval(() => force((n) => n + 1), 100);
+    return () => clearInterval(timer);
+  }, []);
+
+  const now = performance.now();
+  const consumables = consumableHotbar(inventory);
+
+  function fireAbility(kind: AbilityKind) {
+    if (now < abilities[kind].readyAt) return;
+    const seq = game.nextSeq++;
+    connection.send({ t: "UseAbility", d: { seq, ability: kind } });
+  }
+
+  return (
+    <div className="action-bar">
+      <ActionSlot
+        glyph="↻"
+        label="Dodge roll"
+        keybind="␣"
+        remaining={Math.max(0, game.rollReadyAt - now) / 1000}
+        total={ROLL_COOLDOWN}
+      />
+      {(Object.keys(ABILITY_DEF) as AbilityKind[]).map((kind) => {
+        const def = ABILITY_DEF[kind];
+        const state = abilities[kind];
+        return (
+          <ActionSlot
+            key={kind}
+            glyph={def.glyph}
+            label={def.label}
+            keybind={def.keybind}
+            remaining={Math.max(0, state.readyAt - now) / 1000}
+            total={state.cooldown}
+            active={state.activeUntil > now}
+            onClick={() => fireAbility(kind)}
+          />
+        );
+      })}
+      <div className="action-sep" />
+      {consumables.map((entry, i) => (
+        <ActionSlot
+          key={i}
+          glyph={entry ? "▣" : ""}
+          label={entry ? `${shortName(entry.stack.kind)} x${entry.stack.count}` : "Empty"}
+          keybind={`${i + 1}`}
+          remaining={0}
+          total={0}
+          count={entry?.stack.count}
+          empty={!entry}
+          onClick={() => {
+            if (entry) connection.send({ t: "UseItem", d: { slot: entry.slot } });
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ActionSlot({
+  glyph,
+  label,
+  keybind,
+  remaining,
+  total,
+  active,
+  count,
+  empty,
+  onClick,
+}: {
+  glyph: string;
+  label: string;
+  keybind: string;
+  remaining: number;
+  total: number;
+  active?: boolean;
+  count?: number;
+  empty?: boolean;
+  onClick?: () => void;
+}) {
+  const sweep = total > 0 ? Math.min(remaining / total, 1) : 0;
+  return (
+    <div
+      className={`action-slot${active ? " active" : ""}${empty ? " empty" : ""}`}
+      onClick={onClick}
+      title={label}
+    >
+      <span className="action-glyph">{glyph}</span>
+      {count !== undefined && count > 1 && <span className="action-count">{count}</span>}
+      {remaining > 0 && (
+        <>
+          <div
+            className="action-cd"
+            style={{
+              background: `conic-gradient(rgba(4, 7, 12, 0.82) ${sweep * 360}deg, transparent 0deg)`,
+            }}
+          />
+          <span className="action-cd-num">
+            {remaining >= 10 ? Math.ceil(remaining) : remaining.toFixed(1)}
+          </span>
+        </>
+      )}
+      <span className="action-key">{keybind}</span>
+    </div>
+  );
+}
+
+/** Bottom-left weapon dock: equipped weapon, ammo, swappable weapons, XP. */
+function WeaponDock({ connection }: { connection: GameConnection }) {
   const inventory = useGame((s) => s.inventory);
   const level = useGame((s) => s.level);
   const xp = useGame((s) => s.xp);
@@ -63,28 +221,90 @@ function WeaponHud() {
   const ammo = invCount(inventory, "Ammo9mm");
   const xpPct = Math.min((xp / Math.max(nextLevelXp, 1)) * 100, 100);
 
+  // Other weapons carried in the backpack (click to equip).
+  const carried = (inventory?.slots ?? [])
+    .map((stack, slot) => ({ stack, slot }))
+    .filter((e) => e.stack && WEAPONS.includes(e.stack.kind))
+    .slice(0, 4);
+
   return (
-    <div className="weapon-hud">
-      <div className="weapon-hud-row">
-        <div className="weapon-hud-name">
-          <span className="weapon-hud-icon">{ranged ? "▙" : "▟"}</span>
-          {label}
+    <div className="weapon-dock">
+      <div className="weapon-dock-main">
+        <div className="weapon-dock-slot" title={weapon ?? "Unarmed"}>
+          <span className="weapon-dock-glyph">{ranged ? "▙" : "▟"}</span>
         </div>
-        {ranged && (
-          <div className={`weapon-hud-ammo${ammo === 0 ? " empty" : ""}`}>
-            {ammo}
-            <span className="weapon-hud-ammo-label">9MM</span>
-          </div>
-        )}
+        <div className="weapon-dock-info">
+          <div className="weapon-dock-name">{label}</div>
+          {ranged ? (
+            <div className={`weapon-dock-ammo${ammo === 0 ? " empty" : ""}`}>
+              {ammo}
+              <span className="weapon-dock-ammo-label">9MM</span>
+            </div>
+          ) : (
+            <div className="weapon-dock-ammo-label">MELEE</div>
+          )}
+        </div>
+        <div className="weapon-dock-swaps">
+          {carried.map(({ stack, slot }) => (
+            <div
+              key={slot}
+              className="weapon-swap-slot"
+              title={`Equip ${stack!.kind}`}
+              onClick={() =>
+                connection.send({ t: "InventoryAction", d: { t: "Equip", d: { slot } } })
+              }
+            >
+              {WEAPON_LABEL[stack!.kind]?.slice(0, 3) ?? stack!.kind.slice(0, 3).toUpperCase()}
+            </div>
+          ))}
+        </div>
       </div>
-      <div className="weapon-hud-xp">
-        <span className="weapon-hud-level">LVL {level}</span>
+      <div className="weapon-dock-xp">
+        <span className="weapon-dock-level">LVL {level}</span>
         <div className="xp-bar">
           <div className="xp-fill" style={{ width: `${xpPct}%` }} />
         </div>
-        <span className="weapon-hud-xp-num">
+        <span className="weapon-dock-xp-num">
           {xp}/{nextLevelXp}
         </span>
+      </div>
+    </div>
+  );
+}
+
+/** Bottom-right backpack: quick-glance grid + button to the full inventory. */
+function BackpackBar() {
+  const inventory = useGame((s) => s.inventory);
+  const inventoryOpen = useGame((s) => s.inventoryOpen);
+  const toggleInventory = useGame((s) => s.toggleInventory);
+
+  const slots = inventory?.slots ?? [];
+  const used = slots.filter((s) => s !== null).length;
+
+  return (
+    <div className="backpack">
+      <div className="backpack-grid" onClick={toggleInventory} title="Open inventory (I)">
+        {slots.slice(0, 12).map((slot, i) => (
+          <div key={i} className={`backpack-slot${slot ? " filled" : ""}`}>
+            {slot && (
+              <>
+                <span className="backpack-abbrev">{slot.kind.slice(0, 2).toUpperCase()}</span>
+                {slot.count > 1 && <span className="inv-count">{slot.count}</span>}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <div
+        className={`backpack-btn${inventoryOpen ? " open" : ""}`}
+        onClick={toggleInventory}
+        title="Open inventory (I)"
+      >
+        <span className="backpack-btn-glyph">▤</span>
+        <span className="backpack-btn-count">
+          {used}/{slots.length || 24}
+        </span>
+        <span className="action-key">I</span>
       </div>
     </div>
   );
@@ -124,7 +344,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
       <div
         style={{
           position: "absolute",
-          bottom: 96,
+          bottom: 128,
           left: "50%",
           transform: "translateX(-50%)",
           fontSize: 12,
@@ -365,7 +585,7 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
       <div
         style={{
           position: "absolute",
-          bottom: 128,
+          bottom: 160,
           left: "50%",
           transform: "translateX(-50%)",
           fontSize: 12,
@@ -612,7 +832,7 @@ function ExtractHint() {
     <div
       style={{
         position: "absolute",
-        top: 14,
+        top: 96,
         left: "50%",
         transform: "translateX(-50%)",
         fontSize: 12,
@@ -685,64 +905,6 @@ function PositionReadout() {
       <span style={{ color: safe ? "#29d98c" : "#ff5d7a" }}>
         {safe ? "SAFE ZONE" : "HOSTILE"}
       </span>
-    </div>
-  );
-}
-
-function Chat({
-  lines,
-  connection,
-}: {
-  lines: { from: string; text: string; system?: boolean }[];
-  connection: GameConnection;
-}) {
-  const chatOpen = useGame((s) => s.chatOpen);
-  const set = useGame((s) => s.set);
-  const [draft, setDraft] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (chatOpen) inputRef.current?.focus();
-  }, [chatOpen]);
-
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = draft.trim();
-    if (text) connection.send({ t: "Chat", d: { text } });
-    setDraft("");
-    set({ chatOpen: false });
-    inputRef.current?.blur();
-  }
-
-  return (
-    <div className="chat">
-      <div className="chat-lines">
-        {[...lines].reverse().map((line, i) => (
-          <div key={i} className={`chat-line${line.system ? " system" : ""}`}>
-            {!line.system && <span className="from">{line.from}: </span>}
-            {line.text}
-          </div>
-        ))}
-      </div>
-      {chatOpen && (
-        <form onSubmit={submit}>
-          <input
-            ref={inputRef}
-            className="chat-input"
-            value={draft}
-            placeholder="Say something…"
-            maxLength={240}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") {
-                set({ chatOpen: false });
-                (e.target as HTMLInputElement).blur();
-              }
-              e.stopPropagation();
-            }}
-          />
-        </form>
-      )}
     </div>
   );
 }

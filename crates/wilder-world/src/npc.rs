@@ -53,6 +53,7 @@ impl Npc {
             yaw: self.yaw,
             anim: self.anim,
             health_pct: (self.health / self.archetype.max_health).max(0.0),
+            shield_pct: 0.0,
         }
     }
 

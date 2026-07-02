@@ -46,7 +46,15 @@ export interface Character {
   xp: number;
   health: number;
   max_health: number;
+  /** Energy shield granted by equipped armor. Absorbs damage before health. */
+  shield: number;
+  max_shield: number;
 }
+
+/** Active player abilities (hotbar Q/E/R), resolved server-side. */
+export type AbilityKind = "Shockwave" | "Stim" | "Overcharge";
+
+export const ABILITIES: AbilityKind[] = ["Shockwave", "Stim", "Overcharge"];
 
 export type ItemKind =
   | "Medkit"
@@ -111,6 +119,8 @@ export interface EntitySnapshot {
   yaw: number;
   anim: AnimState;
   health_pct: number;
+  /** Shield fraction (0-1 of max shield); 0 for entities without shields. */
+  shield_pct: number;
 }
 
 export interface EntitySpawnData {
@@ -181,6 +191,7 @@ export type C2S =
   | Tagged<"Interact", { entity_id: number }>
   | Tagged<"InventoryAction", InventoryActionMsg>
   | Tagged<"Attack", { seq: number; tx: number; tz: number }>
+  | Tagged<"UseAbility", { seq: number; ability: AbilityKind }>
   | Tagged<"UseItem", { slot: number }>
   | Tagged<"Craft", { recipe: string; station: number | null }>
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
@@ -210,7 +221,8 @@ export type CombatEvent =
   | Tagged<"Hit", { attacker: number; target: number; damage: number }>
   | Tagged<"Miss", { attacker: number }>
   | Tagged<"MuzzleFlash", { attacker: number; tx: number; tz: number }>
-  | Tagged<"EntityDied", { id: number }>;
+  | Tagged<"EntityDied", { id: number }>
+  | Tagged<"Shockwave", { source: number }>;
 
 export type S2C =
   | Tagged<"AuthResult", { ok: boolean; error: string | null }>
@@ -238,6 +250,10 @@ export type S2C =
   | Tagged<
       "XpUpdate",
       { xp: number; level: number; next_level_xp: number; gained: number }
+    >
+  | Tagged<
+      "AbilityUpdate",
+      { ability: AbilityKind; cooldown: number; active: number }
     >
   | Tagged<"Died", { by: string | null; lost_items: boolean }>
   | Tagged<"ExtractStart", { seconds: number }>

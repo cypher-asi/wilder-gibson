@@ -13,7 +13,11 @@ use std::time::Duration;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use tokio::sync::{mpsc, oneshot};
-use wilder_combat::{armor_multiplier, weapon_stats, FIST};
+use wilder_combat::{
+    ability_stats, armor_multiplier, armor_shield, weapon_stats, FIST, OVERCHARGE_MULT,
+    SHIELD_REGEN_DELAY, SHIELD_REGEN_RATE, SHOCKWAVE_DAMAGE, SHOCKWAVE_KNOCKBACK,
+    SHOCKWAVE_RADIUS, STIM_HEAL, STIM_SPEED_DURATION, STIM_SPEED_MULT,
+};
 use wilder_inventory as inv;
 use wilder_pathfinding::find_path;
 use wilder_persistence::{CharacterStore, RocksStore, Stash, WorldStore};
@@ -170,6 +174,15 @@ struct Player {
     roll_time: f32,
     roll_dir: (f32, f32),
     roll_cooldown: f32,
+    /// Seconds until shield regen resumes (reset on damage taken).
+    shield_delay: f32,
+    /// Ability cooldowns, indexed by `AbilityKind::index()`.
+    ability_cooldowns: [f32; 3],
+    /// Stim: healing left to apply + speed boost seconds left.
+    stim_heal_left: f32,
+    stim_speed_time: f32,
+    /// Overcharge: weapon damage multiplier seconds left.
+    overcharge_time: f32,
     /// Active extraction channel: (extraction point entity, seconds left).
     extracting: Option<(EntityId, f32)>,
     /// Known blueprint recipe ids.
@@ -235,7 +248,19 @@ impl Player {
             } else {
                 1.0
             },
+            shield_pct: if self.character.max_shield > 0.0 {
+                (self.character.shield / self.character.max_shield).max(0.0)
+            } else {
+                0.0
+            },
         }
+    }
+
+    /// Recompute shield capacity from equipped armor and clamp the current
+    /// value. Called on join and whenever armor changes.
+    fn sync_shield(&mut self) {
+        self.character.max_shield = armor_shield(self.inventory.equipped_armor);
+        self.character.shield = self.character.shield.clamp(0.0, self.character.max_shield);
     }
 
     fn spawn_data(&self) -> EntitySpawnData {
@@ -433,7 +458,7 @@ impl World {
             character.position = SPAWN;
         }
 
-        let player = Player {
+        let mut player = Player {
             entity,
             character,
             inventory,
@@ -452,12 +477,20 @@ impl World {
             roll_time: 0.0,
             roll_dir: (1.0, 0.0),
             roll_cooldown: 0.0,
+            shield_delay: 0.0,
+            ability_cooldowns: [0.0; 3],
+            stim_heal_left: 0.0,
+            stim_speed_time: 0.0,
+            overcharge_time: 0.0,
             extracting: None,
             blueprints,
             production: HashMap::new(),
             wallet,
             dirty: true,
         };
+        player.sync_shield();
+        // Spawn in with a full shield (capacity comes from equipped armor).
+        player.character.shield = player.character.max_shield;
 
         let _ = tx.send(S2C::WorldJoined {
             entity_id: entity,
@@ -476,6 +509,9 @@ impl World {
         let _ = tx.send(S2C::BlueprintsUpdate {
             known: player.blueprints.iter().cloned().collect(),
         });
+        for ability in AbilityKind::ALL {
+            let _ = tx.send(S2C::AbilityUpdate { ability, cooldown: 0.0, active: 0.0 });
+        }
 
         self.players.insert(entity, player);
         tracing::info!(entity, "player joined");
@@ -562,6 +598,7 @@ impl World {
                 }
             }
             C2S::Attack { seq, tx, tz } => self.player_attack(entity, seq, tx, tz),
+            C2S::UseAbility { seq, ability } => self.use_ability(entity, seq, ability),
             C2S::Interact { entity_id } => self.interact(entity, entity_id),
             C2S::UseItem { slot } => self.use_item(entity, slot),
             C2S::InventoryAction(action) => self.inventory_action(entity, action),
@@ -633,6 +670,7 @@ impl World {
             }
             ["heal"] => {
                 player.character.health = player.character.max_health;
+                player.character.shield = player.character.max_shield;
             }
             ["tp", x, z] => {
                 if let (Ok(x), Ok(z)) = (x.parse::<f32>(), z.parse::<f32>()) {
@@ -675,6 +713,8 @@ impl World {
 
         player.attack_cooldown = stats.cooldown;
         player.attacked_this_tick = true;
+        let damage_mult = if player.overcharge_time > 0.0 { OVERCHARGE_MULT } else { 1.0 };
+        let attack_damage = stats.damage * damage_mult;
         let origin = player.character.position;
         let mut dir = Vec3::new(tx - origin.x, 0.0, tz - origin.z);
         if dir.length_squared() < 1e-6 {
@@ -695,7 +735,7 @@ impl World {
                 let p = origin + dir * t;
                 for npc in self.npcs.values() {
                     if npc.alive() && (npc.position - p).length() < 0.9 {
-                        hit = Some((npc.entity, stats.damage));
+                        hit = Some((npc.entity, attack_damage));
                         break 'ray;
                     }
                 }
@@ -720,7 +760,7 @@ impl World {
                     }
                 }
             }
-            hit = best.map(|(id, _)| (id, stats.damage));
+            hit = best.map(|(id, _)| (id, attack_damage));
         }
 
         let attacker = entity;
@@ -734,6 +774,70 @@ impl World {
             None => {
                 self.broadcast_combat(CombatEvent::Miss { attacker });
             }
+        }
+    }
+
+    fn use_ability(&mut self, entity: EntityId, seq: u32, ability: AbilityKind) {
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.last_input_seq = player.last_input_seq.max(seq);
+        if player.character.health <= 0.0 {
+            return;
+        }
+        let idx = ability.index();
+        if player.ability_cooldowns[idx] > 0.0 {
+            return;
+        }
+        let stats = ability_stats(ability);
+        player.ability_cooldowns[idx] = stats.cooldown;
+        let origin = player.character.position;
+
+        match ability {
+            AbilityKind::Shockwave => {
+                self.broadcast_combat(CombatEvent::Shockwave { source: entity });
+                // Knock nearby NPCs back, then apply damage.
+                let mut targets: Vec<EntityId> = Vec::new();
+                for npc in self.npcs.values_mut() {
+                    if !npc.alive() {
+                        continue;
+                    }
+                    let to = npc.position - origin;
+                    if to.length() > SHOCKWAVE_RADIUS {
+                        continue;
+                    }
+                    let dir = if to.length_squared() > 1e-6 {
+                        to.normalize()
+                    } else {
+                        Vec3::new(1.0, 0.0, 0.0)
+                    };
+                    npc.position = step_move_speed(
+                        &self.chunks,
+                        npc.position,
+                        dir.x,
+                        dir.z,
+                        SHOCKWAVE_KNOCKBACK,
+                        1.0,
+                    );
+                    targets.push(npc.entity);
+                }
+                for target in targets {
+                    self.damage_npc(entity, target, SHOCKWAVE_DAMAGE);
+                }
+            }
+            AbilityKind::Stim => {
+                player.stim_heal_left = STIM_HEAL;
+                player.stim_speed_time = STIM_SPEED_DURATION;
+            }
+            AbilityKind::Overcharge => {
+                player.overcharge_time = stats.duration;
+            }
+        }
+
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::AbilityUpdate {
+                ability,
+                cooldown: stats.cooldown,
+                active: stats.duration,
+            });
         }
     }
 
@@ -1409,6 +1513,7 @@ impl World {
                 let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
             }
         }
+        player.sync_shield();
         player.dirty = true;
         let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
     }
@@ -1453,6 +1558,11 @@ impl World {
                 continue;
             }
             player.roll_cooldown = (player.roll_cooldown - TICK_DT).max(0.0);
+            for cd in player.ability_cooldowns.iter_mut() {
+                *cd = (*cd - TICK_DT).max(0.0);
+            }
+            player.stim_speed_time = (player.stim_speed_time - TICK_DT).max(0.0);
+            player.overcharge_time = (player.overcharge_time - TICK_DT).max(0.0);
             let before = player.character.position;
 
             if player.roll_time > 0.0 {
@@ -1474,16 +1584,18 @@ impl World {
                 }
             }
 
+            let speed_mult = if player.stim_speed_time > 0.0 { STIM_SPEED_MULT } else { 1.0 };
             let inputs = std::mem::take(&mut player.pending_inputs);
             for (seq, dx, dz, run, dt) in inputs {
                 player.last_input_seq = player.last_input_seq.max(seq);
-                let speed = if player.crouching {
-                    CROUCH_SPEED
-                } else if run {
-                    RUN_SPEED
-                } else {
-                    wilder_physics::WALK_SPEED
-                };
+                let speed = speed_mult
+                    * if player.crouching {
+                        CROUCH_SPEED
+                    } else if run {
+                        RUN_SPEED
+                    } else {
+                        wilder_physics::WALK_SPEED
+                    };
                 let next =
                     step_move_speed(&self.chunks, player.character.position, dx, dz, speed, dt);
                 player.character.position = next;
@@ -1557,6 +1669,7 @@ impl World {
             // Return to the hub.
             player.character.position = SPAWN;
             player.character.health = player.character.max_health;
+            player.character.shield = player.character.max_shield;
             player.path.clear();
             player.dirty = true;
             let _ = player.tx.send(S2C::ExtractResult { success: true, banked });
@@ -1612,7 +1725,11 @@ impl World {
         }
         let mult = armor_multiplier(player.inventory.equipped_armor);
         let dealt = damage * mult;
-        player.character.health -= dealt;
+        // Shield absorbs first; the remainder hits health.
+        let absorbed = dealt.min(player.character.shield);
+        player.character.shield -= absorbed;
+        player.character.health -= dealt - absorbed;
+        player.shield_delay = SHIELD_REGEN_DELAY;
         self.broadcast_combat(CombatEvent::Hit { attacker, target, damage: dealt });
 
         if self.players[&target].character.health <= 0.0 {
@@ -1640,6 +1757,7 @@ impl World {
         player.extracting = None;
         player.path.clear();
         player.character.health = player.character.max_health;
+        player.character.shield = player.character.max_shield;
         player.character.position = SPAWN;
         player.dirty = true;
         let lost = !dropped.is_empty();
@@ -1683,6 +1801,22 @@ impl World {
             if is_safe_chunk(coord) && player.character.health < player.character.max_health {
                 player.character.health =
                     (player.character.health + 2.0 * TICK_DT).min(player.character.max_health);
+            }
+            // Shield regen after a delay without taking damage.
+            player.shield_delay = (player.shield_delay - TICK_DT).max(0.0);
+            if player.shield_delay <= 0.0 && player.character.shield < player.character.max_shield
+            {
+                player.character.shield = (player.character.shield
+                    + SHIELD_REGEN_RATE * TICK_DT)
+                    .min(player.character.max_shield);
+            }
+            // Stim heal-over-time.
+            if player.stim_heal_left > 0.0 && player.character.health > 0.0 {
+                let rate = STIM_HEAL / ability_stats(AbilityKind::Stim).duration;
+                let heal = (rate * TICK_DT).min(player.stim_heal_left);
+                player.stim_heal_left -= heal;
+                player.character.health =
+                    (player.character.health + heal).min(player.character.max_health);
             }
         }
     }
@@ -1868,6 +2002,7 @@ impl World {
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: 1.0,
+                    shield_pct: 0.0,
                 },
             });
         }
@@ -1897,6 +2032,7 @@ impl World {
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: health,
+                    shield_pct: 0.0,
                 },
             });
         }
@@ -1921,6 +2057,7 @@ impl World {
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: 1.0,
+                    shield_pct: 0.0,
                 },
             });
         }

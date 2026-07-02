@@ -17,12 +17,12 @@ import { game } from "../state/game";
 export const cameraState = {
   yaw: Math.PI / 4,
   distance: 48,
-  minDistance: 20,
+  minDistance: 5,
   maxDistance: 140,
 };
 
 /** Fog density at the default zoom; thinned as the camera pulls back. */
-const FOG_BASE_DENSITY = 0.016;
+const FOG_BASE_DENSITY = 0.0045;
 const FOG_BASE_DISTANCE = 48;
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
@@ -52,9 +52,10 @@ export function CameraRig() {
       );
     };
     const onContext = (event: MouseEvent) => event.preventDefault();
+    // Z/X rotate the camera (Q/E belong to the ability hotbar).
     const onKey = (event: KeyboardEvent, down: boolean) => {
-      if (event.code === "KeyQ") keys.current.q = down;
-      if (event.code === "KeyE") keys.current.e = down;
+      if (event.code === "KeyZ") keys.current.q = down;
+      if (event.code === "KeyX") keys.current.e = down;
     };
     const onKeyDown = (e: KeyboardEvent) => onKey(e, true);
     const onKeyUp = (e: KeyboardEvent) => onKey(e, false);
