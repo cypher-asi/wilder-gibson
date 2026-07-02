@@ -94,7 +94,16 @@ export type EntityKind =
   | "Laboratory"
   | "MarketTerminal";
 
-export type AnimState = "Idle" | "Walk" | "Run" | "Attack" | "Death" | "Gather";
+export type AnimState =
+  | "Idle"
+  | "Walk"
+  | "Run"
+  | "Attack"
+  | "Death"
+  | "Gather"
+  | "Roll"
+  | "Crouch"
+  | "CrouchWalk";
 
 export interface EntitySnapshot {
   id: number;
@@ -167,6 +176,8 @@ export type C2S =
   | Tagged<"MoveInput", { seq: number; dx: number; dz: number; run: boolean }>
   | Tagged<"MoveTo", { seq: number; x: number; z: number }>
   | Tagged<"StopMove", { seq: number }>
+  | Tagged<"Roll", { seq: number; dx: number; dz: number }>
+  | Tagged<"SetCrouch", { on: boolean }>
   | Tagged<"Interact", { entity_id: number }>
   | Tagged<"InventoryAction", InventoryActionMsg>
   | Tagged<"Attack", { seq: number; tx: number; tz: number }>

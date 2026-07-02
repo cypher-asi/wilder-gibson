@@ -49,7 +49,8 @@ export interface PendingInput {
   seq: number;
   dx: number;
   dz: number;
-  run: boolean;
+  /** Speed used for local prediction (run/walk/crouch), for replay. */
+  speed: number;
   dt: number;
 }
 
@@ -84,6 +85,14 @@ export const game = {
   moveMarker: null as { x: number; z: number; at: number } | null,
   /** Mouse aim: cursor projected onto the ground plane (twin-stick facing). */
   aim: { x: 0, z: 0, yaw: 0, active: false },
+  /** Crouch toggle (mirrored to the server via SetCrouch). */
+  crouching: false,
+  /** Active dodge roll (local prediction; matches the server dash). */
+  roll: null as { until: number; dx: number; dz: number } | null,
+  /** ms timestamp when the next roll is allowed. */
+  rollReadyAt: 0,
+  /** Gun draw state: LMB draws first, then shoots; auto-holsters when idle. */
+  gun: { drawn: false, readyAt: 0, lastShotAt: 0 },
   /** Pending combat FX events (drained each frame by CombatFx). */
   fx: [] as CombatFxEvent[],
   /** Active connection sender (set by GameConnection.connect). */
@@ -97,6 +106,10 @@ export const game = {
     this.nextSeq = 1;
     this.moveMarker = null;
     this.aim.active = false;
+    this.crouching = false;
+    this.roll = null;
+    this.rollReadyAt = 0;
+    this.gun = { drawn: false, readyAt: 0, lastShotAt: 0 };
     this.fx = [];
     // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },

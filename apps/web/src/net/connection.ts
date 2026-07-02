@@ -310,7 +310,15 @@ export class GameConnection {
     let x = serverX;
     let z = serverZ;
     for (const input of game.pendingInputs) {
-      const [nx, nz] = stepReplay(x, z, input.dx, input.dz, input.run, input.dt);
+      const [nx, nz] = stepMoveSpeed(
+        game.chunks,
+        x,
+        z,
+        input.dx,
+        input.dz,
+        input.speed,
+        input.dt,
+      );
       x = nx;
       z = nz;
     }
@@ -328,15 +336,4 @@ export class GameConnection {
   }
 }
 
-import { stepMove } from "../game/collision";
-
-function stepReplay(
-  x: number,
-  z: number,
-  dx: number,
-  dz: number,
-  run: boolean,
-  dt: number,
-): [number, number] {
-  return stepMove(game.chunks, x, z, dx, dz, run, dt);
-}
+import { stepMoveSpeed } from "../game/collision";

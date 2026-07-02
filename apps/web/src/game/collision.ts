@@ -10,7 +10,13 @@ import {
 
 export const WALK_SPEED = 3.0;
 export const RUN_SPEED = 6.0;
+export const CROUCH_SPEED = 1.6;
 export const PLAYER_RADIUS = 0.4;
+
+// Dodge roll dash (mirrors wilder-physics).
+export const ROLL_SPEED = 7.5;
+export const ROLL_DURATION = 0.5;
+export const ROLL_COOLDOWN = 0.9;
 
 export function chunkKey(x: number, z: number): string {
   return `${x},${z}`;
@@ -78,9 +84,21 @@ export function stepMove(
   run: boolean,
   dt: number,
 ): [number, number] {
+  return stepMoveSpeed(store, px, pz, dx, dz, run ? RUN_SPEED : WALK_SPEED, dt);
+}
+
+/** Mirror of wilder_physics::step_move_speed (crouch, roll dash). */
+export function stepMoveSpeed(
+  store: ChunkStore,
+  px: number,
+  pz: number,
+  dx: number,
+  dz: number,
+  speed: number,
+  dt: number,
+): [number, number] {
   const len = Math.hypot(dx, dz);
   if (len < 1e-5 || dt <= 0) return [px, pz];
-  const speed = run ? RUN_SPEED : WALK_SPEED;
   const clamped = Math.min(dt, 0.25);
   const step = (speed * clamped) / len;
   const mx = dx * step;
