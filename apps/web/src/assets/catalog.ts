@@ -101,6 +101,26 @@ export function useAssetModel(id: string | undefined): LoadedModel | null {
   return model;
 }
 
+/**
+ * Load a manifest model and return the shared (uncloned) instance. For
+ * instanced rendering that only reads geometry/materials: callers must not
+ * mutate the scene or add it to the graph.
+ */
+export function useSharedModel(id: string | undefined): LoadedModel | null {
+  const [model, setModel] = useState<LoadedModel | null>(null);
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    getModel(id).then((loaded) => {
+      if (alive && loaded) setModel(loaded);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  return model;
+}
+
 // ---------------------------------------------------------------------------
 // PBR texture sets (assets/textures/<name>/{color,normal,roughness}.jpg)
 // ---------------------------------------------------------------------------

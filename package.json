@@ -9,7 +9,8 @@
     "build": "npm run build -w apps/web",
     "lab": "node tools/asset-lab/server.mjs",
     "lab:extract": "node tools/asset-lab/extract.mjs",
-    "lab:import": "node tools/asset-lab/import.mjs"
+    "lab:import": "node tools/asset-lab/import.mjs",
+    "lab:batch": "node tools/asset-lab/batch.mjs"
   },
   "devDependencies": {
     "@gltf-transform/core": "^4.4.1",
