@@ -174,7 +174,14 @@ export const PROP_MODELS: Record<number, string> = {
 };
 
 /** Car archetype rotates between model variants for street variety. */
-export const CAR_MODELS = ["prop_car_sedan", "prop_car_hatchback", "prop_car_taxi"];
+export const CAR_MODELS = [
+  "prop_car_sedan",
+  "prop_car_hatchback",
+  "prop_car_taxi",
+  "prop_car_stationwagon",
+  "prop_car_sedan",
+  "prop_car_police",
+];
 
 export const CHARACTER_MODEL = "character_main";
 

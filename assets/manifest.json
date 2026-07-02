@@ -8,6 +8,8 @@
   { "id": "prop_car_sedan", "path": "models/car_sedan.gltf", "type": "model", "license": "CC0 KayKit" },
   { "id": "prop_car_hatchback", "path": "models/car_hatchback.gltf", "type": "model", "license": "CC0 KayKit" },
   { "id": "prop_car_taxi", "path": "models/car_taxi.gltf", "type": "model", "license": "CC0 KayKit" },
+  { "id": "prop_car_police", "path": "models/car_police.gltf", "type": "model", "license": "CC0 KayKit" },
+  { "id": "prop_car_stationwagon", "path": "models/car_stationwagon.gltf", "type": "model", "license": "CC0 KayKit" },
   { "id": "prop_trafficlight", "path": "models/trafficlight_A.gltf", "type": "model", "license": "CC0 KayKit" },
   { "id": "prop_watertower", "path": "models/watertower.gltf", "type": "model", "license": "CC0 KayKit" },
   { "id": "prop_box", "path": "models/box_A.gltf", "type": "model", "license": "CC0 KayKit" },
