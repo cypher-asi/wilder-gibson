@@ -1,7 +1,8 @@
 // Street props. Each archetype renders a real GLB from the asset manifest
 // when available, with a procedural stand-in otherwise (useAsset handles it).
 
-import { useMemo } from "react";
+import { useFrame } from "@react-three/fiber";
+import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { ChunkData, PropInstance } from "../net/protocol";
 import { CAR_MODELS, PROP_MODELS, useAssetModel } from "../assets/catalog";
@@ -45,8 +46,8 @@ function Streetlight() {
       </mesh>
       {/* Fake light pool on the ground. */}
       <mesh position={[1.1, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <circleGeometry args={[1.8, 20]} />
-        <meshBasicMaterial color="#7a6038" transparent opacity={0.07} depthWrite={false} />
+        <circleGeometry args={[2.2, 20]} />
+        <meshBasicMaterial color="#8a6c40" transparent opacity={0.13} depthWrite={false} />
       </mesh>
     </group>
   );
@@ -153,6 +154,45 @@ function Tree() {
   );
 }
 
+/**
+ * Flickering neon sign plane: mostly steady, with per-seed random dropouts
+ * and buzz so streets feel alive.
+ */
+export function NeonPlane({
+  color,
+  width,
+  height,
+  seed,
+}: {
+  color: string;
+  width: number;
+  height: number;
+  seed: number;
+}) {
+  const mat = useRef<THREE.MeshStandardMaterial>(null);
+  const phase = useMemo(() => (seed % 97) * 0.37, [seed]);
+  useFrame(({ clock }) => {
+    if (!mat.current) return;
+    const t = clock.elapsedTime + phase;
+    // Occasional dropout window (~5% of the time) plus a subtle 50Hz-ish buzz.
+    const dropout = Math.sin(t * 0.7 + phase * 13) > 0.97 ? 0.15 : 1;
+    const buzz = 0.92 + 0.08 * Math.sin(t * 37);
+    mat.current.emissiveIntensity = 2.8 * dropout * buzz;
+  });
+  return (
+    <mesh>
+      <planeGeometry args={[width, height]} />
+      <meshStandardMaterial
+        ref={mat}
+        color={color}
+        emissive={color}
+        emissiveIntensity={2.8}
+        side={THREE.DoubleSide}
+      />
+    </mesh>
+  );
+}
+
 function Kiosk({ seed }: { seed: number }) {
   const neon = useMemo(() => {
     const rng = mulberry(seed);
@@ -163,10 +203,48 @@ function Kiosk({ seed }: { seed: number }) {
       <mesh material={darkMetal} position={[0, 1.1, 0]} castShadow>
         <boxGeometry args={[1.8, 2.2, 1.4]} />
       </mesh>
-      <mesh position={[0, 2.0, 0.71]}>
-        <planeGeometry args={[1.5, 0.35]} />
-        <meshStandardMaterial color={neon} emissive={neon} emissiveIntensity={2.8} />
-      </mesh>
+      <group position={[0, 2.0, 0.71]}>
+        <NeonPlane color={neon} width={1.5} height={0.35} seed={seed} />
+      </group>
+    </group>
+  );
+}
+
+const STEAM_SPRITES = 5;
+const steamMaterial = new THREE.MeshBasicMaterial({
+  color: "#9aa7b8",
+  transparent: true,
+  opacity: 0.16,
+  depthWrite: false,
+});
+
+/** Slow steam puffs rising from a street vent. */
+function Steam({ seed }: { seed: number }) {
+  const group = useRef<THREE.Group>(null);
+  const offsets = useMemo(() => {
+    const rng = mulberry(seed);
+    return Array.from({ length: STEAM_SPRITES }, () => rng() * 4);
+  }, [seed]);
+  useFrame(({ camera, clock }) => {
+    const g = group.current;
+    if (!g) return;
+    for (let i = 0; i < g.children.length; i++) {
+      const puff = g.children[i] as THREE.Mesh;
+      const life = ((clock.elapsedTime * 0.45 + offsets[i]) % 4) / 4; // 0..1
+      puff.position.y = 0.3 + life * 2.6;
+      const s = 0.4 + life * 1.1;
+      puff.scale.setScalar(s);
+      (puff.material as THREE.MeshBasicMaterial).opacity = 0.18 * (1 - life);
+      puff.quaternion.copy(camera.quaternion); // billboard
+    }
+  });
+  return (
+    <group ref={group}>
+      {offsets.map((_, i) => (
+        <mesh key={i} material={steamMaterial.clone()}>
+          <planeGeometry args={[1, 1]} />
+        </mesh>
+      ))}
     </group>
   );
 }
@@ -263,6 +341,7 @@ export function PropMesh({ prop }: { prop: PropInstance; chunk?: ChunkData }) {
       ) : (
         <Fallback prop={prop} />
       )}
+      {prop.archetype === VENT && <Steam seed={Math.floor(prop.x * 11 + prop.z * 23)} />}
     </group>
   );
 }

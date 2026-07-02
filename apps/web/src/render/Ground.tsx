@@ -6,14 +6,16 @@ import { useMemo } from "react";
 import * as THREE from "three";
 import { ChunkData, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 
+// Albedos picked for night readability: near-black sRGB values disappear in
+// linear space, so streets sit in the #2b-#4a range and let lights do the mood.
 const TILE_COLORS: Record<string, THREE.Color> = {
-  Road: new THREE.Color("#17181d"),
-  RoadLine: new THREE.Color("#3a3a30"),
-  Sidewalk: new THREE.Color("#26282e"),
-  Plaza: new THREE.Color("#202227"),
-  Building: new THREE.Color("#101114"),
-  Park: new THREE.Color("#15231a"),
-  Water: new THREE.Color("#0a1420"),
+  Road: new THREE.Color("#2b2d35"),
+  RoadLine: new THREE.Color("#5a5a4a"),
+  Sidewalk: new THREE.Color("#43464f"),
+  Plaza: new THREE.Color("#383b43"),
+  Building: new THREE.Color("#1c1e24"),
+  Park: new THREE.Color("#22392a"),
+  Water: new THREE.Color("#12202e"),
 };
 
 function buildGroundGeometry(chunk: ChunkData): THREE.BufferGeometry {
