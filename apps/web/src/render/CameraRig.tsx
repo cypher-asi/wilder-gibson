@@ -1,6 +1,10 @@
 // Ascent-style follow camera: fixed high pitch, pulled back so the character
 // stays small against the environment. The mouse is reserved for aiming, so
-// the camera yaw only changes with Q/E; wheel zooms within a tight band.
+// the resting camera only changes with Q/E (yaw) and wheel (zoom).
+// Holding right-click and dragging orbits the view: horizontal drag rotates
+// around the player, vertical drag tilts up/down. On release the camera
+// eases back to the fixed framing. (A quick RMB tap without dragging is
+// still click-to-move, handled in PlayerInput.)
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -12,15 +16,25 @@ export const cameraState = {
   distance: 34,
   minDistance: 20,
   maxDistance: 48,
+  /** Temporary RMB-drag orbit offset, eases back to 0 on release. */
+  yawOffset: 0,
 };
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
 const PITCH_FAR = THREE.MathUtils.degToRad(62);
+/** Total pitch band while RMB-dragging. */
+const PITCH_MIN = THREE.MathUtils.degToRad(28);
+const PITCH_MAX = THREE.MathUtils.degToRad(80);
+/** How fast the drag offsets ease back once RMB is released. */
+const RETURN_RATE = 4;
 
 export function CameraRig() {
   const { camera, gl } = useThree();
   const target = useRef(new THREE.Vector3());
   const keys = useRef({ q: false, e: false });
+  const pitchOffset = useRef(0);
+  const dragging = useRef(false);
+  const lastPointer = useRef({ x: 0, y: 0 });
 
   useEffect(() => {
     const canvas = gl.domElement;
@@ -41,13 +55,50 @@ export function CameraRig() {
     const onKeyDown = (e: KeyboardEvent) => onKey(e, true);
     const onKeyUp = (e: KeyboardEvent) => onKey(e, false);
 
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button === 2) {
+        dragging.current = true;
+        lastPointer.current = { x: event.clientX, y: event.clientY };
+      }
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragging.current) return;
+      const dx = event.clientX - lastPointer.current.x;
+      const dy = event.clientY - lastPointer.current.y;
+      lastPointer.current = { x: event.clientX, y: event.clientY };
+      // Horizontal drag orbits around the player.
+      cameraState.yawOffset += dx * 0.005;
+      // Vertical drag tilts; clamp so the total pitch stays in the band.
+      const zoomFrac =
+        (cameraState.distance - cameraState.minDistance) /
+        (cameraState.maxDistance - cameraState.minDistance);
+      const basePitch = THREE.MathUtils.lerp(PITCH_NEAR, PITCH_FAR, zoomFrac);
+      pitchOffset.current = THREE.MathUtils.clamp(
+        pitchOffset.current + dy * 0.005,
+        PITCH_MIN - basePitch,
+        PITCH_MAX - basePitch,
+      );
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.button === 2) dragging.current = false;
+    };
+    const onBlur = () => (dragging.current = false);
+
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("contextmenu", onContext);
+    canvas.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("blur", onBlur);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     return () => {
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("contextmenu", onContext);
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
@@ -56,6 +107,13 @@ export function CameraRig() {
   useFrame((_, dt) => {
     if (keys.current.q) cameraState.yaw += dt * 1.8;
     if (keys.current.e) cameraState.yaw -= dt * 1.8;
+
+    // Once the drag ends, ease the orbit offsets back to the fixed framing.
+    if (!dragging.current) {
+      const decay = Math.max(0, 1 - dt * RETURN_RATE);
+      cameraState.yawOffset *= decay;
+      pitchOffset.current *= decay;
+    }
 
     const player = game.entities.get(game.localEntityId);
     const tx = player ? player.x : game.predicted.x;
@@ -73,14 +131,20 @@ export function CameraRig() {
     const zoomFrac =
       (cameraState.distance - cameraState.minDistance) /
       (cameraState.maxDistance - cameraState.minDistance);
-    const pitch = THREE.MathUtils.lerp(PITCH_NEAR, PITCH_FAR, zoomFrac);
+    const basePitch = THREE.MathUtils.lerp(PITCH_NEAR, PITCH_FAR, zoomFrac);
+    const pitch = THREE.MathUtils.clamp(
+      basePitch + pitchOffset.current,
+      PITCH_MIN,
+      PITCH_MAX,
+    );
+    const yaw = cameraState.yaw + cameraState.yawOffset;
 
     const horizontal = Math.cos(pitch) * cameraState.distance;
     const height = Math.sin(pitch) * cameraState.distance;
     camera.position.set(
-      target.current.x + Math.cos(cameraState.yaw) * horizontal,
+      target.current.x + Math.cos(yaw) * horizontal,
       height,
-      target.current.z + Math.sin(cameraState.yaw) * horizontal,
+      target.current.z + Math.sin(yaw) * horizontal,
     );
     camera.lookAt(target.current.x, 1.2, target.current.z);
   });

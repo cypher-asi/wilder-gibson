@@ -26,8 +26,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ExtractionBar />
           <ExtractHint />
           <div className="hud-hint">
-            WASD move · MOUSE aim · LMB shoot · RMB move · Q/E rotate · I inventory ·
-            ENTER chat
+            WASD move · MOUSE aim · LMB shoot · RMB move / drag look · Q/E rotate ·
+            I inventory · ENTER chat
           </div>
           <WeaponHud />
           <Chat lines={chat} connection={connection} />

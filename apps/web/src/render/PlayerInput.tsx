@@ -163,8 +163,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
 
     const run = !k.ShiftLeft && !k.ShiftRight; // run by default, shift walks
 
-    // Camera-relative: forward = away from camera on XZ.
-    const yaw = cameraState.yaw;
+    // Camera-relative: forward = away from camera on XZ (including any
+    // temporary RMB-drag orbit so controls match what's on screen).
+    const yaw = cameraState.yaw + cameraState.yawOffset;
     const fx = -Math.cos(yaw);
     const fz = -Math.sin(yaw);
     const rx = -fz;
