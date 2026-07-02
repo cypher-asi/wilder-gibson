@@ -5,6 +5,7 @@
 import { useMemo } from "react";
 import { CHUNK_SIZE, ChunkData } from "../net/protocol";
 import { game, useGame } from "../state/game";
+import { collectBuildingKit } from "./building";
 import { Building } from "./Buildings";
 import { ChunkGround } from "./Ground";
 import { InstancedKit } from "./InstancedKit";
@@ -34,11 +35,11 @@ export function Chunks() {
   // chunkVersion bumps whenever the streamed set changes.
   const chunkVersion = useGame((s) => s.chunkVersion);
   const chunks = [...game.chunks.chunks.values()];
-  const kitEntries = useMemo(
-    () => collectInstancedProps([...game.chunks.chunks.values()]),
+  const kitEntries = useMemo(() => {
+    const all = [...game.chunks.chunks.values()];
+    return [...collectInstancedProps(all), ...collectBuildingKit(all)];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chunkVersion],
-  );
+  }, [chunkVersion]);
   return (
     <>
       {chunks.map((chunk) => (

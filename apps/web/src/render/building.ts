@@ -5,8 +5,12 @@
 
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { BuildingInstance, TILE_SIZE } from "../net/protocol";
+import { BuildingInstance, CHUNK_SIZE, ChunkData, TILE_SIZE } from "../net/protocol";
 import { mulberry, NEON_COLORS } from "./facade";
+import { KitEntry } from "./InstancedKit";
+
+/** Sidewalk/building tiles are raised; buildings sit on top of them. */
+export const GROUND_Y = 0.14;
 
 export interface WaterTowerPlacement {
   x: number;
@@ -15,10 +19,22 @@ export interface WaterTowerPlacement {
   ry: number;
 }
 
+/** A kit asset placed in building-local space (y=0 at the building base). */
+export interface KitLocalPlacement {
+  assetId: string;
+  x: number;
+  y: number;
+  z: number;
+  ry: number;
+  scale?: number;
+}
+
 export interface BuildingModel {
   /** material key -> merged geometry, in building-local space (y=0 at base). */
   geoms: [string, THREE.BufferGeometry][];
   waterTower: WaterTowerPlacement | null;
+  /** Kit dressing (AC units, billboards) rendered through InstancedKit. */
+  kit: KitLocalPlacement[];
   /** Building center in chunk-local coordinates. */
   x: number;
   z: number;
@@ -199,6 +215,39 @@ function facePlane(
   }
 }
 
+/**
+ * Kit asset mounted on a face, front facing outward (kit models front +Z).
+ * `along` is the tangent offset, `y` the model bottom, `out` the distance
+ * from the wall plane.
+ */
+function facePlacement(
+  f: Face,
+  assetId: string,
+  along: number,
+  y: number,
+  out: number,
+  scale?: number,
+): KitLocalPlacement {
+  if (f.axis === "z") {
+    return {
+      assetId,
+      x: f.center + along,
+      y,
+      z: f.wall + f.sign * out,
+      ry: f.sign > 0 ? 0 : Math.PI,
+      scale,
+    };
+  }
+  return {
+    assetId,
+    x: f.wall + f.sign * out,
+    y,
+    z: f.center + along,
+    ry: f.sign > 0 ? Math.PI / 2 : -Math.PI / 2,
+    scale,
+  };
+}
+
 /** Vertical cylinder on a face. */
 function faceCyl(
   p: Parts,
@@ -352,7 +401,13 @@ function addAwning(p: Parts, f: Face, rng: () => number, a: number, bw: number):
 // Service faces (alley sides): shutters/doors, AC units, conduit
 // ---------------------------------------------------------------------------
 
-function buildServiceFace(p: Parts, f: Face, rng: () => number, height: number): void {
+function buildServiceFace(
+  p: Parts,
+  kit: KitLocalPlacement[],
+  f: Face,
+  rng: () => number,
+  height: number,
+): void {
   const len = f.len;
   // Ground level: a service door and sometimes a shutter.
   const doorA = (rng() - 0.5) * (len - 2.5);
@@ -367,13 +422,15 @@ function buildServiceFace(p: Parts, f: Face, rng: () => number, height: number):
     rng();
   }
 
-  // Wall AC units on the upper facade.
+  // Wall AC units on the upper facade: kit models, wall-mounted on a small
+  // bracket shelf, scaled down from the floor-standing source (~0.9 m tall).
   const acCount = 1 + Math.floor(rng() * 3);
   for (let i = 0; i < acCount; i++) {
     const a = (rng() - 0.5) * (len - 1.6);
     const y = 5.2 + rng() * Math.max(0.5, height - 6.6);
-    faceBox(p, f, "metal", 0.58, 0.44, 0.32, a, y, 0.17);
-    facePlane(p, f, "grill", 0.46, 0.33, a, y, 0.335);
+    const scale = 0.55 + rng() * 0.15;
+    kit.push(facePlacement(f, KIT_AC[i % KIT_AC.length], a, y - 0.25, 0.02 + 0.25 * scale, scale));
+    faceBox(p, f, "metalDark", 0.75 * scale + 0.1, 0.05, 0.5, a, y - 0.27, 0.25);
   }
 
   // Vertical conduit / drain pipes.
@@ -388,8 +445,22 @@ function buildServiceFace(p: Parts, f: Face, rng: () => number, height: number):
 // Roof dressing
 // ---------------------------------------------------------------------------
 
+/** Kit AC units used for rooftop HVAC and wall-mounted units. */
+const KIT_AC = ["lab_sm_ac01", "lab_sm_ac02", "lab_sm_aircon"];
+
+/**
+ * Facade signage: 3D neon lettering signs mounted flat on the upper wall
+ * (kit dims width/height/thickness; the flat billboard frames in the kit have
+ * no screens, so only the lettering pieces are used).
+ */
+const KIT_BILLBOARDS = [
+  { assetId: "lab_sm_3dbillboard03", w: 2.9, h: 1.3, t: 0.1, ryOffset: 0 },
+  { assetId: "lab_sm_3dbillboard01", w: 6.3, h: 2.5, t: 0.25, ryOffset: 0 },
+];
+
 function buildRoof(
   p: Parts,
+  kit: KitLocalPlacement[],
   rng: () => number,
   w: number,
   d: number,
@@ -436,17 +507,15 @@ function buildRoof(
     };
   }
 
-  // HVAC units with fan circles.
+  // HVAC: kit AC units instead of procedural boxes-with-fan-circles.
   const hvacCount = 1 + Math.floor(rng() * 4);
   for (let i = 0; i < hvacCount; i++) {
     const [ax, az] = anchor();
-    const s = 1.0 + rng() * 1.0;
-    const h = 0.7 + rng() * 0.5;
-    const bx = THREE.MathUtils.clamp(ax, -(hx - s / 2), hx - s / 2);
-    const bz = THREE.MathUtils.clamp(az, -(hz - s / 2), hz - s / 2);
-    p.box("metal", s, h, s * 0.82, bx, deckTop + h / 2, bz, 0, rng() * Math.PI);
-    p.plane("grill", s * 0.8, s * 0.62, bx, deckTop + h + 0.011, bz, -Math.PI / 2);
-    p.cyl("metalDark", s * 0.26, 0.05, bx, deckTop + h + 0.035, bz);
+    const assetId = KIT_AC[Math.floor(rng() * KIT_AC.length)];
+    const scale = 1.6 + rng() * 1.2;
+    const bx = THREE.MathUtils.clamp(ax, -(hx - 1.2), hx - 1.2);
+    const bz = THREE.MathUtils.clamp(az, -(hz - 1.2), hz - 1.2);
+    kit.push({ assetId, x: bx, y: deckTop, z: bz, ry: rng() * Math.PI * 2, scale });
   }
 
   // Small vents.
@@ -531,6 +600,7 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
   const z = b.tz0 * TILE_SIZE + d / 2;
 
   const p = new Parts();
+  const kit: KitLocalPlacement[] = [];
 
   const styleRng = mulberry(b.style ^ 0xa511e9b3);
   const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
@@ -579,9 +649,9 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
 
   buildStorefront(p, front, mulberry(b.style ^ 0x1f123bb5), trimKey, true);
   if (sideStorefront) buildStorefront(p, left, mulberry(b.style ^ 0x27220a95), trimKey, false);
-  else buildServiceFace(p, left, mulberry(b.style ^ 0x27220a95), height);
-  buildServiceFace(p, right, mulberry(b.style ^ 0x33355691), height);
-  buildServiceFace(p, back, mulberry(b.style ^ 0x45d9f3b1), height);
+  else buildServiceFace(p, kit, left, mulberry(b.style ^ 0x27220a95), height);
+  buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), height);
+  buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), height);
 
   // --- Hanging neon signs on the front face --------------------------------
   {
@@ -606,8 +676,62 @@ export function buildBuildingModel(b: BuildingInstance): BuildingModel {
     }
   }
 
-  // --- Roof dressing ---------------------------------------------------------
-  const waterTower = buildRoof(p, mulberry(b.style ^ 0x9e3779b9), w, d, height, b.stories);
+  // --- Kit facade billboard on the upper front face (taller buildings) ------
+  {
+    const rng = mulberry(b.style ^ 0x77aa11d3);
+    if (b.stories >= 3 && rng() < 0.55) {
+      const bb = KIT_BILLBOARDS[Math.floor(rng() * KIT_BILLBOARDS.length)];
+      const scale = Math.min(1.25, Math.max(0.6, (w - 1.6) / bb.w));
+      const bbH = bb.h * scale;
+      const yMax = height - bbH - 0.5;
+      if (yMax > 5.2) {
+        const a = (rng() - 0.5) * Math.max(0, w - bb.w * scale - 1.2);
+        const y = 5.2 + rng() * (yMax - 5.2);
+        const pl = facePlacement(front, bb.assetId, a, y, (bb.t * scale) / 2 + 0.08, scale);
+        pl.ry += bb.ryOffset;
+        kit.push(pl);
+      }
+    }
+  }
 
-  return { geoms: p.build(), waterTower, x, z, width: w, depth: d, height };
+  // --- Roof dressing ---------------------------------------------------------
+  const waterTower = buildRoof(p, kit, mulberry(b.style ^ 0x9e3779b9), w, d, height, b.stories);
+
+  return { geoms: p.build(), waterTower, kit, x, z, width: w, depth: d, height };
+}
+
+// Deterministic models cached per streamed BuildingInstance so the renderer
+// and the world-level kit-instancing collector share one build per building.
+const modelCache = new WeakMap<BuildingInstance, BuildingModel>();
+
+export function getBuildingModel(b: BuildingInstance): BuildingModel {
+  let model = modelCache.get(b);
+  if (!model) {
+    model = buildBuildingModel(b);
+    modelCache.set(b, model);
+  }
+  return model;
+}
+
+/** World-space kit dressing entries for every building in the given chunks. */
+export function collectBuildingKit(chunks: ChunkData[]): KitEntry[] {
+  const out: KitEntry[] = [];
+  for (const chunk of chunks) {
+    const ox = chunk.coord.x * CHUNK_SIZE;
+    const oz = chunk.coord.z * CHUNK_SIZE;
+    for (const b of chunk.buildings) {
+      const model = getBuildingModel(b);
+      for (const pl of model.kit) {
+        out.push({
+          assetId: pl.assetId,
+          x: ox + model.x + pl.x,
+          y: GROUND_Y + pl.y,
+          z: oz + model.z + pl.z,
+          rotationY: pl.ry,
+          scale: pl.scale,
+        });
+      }
+    }
+  }
+  return out;
 }

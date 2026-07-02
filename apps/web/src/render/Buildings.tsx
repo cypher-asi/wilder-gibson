@@ -6,11 +6,8 @@ import { useEffect, useMemo } from "react";
 import * as THREE from "three";
 import { useAssetModel } from "../assets/catalog";
 import { BuildingInstance } from "../net/protocol";
-import { buildBuildingModel, WaterTowerPlacement } from "./building";
+import { getBuildingModel, GROUND_Y, WaterTowerPlacement } from "./building";
 import { getBuildingMaterial, getSharedMaterial } from "./facade";
-
-// Sidewalk/building tiles are raised; buildings sit on top of them.
-const GROUND_Y = 0.14;
 
 // Material keys whose meshes are emissive/glass overlays, not solid massing.
 const NO_SHADOW = new Set(["neon", "glass"]);
@@ -69,9 +66,11 @@ function ProceduralWaterTower() {
 }
 
 export function Building({ building }: { building: BuildingInstance }) {
-  const model = useMemo(() => buildBuildingModel(building), [building]);
+  const model = useMemo(() => getBuildingModel(building), [building]);
 
   // Dispose merged geometries when the chunk unloads (materials are shared).
+  // The model cache is keyed weakly on the streamed BuildingInstance, which
+  // is dropped with its chunk, so a disposed model is never reused.
   useEffect(() => {
     return () => {
       for (const [, geom] of model.geoms) geom.dispose();

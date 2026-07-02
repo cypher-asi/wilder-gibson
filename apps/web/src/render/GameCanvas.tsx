@@ -15,6 +15,12 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       camera={{ fov: 34, near: 0.5, far: 400 }}
       gl={{ antialias: true, powerPreference: "high-performance" }}
       style={{ position: "absolute", inset: 0 }}
+      onCreated={({ gl, scene }) => {
+        // Dev-only hook for the screenshot/validation tooling.
+        if (import.meta.env.DEV) {
+          (window as unknown as Record<string, unknown>).__wilderGl = { gl, scene };
+        }
+      }}
     >
       <SceneSetup />
       <Lighting />

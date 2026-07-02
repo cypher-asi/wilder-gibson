@@ -36,12 +36,44 @@ await page.evaluate(() => {
 await page.waitForSelector("canvas", { timeout: 20000 });
 // Let chunks stream + GLBs load.
 await new Promise((r) => setTimeout(r, 12000));
+
+async function stats(label) {
+  const info = await page.evaluate(() => {
+    const hook = window.__wilderGl;
+    if (!hook) return null;
+    let instanced = 0;
+    let meshes = 0;
+    hook.scene.traverse((o) => {
+      if (o.isInstancedMesh) instanced++;
+      else if (o.isMesh) meshes++;
+    });
+    return { calls: hook.gl.info.render.calls, triangles: hook.gl.info.render.triangles, instanced, meshes };
+  });
+  console.log(label, JSON.stringify(info));
+}
+
+await stats("spawn:");
 await page.screenshot({ path: "tools/screens/instanced-props-1.png" });
-// Walk forward a bit for a second vantage point.
+// Walk forward for a second vantage point.
 await page.keyboard.down("w");
 await new Promise((r) => setTimeout(r, 3500));
 await page.keyboard.up("w");
 await new Promise((r) => setTimeout(r, 1500));
+await stats("walked:");
 await page.screenshot({ path: "tools/screens/instanced-props-2.png" });
+// Walk along streets past several building fronts for facade vantage points.
+const legs = [
+  ["a", 5000, "tools/screens/instanced-props-3.png"],
+  ["s", 5000, "tools/screens/instanced-props-4.png"],
+  ["a", 5000, "tools/screens/instanced-props-5.png"],
+];
+for (const [key, ms, out] of legs) {
+  await page.keyboard.down(key);
+  await new Promise((r) => setTimeout(r, ms));
+  await page.keyboard.up(key);
+  await new Promise((r) => setTimeout(r, 1500));
+  await page.screenshot({ path: out });
+}
+await stats("end:");
 console.log("done");
 await browser.close();
