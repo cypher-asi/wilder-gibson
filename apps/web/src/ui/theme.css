@@ -304,6 +304,130 @@ body {
   color: var(--accent);
 }
 
+/* Bottom-right weapon / ammo / XP readout (The Ascent style). */
+.weapon-hud {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  min-width: 230px;
+  background: linear-gradient(160deg, rgba(20, 8, 12, 0.85), rgba(10, 6, 10, 0.9));
+  border: 1px solid rgba(255, 48, 64, 0.35);
+  border-radius: 6px;
+  padding: 10px 14px 12px;
+  box-shadow: 0 0 30px rgba(255, 48, 64, 0.08);
+}
+
+.weapon-hud-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.weapon-hud-name {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  color: #f4dede;
+  text-shadow: 0 0 12px rgba(255, 48, 64, 0.5);
+}
+
+.weapon-hud-icon {
+  color: #ff3040;
+  margin-right: 8px;
+}
+
+.weapon-hud-ammo {
+  font-size: 26px;
+  font-weight: 800;
+  color: #ffe9b0;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 14px rgba(255, 210, 122, 0.4);
+}
+
+.weapon-hud-ammo.empty {
+  color: #ff3040;
+  animation: ammo-blink 1s steps(2) infinite;
+}
+
+@keyframes ammo-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.weapon-hud-ammo-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  color: var(--text-dim);
+  margin-left: 5px;
+}
+
+.weapon-hud-xp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.weapon-hud-level {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #ff9daa;
+  white-space: nowrap;
+}
+
+.xp-bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.xp-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff3040, #ff8a5c);
+  transition: width 0.3s;
+}
+
+.weapon-hud-xp-num {
+  font-size: 9px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Floating damage numbers (rendered via drei Html inside the canvas). */
+.dmg-float {
+  font-size: 15px;
+  font-weight: 800;
+  color: #ffe9b0;
+  text-shadow:
+    0 0 6px rgba(255, 130, 60, 0.9),
+    0 1px 2px #000;
+  animation: dmg-rise 0.8s ease-out forwards;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes dmg-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(4px) scale(0.7);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.15);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-30px) scale(0.95);
+  }
+}
+
 .disconnect-banner {
   position: absolute;
   top: 14px;

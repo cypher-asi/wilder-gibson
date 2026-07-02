@@ -1,6 +1,6 @@
-// Isometric orbit camera: orbits and follows the player.
-// Right-mouse drag rotates (horizontal) and tilts (vertical); Q/E also
-// rotates; wheel zooms street<->overview.
+// Ascent-style follow camera: fixed high pitch, pulled back so the character
+// stays small against the environment. The mouse is reserved for aiming, so
+// the camera yaw only changes with Q/E; wheel zooms within a tight band.
 
 import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useRef } from "react";
@@ -9,50 +9,22 @@ import { game } from "../state/game";
 
 export const cameraState = {
   yaw: Math.PI / 4,
-  distance: 26,
-  minDistance: 10,
-  maxDistance: 60,
-  /** user pitch adjustment (RMB drag), radians, added to zoom-based pitch */
-  pitchOffset: 0,
+  distance: 34,
+  minDistance: 20,
+  maxDistance: 48,
 };
 
-const PITCH_MIN = THREE.MathUtils.degToRad(20);
-const PITCH_MAX = THREE.MathUtils.degToRad(80);
+const PITCH_NEAR = THREE.MathUtils.degToRad(52);
+const PITCH_FAR = THREE.MathUtils.degToRad(62);
 
 export function CameraRig() {
   const { camera, gl } = useThree();
   const target = useRef(new THREE.Vector3());
   const keys = useRef({ q: false, e: false });
-  const basePitch = useRef(THREE.MathUtils.degToRad(52));
 
   useEffect(() => {
     const canvas = gl.domElement;
-    let dragging = false;
-    let lastX = 0;
-    let lastY = 0;
 
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.button === 2) {
-        dragging = true;
-        lastX = event.clientX;
-        lastY = event.clientY;
-      }
-    };
-    const onPointerMove = (event: PointerEvent) => {
-      if (!dragging) return;
-      const dx = event.clientX - lastX;
-      const dy = event.clientY - lastY;
-      lastX = event.clientX;
-      lastY = event.clientY;
-      cameraState.yaw += dx * 0.008;
-      // Clamp so total pitch (zoom base + offset) stays in the allowed band.
-      cameraState.pitchOffset = THREE.MathUtils.clamp(
-        cameraState.pitchOffset + dy * 0.005,
-        PITCH_MIN - basePitch.current,
-        PITCH_MAX - basePitch.current,
-      );
-    };
-    const onPointerUp = () => (dragging = false);
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       cameraState.distance = THREE.MathUtils.clamp(
@@ -69,17 +41,11 @@ export function CameraRig() {
     const onKeyDown = (e: KeyboardEvent) => onKey(e, true);
     const onKeyUp = (e: KeyboardEvent) => onKey(e, false);
 
-    canvas.addEventListener("pointerdown", onPointerDown);
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("contextmenu", onContext);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
     return () => {
-      canvas.removeEventListener("pointerdown", onPointerDown);
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("contextmenu", onContext);
       window.removeEventListener("keydown", onKeyDown);
@@ -103,20 +69,11 @@ export function CameraRig() {
       target.current.lerp(next, Math.min(1, dt * 8));
     }
 
-    // Zoom-dependent base pitch plus user tilt (RMB drag), clamped to band.
+    // Slightly steeper look-down when zoomed out (reads more top-down).
     const zoomFrac =
       (cameraState.distance - cameraState.minDistance) /
       (cameraState.maxDistance - cameraState.minDistance);
-    basePitch.current = THREE.MathUtils.lerp(
-      THREE.MathUtils.degToRad(42),
-      THREE.MathUtils.degToRad(58),
-      zoomFrac,
-    );
-    const pitch = THREE.MathUtils.clamp(
-      basePitch.current + cameraState.pitchOffset,
-      PITCH_MIN,
-      PITCH_MAX,
-    );
+    const pitch = THREE.MathUtils.lerp(PITCH_NEAR, PITCH_FAR, zoomFrac);
 
     const horizontal = Math.cos(pitch) * cameraState.distance;
     const height = Math.sin(pitch) * cameraState.distance;

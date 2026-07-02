@@ -87,6 +87,8 @@ pub enum S2C {
     InventoryUpdate(Inventory),
     StashUpdate { slots: Vec<Option<ItemStack>> },
     CombatEvent(CombatEvent),
+    /// XP/level progression changed (kills grant XP; sent on join too).
+    XpUpdate { xp: u32, level: u32, next_level_xp: u32, gained: u32 },
     Died { by: Option<String>, lost_items: bool },
     ExtractStart { seconds: f32 },
     ExtractCancel,

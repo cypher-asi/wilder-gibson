@@ -42,6 +42,8 @@ export interface Character {
   position: Vec3;
   yaw: number;
   level: number;
+  /** Progress into the current level (resets each level-up). */
+  xp: number;
   health: number;
   max_health: number;
 }
@@ -222,6 +224,10 @@ export type S2C =
   | Tagged<"InventoryUpdate", Inventory>
   | Tagged<"StashUpdate", { slots: (ItemStack | null)[] }>
   | Tagged<"CombatEvent", CombatEvent>
+  | Tagged<
+      "XpUpdate",
+      { xp: number; level: number; next_level_xp: number; gained: number }
+    >
   | Tagged<"Died", { by: string | null; lost_items: boolean }>
   | Tagged<"ExtractStart", { seconds: number }>
   | TaggedUnit<"ExtractCancel">

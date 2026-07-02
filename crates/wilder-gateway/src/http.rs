@@ -135,6 +135,9 @@ fn starter_inventory() -> Inventory {
     let mut inv = Inventory::new();
     inv.slots[0] = Some(ItemStack { kind: ItemKind::Medkit, count: 2 });
     inv.slots[1] = Some(ItemStack { kind: ItemKind::Flashlight, count: 1 });
+    inv.slots[2] = Some(ItemStack { kind: ItemKind::Ammo9mm, count: 90 });
+    // Every runner starts armed: equipped weapons live outside the slot grid.
+    inv.equipped_weapon = Some(ItemKind::Pistol);
     inv
 }
 
@@ -147,6 +150,7 @@ fn new_character(account: AccountId, name: String, appearance: Appearance) -> Ch
         position: wilder_world::spawn_position(),
         yaw: 0.0,
         level: 1,
+        xp: 0,
         health: 100.0,
         max_health: 100.0,
     }

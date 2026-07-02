@@ -79,6 +79,9 @@ export class GameConnection {
           characterName: msg.d.character.name,
           health: msg.d.character.health,
           maxHealth: msg.d.character.max_health,
+          level: msg.d.character.level,
+          xp: msg.d.character.xp ?? 0,
+          nextLevelXp: msg.d.character.level * 100,
           inventory: msg.d.inventory,
           position: msg.d.character.position,
         });
@@ -149,12 +152,55 @@ export class GameConnection {
       }
       case "CombatEvent": {
         const ev = msg.d;
+        const now = performance.now();
         if (ev.t === "Hit") {
           void playSfx("sfx_hit", 0.35);
+          const target = game.entities.get(ev.d.target);
+          if (target) {
+            target.lastHitAt = now;
+            game.fx.push({
+              type: "hit",
+              x: target.x,
+              y: target.y + 1.3,
+              z: target.z,
+              damage: ev.d.damage,
+              at: now,
+            });
+          }
         } else if (ev.t === "MuzzleFlash") {
           void playSfx("sfx_shoot", 0.3);
+          const attacker = game.entities.get(ev.d.attacker);
+          if (attacker) {
+            // Muzzle at chest height; the tracer flies flat toward the target point.
+            game.fx.push({
+              type: "tracer",
+              fx: attacker.x,
+              fy: 1.35,
+              fz: attacker.z,
+              tx: ev.d.tx,
+              ty: 1.25,
+              tz: ev.d.tz,
+              at: now,
+            });
+          }
         } else if (ev.t === "EntityDied") {
           void playSfx("sfx_death", 0.4);
+          const dead = game.entities.get(ev.d.id);
+          if (dead) {
+            game.fx.push({ type: "death", x: dead.x, y: dead.y + 1, z: dead.z, at: now });
+          }
+        }
+        if (game.fx.length > 64) game.fx.splice(0, game.fx.length - 64);
+        break;
+      }
+      case "XpUpdate": {
+        ui.set({
+          xp: msg.d.xp,
+          level: msg.d.level,
+          nextLevelXp: msg.d.next_level_xp,
+        });
+        if (msg.d.gained > 0) {
+          ui.pushChat({ from: "system", text: `+${msg.d.gained} XP`, system: true });
         }
         break;
       }

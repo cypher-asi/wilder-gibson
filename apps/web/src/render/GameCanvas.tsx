@@ -3,6 +3,7 @@ import { GameConnection } from "../net/connection";
 import { Effects, Lighting, Rain, SceneSetup } from "./Atmosphere";
 import { CameraRig } from "./CameraRig";
 import { Chunks } from "./Chunks";
+import { CombatFx } from "./CombatFx";
 import { Entities } from "./Entities";
 import { PlayerInput } from "./PlayerInput";
 
@@ -11,7 +12,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
     <Canvas
       shadows
       dpr={[1, 1.75]}
-      camera={{ fov: 38, near: 0.5, far: 400 }}
+      camera={{ fov: 34, near: 0.5, far: 400 }}
       gl={{ antialias: true, powerPreference: "high-performance" }}
       style={{ position: "absolute", inset: 0 }}
     >
@@ -19,6 +20,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       <Lighting />
       <Chunks />
       <Entities />
+      <CombatFx />
       <Rain />
       <CameraRig />
       <PlayerInput connection={connection} />

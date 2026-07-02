@@ -253,6 +253,7 @@ mod tests {
             position: Vec3::new(5.0, 0.0, -3.0),
             yaw: 1.0,
             level: 1,
+            xp: 0,
             health: 100.0,
             max_health: 100.0,
         };

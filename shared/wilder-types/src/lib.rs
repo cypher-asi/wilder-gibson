@@ -67,6 +67,9 @@ pub struct Character {
     pub position: Vec3,
     pub yaw: f32,
     pub level: u32,
+    /// Progress into the current level (resets each level-up).
+    #[serde(default)]
+    pub xp: u32,
     pub health: f32,
     pub max_health: f32,
 }

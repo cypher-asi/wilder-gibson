@@ -33,6 +33,8 @@ export interface GameEntity {
   variant: number;
   tint: number;
   healthPct: number;
+  /** ms timestamp of the last combat hit taken (drives health bar reveal). */
+  lastHitAt: number;
   /** Interpolation buffer of recent server samples. */
   samples: RemoteSample[];
   /** Current render transform (written by interpolation/prediction). */
@@ -51,6 +53,21 @@ export interface PendingInput {
   dt: number;
 }
 
+/** Short-lived combat visual events, consumed by the CombatFx renderer. */
+export type CombatFxEvent =
+  | {
+      type: "tracer";
+      fx: number;
+      fy: number;
+      fz: number;
+      tx: number;
+      ty: number;
+      tz: number;
+      at: number;
+    }
+  | { type: "hit"; x: number; y: number; z: number; damage: number; at: number }
+  | { type: "death"; x: number; y: number; z: number; at: number };
+
 /** Non-reactive game world (read from useFrame). */
 export const game = {
   chunks: new ChunkStore(),
@@ -65,6 +82,10 @@ export const game = {
   lastDirectInputAt: 0,
   /** Click-to-move marker (world position + time set). */
   moveMarker: null as { x: number; z: number; at: number } | null,
+  /** Mouse aim: cursor projected onto the ground plane (twin-stick facing). */
+  aim: { x: 0, z: 0, yaw: 0, active: false },
+  /** Pending combat FX events (drained each frame by CombatFx). */
+  fx: [] as CombatFxEvent[],
   /** Active connection sender (set by GameConnection.connect). */
   send: null as ((msg: import("../net/protocol").C2S) => void) | null,
 
@@ -75,6 +96,8 @@ export const game = {
     this.pendingInputs = [];
     this.nextSeq = 1;
     this.moveMarker = null;
+    this.aim.active = false;
+    this.fx = [];
     // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },
 };
@@ -98,6 +121,7 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
     variant: data.variant,
     tint: data.appearance?.tint ?? 0xffffff,
     healthPct: data.health_pct,
+    lastHitAt: 0,
     samples: [],
     x: data.position[0],
     y: data.position[1],
@@ -121,6 +145,11 @@ interface UiState {
   characterName: string;
   health: number;
   maxHealth: number;
+  level: number;
+  /** XP progress into the current level. */
+  xp: number;
+  /** XP required to reach the next level. */
+  nextLevelXp: number;
   position: Vec3;
   inventory: Inventory | null;
   stash: (ItemStack | null)[] | null;
@@ -162,6 +191,9 @@ export const useGame: import("zustand").UseBoundStore<
   characterName: "",
   health: 100,
   maxHealth: 100,
+  level: 1,
+  xp: 0,
+  nextLevelXp: 100,
   position: [0, 0, 0],
   inventory: null,
   stash: null,

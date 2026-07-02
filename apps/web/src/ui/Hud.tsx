@@ -26,15 +26,64 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ExtractionBar />
           <ExtractHint />
           <div className="hud-hint">
-            CLICK move · WASD run · SPACE / click enemy attack · Q/E rotate · I inventory ·
+            WASD move · MOUSE aim · LMB shoot · RMB move · Q/E rotate · I inventory ·
             ENTER chat
           </div>
+          <WeaponHud />
           <Chat lines={chat} connection={connection} />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
         </>
       )}
+    </div>
+  );
+}
+
+const WEAPON_LABEL: Record<string, string> = {
+  Pistol: "PISTOL",
+  Smg: "SMG",
+  Pipe: "PIPE",
+  Knife: "KNIFE",
+};
+const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
+
+/** Bottom-right weapon / ammo / XP readout (The Ascent style). */
+function WeaponHud() {
+  const inventory = useGame((s) => s.inventory);
+  const level = useGame((s) => s.level);
+  const xp = useGame((s) => s.xp);
+  const nextLevelXp = useGame((s) => s.nextLevelXp);
+
+  const weapon = inventory?.equipped_weapon ?? null;
+  const label = weapon ? (WEAPON_LABEL[weapon] ?? weapon.toUpperCase()) : "FISTS";
+  const ranged = weapon !== null && RANGED_WEAPONS.has(weapon);
+  const ammo = invCount(inventory, "Ammo9mm");
+  const xpPct = Math.min((xp / Math.max(nextLevelXp, 1)) * 100, 100);
+
+  return (
+    <div className="weapon-hud">
+      <div className="weapon-hud-row">
+        <div className="weapon-hud-name">
+          <span className="weapon-hud-icon">{ranged ? "▙" : "▟"}</span>
+          {label}
+        </div>
+        {ranged && (
+          <div className={`weapon-hud-ammo${ammo === 0 ? " empty" : ""}`}>
+            {ammo}
+            <span className="weapon-hud-ammo-label">9MM</span>
+          </div>
+        )}
+      </div>
+      <div className="weapon-hud-xp">
+        <span className="weapon-hud-level">LVL {level}</span>
+        <div className="xp-bar">
+          <div className="xp-fill" style={{ width: `${xpPct}%` }} />
+        </div>
+        <span className="weapon-hud-xp-num">
+          {xp}/{nextLevelXp}
+        </span>
+      </div>
     </div>
   );
 }

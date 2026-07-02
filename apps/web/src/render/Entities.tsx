@@ -9,6 +9,7 @@ import { setFootsteps } from "../assets/audio";
 import { CHARACTER_MODEL, useAssetModel } from "../assets/catalog";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { game, GameEntity, useGame } from "../state/game";
+import { groundHeightAt } from "./Ground";
 
 /** Render remote entities this many ms in the past for smooth interpolation. */
 const INTERP_DELAY = 120;
@@ -364,7 +365,11 @@ function EntityView({ entity }: { entity: GameEntity }) {
     const now = performance.now();
 
     if (!isCharacter) {
-      group.current.position.set(entity.x, entity.y, entity.z);
+      group.current.position.set(
+        entity.x,
+        entity.y + groundHeightAt(entity.x, entity.z),
+        entity.z,
+      );
       return;
     }
 
@@ -383,7 +388,17 @@ function EntityView({ entity }: { entity: GameEntity }) {
       }
     }
 
-    group.current.position.set(entity.x, entity.y, entity.z);
+    // Twin-stick facing: the local player always points at the mouse.
+    if (isLocal && game.aim.active) {
+      entity.yaw = game.aim.yaw;
+    }
+
+    // Stand on the visual ground surface (raised sidewalks vs road grade).
+    group.current.position.set(
+      entity.x,
+      entity.y + groundHeightAt(entity.x, entity.z),
+      entity.z,
+    );
     // Model faces +Z at yaw 0 in three.js convention; our yaw is atan2(dz,dx).
     group.current.rotation.y = -entity.yaw + Math.PI / 2;
 
@@ -418,16 +433,11 @@ function EntityView({ entity }: { entity: GameEntity }) {
     case "Npc":
       body = (
         <group
-          onClick={(e) => {
-            e.stopPropagation();
-            const seq = game.nextSeq++;
-            game.send?.({ t: "Attack", d: { seq, tx: entity.x, tz: entity.z } });
-          }}
           onPointerOver={() => (document.body.style.cursor = "crosshair")}
           onPointerOut={() => (document.body.style.cursor = "default")}
         >
           <ProceduralCharacter entity={entity} />
-          <HealthRing entity={entity} />
+          <HealthBar entity={entity} />
         </group>
       );
       break;
@@ -438,18 +448,47 @@ function EntityView({ entity }: { entity: GameEntity }) {
   return <group ref={group}>{body}</group>;
 }
 
-function HealthRing({ entity }: { entity: GameEntity }) {
-  const ref = useRef<THREE.Mesh>(null);
-  useFrame(() => {
-    if (!ref.current) return;
-    ref.current.visible = entity.healthPct < 0.999 && entity.anim !== "Death";
-    ref.current.scale.setScalar(Math.max(entity.healthPct, 0.05));
+/** Show the bar this long after taking a hit even at full health, ms. */
+const HEALTH_BAR_LINGER = 4000;
+const HEALTH_BAR_WIDTH = 1.1;
+
+/**
+ * Ascent-style floating health bar: camera-facing dark backing with a red
+ * fill, hovering above the enemy's head. Appears once damaged.
+ */
+function HealthBar({ entity }: { entity: GameEntity }) {
+  const group = useRef<THREE.Group>(null);
+  const fill = useRef<THREE.Mesh>(null);
+
+  useFrame(({ camera }) => {
+    if (!group.current) return;
+    const damaged = entity.healthPct < 0.999;
+    const recent = performance.now() - entity.lastHitAt < HEALTH_BAR_LINGER;
+    const visible = (damaged || recent) && entity.anim !== "Death" && entity.healthPct > 0;
+    group.current.visible = visible;
+    if (!visible) return;
+    group.current.quaternion.copy(camera.quaternion);
+    if (fill.current) {
+      const pct = Math.max(entity.healthPct, 0.02);
+      fill.current.scale.x = pct;
+      // Keep the fill anchored to the left edge as it shrinks.
+      fill.current.position.x = (-(1 - pct) * HEALTH_BAR_WIDTH) / 2;
+    }
   });
+
   return (
-    <mesh ref={ref} position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.5, 0.62, 24]} />
-      <meshBasicMaterial color="#ff4455" transparent opacity={0.8} depthWrite={false} />
-    </mesh>
+    <group ref={group} position={[0, 2.25, 0]} visible={false}>
+      {/* backing */}
+      <mesh>
+        <planeGeometry args={[HEALTH_BAR_WIDTH + 0.08, 0.16]} />
+        <meshBasicMaterial color="#0a0508" transparent opacity={0.85} depthWrite={false} />
+      </mesh>
+      {/* fill */}
+      <mesh ref={fill} position={[0, 0, 0.001]}>
+        <planeGeometry args={[HEALTH_BAR_WIDTH, 0.09]} />
+        <meshBasicMaterial color="#ff3040" depthWrite={false} />
+      </mesh>
+    </group>
   );
 }
 

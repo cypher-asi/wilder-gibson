@@ -59,6 +59,14 @@ const DEFAULT_BLUEPRINTS: &[&str] =
 const RESEARCH_FRAGMENTS: u32 = 2;
 const RESEARCH_RESOURCES: &[(ItemKind, u32)] =
     &[(ItemKind::Electronics, 5), (ItemKind::Chemicals, 5)];
+/// XP granted per NPC kill.
+const XP_SCAV_KILL: u32 = 25;
+const XP_RAIDER_KILL: u32 = 50;
+
+/// XP needed to advance from `level` to `level + 1`.
+fn xp_for_level(level: u32) -> u32 {
+    level * 100
+}
 
 fn station_power(station: wilder_crafting::Station) -> f32 {
     match station {
@@ -397,6 +405,12 @@ impl World {
             world_seed: self.seed,
         });
         let _ = tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
+        let _ = tx.send(S2C::XpUpdate {
+            xp: player.character.xp,
+            level: player.character.level,
+            next_level_xp: xp_for_level(player.character.level),
+            gained: 0,
+        });
         let _ = tx.send(S2C::BlueprintsUpdate {
             known: player.blueprints.iter().cloned().collect(),
         });
@@ -649,6 +663,7 @@ impl World {
         self.broadcast_combat(CombatEvent::Hit { attacker, target, damage });
         if let Some((drop_pos, is_raider)) = died_info {
             self.broadcast_combat(CombatEvent::EntityDied { id: target });
+            self.grant_xp(attacker, if is_raider { XP_RAIDER_KILL } else { XP_SCAV_KILL });
 
             // Roll loot.
             let mut items: Vec<ItemStack> = Vec::new();
@@ -685,6 +700,27 @@ impl World {
             }
             self.spawn_loot(drop_pos, items);
         }
+    }
+
+    /// Grant XP to a player (no-op for NPC attackers) and handle level-ups.
+    /// `Character.xp` is progress into the current level; level-ups roll the
+    /// remainder over, bump max health, and fully heal.
+    fn grant_xp(&mut self, entity: EntityId, amount: u32) {
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.character.xp += amount;
+        while player.character.xp >= xp_for_level(player.character.level) {
+            player.character.xp -= xp_for_level(player.character.level);
+            player.character.level += 1;
+            player.character.max_health += 10.0;
+            player.character.health = player.character.max_health;
+        }
+        player.dirty = true;
+        let _ = player.tx.send(S2C::XpUpdate {
+            xp: player.character.xp,
+            level: player.character.level,
+            next_level_xp: xp_for_level(player.character.level),
+            gained: amount,
+        });
     }
 
     fn spawn_loot(&mut self, position: Vec3, items: Vec<ItemStack>) {
