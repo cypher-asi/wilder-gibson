@@ -375,6 +375,12 @@ export const styleUniforms = {
   uTron: { value: 0 },
   /** Shared clock driving the tron code-rain scroll (set by tickFacades). */
   uTronTime: { value: 0 },
+  /** Camera-distance band (world m) over which tron rain buildings fade to
+   * black, so mid/far towers dim into the dark skyline and blend with the
+   * distant CityProxy massing. Full brightness at uTronFadeNear, full black
+   * by uTronFadeFar. */
+  uTronFadeNear: { value: 110 },
+  uTronFadeFar: { value: 260 },
   /** Player world XZ, updated per-frame; fades the tron floor grid to black
    * away from the character (blue lines only; enemy-red lines stay full). */
   uPlayerPos: { value: new THREE.Vector2() },
@@ -520,6 +526,8 @@ if (uTron > 0.5) {
       );
     if (!codeRain) return;
     shader.uniforms.uTronTime = styleUniforms.uTronTime;
+    shader.uniforms.uTronFadeNear = styleUniforms.uTronFadeNear;
+    shader.uniforms.uTronFadeFar = styleUniforms.uTronFadeFar;
     // Instancing-aware world position varying (kit modules render through
     // InstancedMesh, so instanceMatrix must fold in). The wall normal is
     // derived per-fragment from position derivatives instead of a varying:
@@ -543,7 +551,14 @@ if (uTron > 0.5) {
         /* glsl */ `#include <common>
 varying vec3 vTronW;
 uniform float uTronTime;
+uniform float uTronFadeNear;
+uniform float uTronFadeFar;
 ${TRON_HASH_GLSL}`,
+      )
+      .replace(
+        "if (uTron > 0.5) diffuseColor.rgb = TRON_BASE * 2.4;",
+        /* glsl */ `if (uTron > 0.5) diffuseColor.rgb = TRON_BASE * 2.4
+  * (1.0 - smoothstep(uTronFadeNear, uTronFadeFar, distance(vTronW, cameraPosition)));`,
       )
       .replace(
         "if (uTron > 0.5) {\n  float tEl",
@@ -555,7 +570,8 @@ ${TRON_HASH_GLSL}`,
     float tSpd = 1.5 + 3.5 * thash(vec2(floor(tU / 0.22), tFc));
     float tVw = -vTronW.y / 0.12 - uTronTime * tSpd;
     ${TRON_CODE_GLSL}
-    totalEmissiveRadiance += (tCodeGlow * 1.5 + TRON_BLUE * 0.04) * ${codeGain.toFixed(3)};
+    float tFade = 1.0 - smoothstep(uTronFadeNear, uTronFadeFar, distance(vTronW, cameraPosition));
+    totalEmissiveRadiance += (tCodeGlow * 1.5 + TRON_BLUE * 0.04) * ${codeGain.toFixed(3)} * tFade;
   }
   float tEl`,
       );

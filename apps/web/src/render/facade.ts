@@ -95,6 +95,8 @@ uniform float uFLitBoost;
 uniform float uFGlowGain;
 uniform float uFWarmth;
 uniform vec3 uFTint;
+uniform float uTronFadeNear;
+uniform float uTronFadeFar;
 ${STYLE_TOON_DECLS}
 ${TRON_HASH_GLSL}
 float fhash(vec2 p) {
@@ -152,6 +154,11 @@ if (uTron > 0.5) {
       * ((1.0 - smoothstep(0.03, 0.14, fTopD)) * 2.4
         + (1.0 - smoothstep(0.0, 1.6, fTopD)) * 0.18);
   }
+  // Distance fade: rain towers dim to black toward the far field so the
+  // streamed massing melts into the distant CityProxy skyline.
+  float fFade = 1.0 - smoothstep(uTronFadeNear, uTronFadeFar, distance(vFWorldPos, cameraPosition));
+  fGlow *= fFade;
+  diffuseColor.rgb *= fFade;
 } else {
   vec3 fWn = normalize(vFWorldNormal);
   float fy = vFWorldPos.y - 0.14; // buildings sit on raised tiles (GROUND_Y)
