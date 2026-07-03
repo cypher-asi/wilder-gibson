@@ -1086,6 +1086,73 @@ function LootCrate({ entity }: { entity: GameEntity }) {
   );
 }
 
+// Loose currency pickups spilled on death. Three looks keyed by variant:
+// 0 = WILD (gold coin), 1 = Shards (violet crystal), 2 = Energy (green cell).
+// Shared geometries/materials: dozens can be on screen after a firefight.
+const pickupCoinGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.04, 16);
+const pickupShardGeo = new THREE.OctahedronGeometry(0.17, 0);
+const pickupEnergyGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.26, 8);
+const pickupCoinMat = new THREE.MeshStandardMaterial({
+  color: "#ffcc33",
+  emissive: "#ffb300",
+  emissiveIntensity: 0.7,
+  metalness: 0.75,
+  roughness: 0.3,
+});
+const pickupShardMat = new THREE.MeshStandardMaterial({
+  color: "#8f7dff",
+  emissive: "#7f4dff",
+  emissiveIntensity: 0.9,
+  metalness: 0.4,
+  roughness: 0.25,
+});
+const pickupEnergyMat = new THREE.MeshStandardMaterial({
+  color: "#39ff8e",
+  emissive: "#12d46a",
+  emissiveIntensity: 1.1,
+  metalness: 0.3,
+  roughness: 0.35,
+});
+
+interface PickupStyle {
+  geo: THREE.BufferGeometry;
+  mat: THREE.Material;
+  glow: string;
+  /** Face-flat coins flash their broad side; crystals tumble in place. */
+  flat: boolean;
+}
+
+const PICKUP_STYLES: PickupStyle[] = [
+  { geo: pickupCoinGeo, mat: pickupCoinMat, glow: "#ffcc33", flat: true },
+  { geo: pickupShardGeo, mat: pickupShardMat, glow: "#8f7dff", flat: false },
+  { geo: pickupEnergyGeo, mat: pickupEnergyMat, glow: "#39ff8e", flat: false },
+];
+
+function CurrencyPickupView({ entity }: { entity: GameEntity }) {
+  const spinner = useRef<THREE.Group>(null);
+  const style = PICKUP_STYLES[entity.variant] ?? PICKUP_STYLES[0];
+  useFrame(({ clock }) => {
+    if (!spinner.current) return;
+    const t = clock.elapsedTime;
+    // Bob + spin, phase-offset per entity so a cluster doesn't move in lockstep.
+    spinner.current.position.y = 0.45 + Math.sin(t * 2.2 + entity.id) * 0.08;
+    spinner.current.rotation.y = t * 2.6 + entity.id;
+  });
+  return (
+    <group>
+      <group ref={spinner}>
+        <mesh
+          geometry={style.geo}
+          material={style.mat}
+          rotation={style.flat ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
+          castShadow
+        />
+      </group>
+      <GroundGlow color={style.glow} radius={0.9} opacity={0.5} />
+    </group>
+  );
+}
+
 function ExtractionBeacon({ entity }: { entity: GameEntity }) {
   return (
     <group
@@ -1344,12 +1411,15 @@ function ShopFront({ entity }: { entity: GameEntity }) {
   // band centered at y 3.95; random shop boards reach ~0.53 proud of the
   // wall, so this board mounts clear of them at ~0.7.
   const wallDz = host ? host.wallZ - entity.z : TILE_SIZE / 2;
+  // Centered on the storefront fascia band (the 1 m sign zone at y 3.95 in
+  // buildStorefront), exactly where the buildings' own boards mount.
   const signY = 3.95;
-  // Sign plane sized from the texture aspect, clamped to the hosting face.
+  // Sign plane sized from the texture aspect, fitting inside the band and
+  // clamped to the hosting face.
   const faceW = host ? host.x1 - host.x0 : 6;
-  let signH = 0.85;
+  let signH = 0.78;
   let signW = signH * (sign?.aspect ?? 4);
-  const maxW = Math.min(5.6, faceW - 0.8);
+  const maxW = Math.min(6.5, faceW - 0.8);
   if (signW > maxW) {
     signW = maxW;
     signH = signW / (sign?.aspect ?? 4);
@@ -1365,24 +1435,21 @@ function ShopFront({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      {/* Sign board on the hosting building's fascia: dark backing + text,
-          mounted proud of the fascia so it always beats the building's own
-          random sign boards for the wall. */}
-      <group position={[0, signY, wallDz - 0.7]}>
+      {/* Sign board flat on the storefront fascia band, on top of all the
+          building's own signage. Depth stack from the footprint wall: the
+          ground-floor block sits 0.3 proud, its fascia another 0.34, and
+          its random neon boards reach ~0.83 — so this board hangs entirely
+          in the 0.88..1.05 band, never intersecting any of them. */}
+      <group position={[0, signY, wallDz - 1.05]}>
         <mesh position={[0, 0, 0.09]} castShadow>
-          <boxGeometry args={[signW + 0.24, signH + 0.22, 0.14]} />
-          <meshStandardMaterial color="#1c1e22" roughness={0.5} metalness={0.75} />
+          <boxGeometry args={[signW + 0.24, signH + 0.22, 0.17]} />
+          <meshStandardMaterial color="#0b0e13" roughness={0.12} metalness={0.9} />
         </mesh>
         {sign && (
           <mesh rotation={[0, Math.PI, 0]} position={[0, 0, 0]} material={sign.mat}>
             <planeGeometry args={[signW, signH]} />
           </mesh>
         )}
-        {/* Thin accent strip under the sign board. */}
-        <mesh rotation={[0, Math.PI, 0]} position={[0, -(signH / 2) - 0.16, 0.02]}>
-          <planeGeometry args={[signW + 0.24, 0.05]} />
-          <meshBasicMaterial color={accent} toneMapped={false} />
-        </mesh>
       </group>
       {/* Invisible interaction volume over the storefront bay. */}
       <mesh position={[0, 1.7, wallDz / 2]} visible={false}>
@@ -1546,6 +1613,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
   switch (entity.kind) {
     case "LootContainer":
       body = <LootCrate entity={entity} />;
+      break;
+    case "CurrencyPickup":
+      body = <CurrencyPickupView entity={entity} />;
       break;
     case "ExtractionPoint":
       body = <ExtractionBeacon entity={entity} />;

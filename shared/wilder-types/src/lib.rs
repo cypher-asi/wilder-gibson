@@ -293,6 +293,9 @@ pub enum EntityKind {
     LootContainer,
     ExtractionPoint,
     ResourceNode,
+    /// Loose currency dropped on death (coins/shards/energy). The `variant`
+    /// field carries the currency type: 0 = WILD, 1 = Shards, 2 = Energy.
+    CurrencyPickup,
     /// Storage (stash) terminal.
     Building,
     Refinery,

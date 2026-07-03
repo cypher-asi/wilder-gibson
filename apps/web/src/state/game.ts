@@ -86,6 +86,15 @@ export type CombatFxEvent =
     }
   | { type: "hit"; x: number; y: number; z: number; damage: number; at: number }
   | { type: "death"; x: number; y: number; z: number; at: number }
+  | {
+      type: "gib";
+      x: number;
+      y: number;
+      z: number;
+      /** Fragment tint; matches the dead body's color (hostiles read red). */
+      color: string;
+      at: number;
+    }
   | { type: "shockwave"; x: number; y: number; z: number; at: number }
   | { type: "flash"; x: number; y: number; z: number; yaw: number; at: number }
   | {
@@ -123,8 +132,10 @@ export type CombatFxEvent =
       x: number;
       y: number;
       z: number;
-      /** How many gold coins to fling out (Mario stomp / reward feel). */
+      /** How many coins to fling out (Mario stomp / reward feel). */
       count: number;
+      /** Coin tint: gold for rewards, silver for the death shower. */
+      metal?: "gold" | "silver";
       at: number;
     };
 

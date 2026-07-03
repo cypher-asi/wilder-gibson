@@ -153,6 +153,56 @@ export function playPurchase(volume = 0.18) {
   };
 }
 
+let noiseBuffer: AudioBuffer | null = null;
+
+/** Shared short white-noise buffer for percussive/mechanical cues. */
+function getNoiseBuffer(ctx: AudioContext): AudioBuffer {
+  if (noiseBuffer && noiseBuffer.sampleRate === ctx.sampleRate) return noiseBuffer;
+  const len = Math.floor(ctx.sampleRate * 0.25);
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  noiseBuffer = buf;
+  return buf;
+}
+
+/**
+ * Mechanical "cha-chik" for picking up ammo: two short band-passed noise
+ * bursts (the metallic clack of a magazine/charging handle) so ammo reads
+ * distinctly from the coin/loot chime. Synthesized — no asset file needed.
+ */
+export function playAmmo(volume = 0.3) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  // Two clacks: a heavier "cha" then a snappier "chik".
+  const clacks = [
+    { at: 0, freq: 850, q: 3, dur: 0.06, gain: volume },
+    { at: 0.09, freq: 1500, q: 5, dur: 0.05, gain: volume * 0.85 },
+  ];
+  for (const c of clacks) {
+    const src = ctx.createBufferSource();
+    src.buffer = getNoiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = "bandpass";
+    filter.frequency.value = c.freq;
+    filter.Q.value = c.q;
+    const gain = ctx.createGain();
+    const start = t0 + c.at;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(c.gain, start + 0.004);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + c.dur);
+    src.connect(filter).connect(gain).connect(ctx.destination);
+    src.start(start);
+    src.stop(start + c.dur + 0.02);
+    src.onended = () => {
+      src.disconnect();
+      filter.disconnect();
+      gain.disconnect();
+    };
+  }
+}
+
 /** Low double-buzz for refused actions (backpack full). */
 export function playDeny(volume = 0.18) {
   const ctx = getBlipCtx();

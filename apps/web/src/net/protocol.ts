@@ -102,6 +102,7 @@ export type EntityKind =
   | "Player"
   | "Npc"
   | "LootContainer"
+  | "CurrencyPickup"
   | "ExtractionPoint"
   | "ResourceNode"
   | "Building"

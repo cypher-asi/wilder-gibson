@@ -2,6 +2,7 @@
 
 import * as THREE from "three";
 import {
+  playAmmo,
   playCoin,
   playDeny,
   playGrunt,
@@ -20,6 +21,7 @@ import {
   useGame,
 } from "../state/game";
 import { itemLabel } from "../ui/ItemIcon";
+import { RED_HEX } from "../ui/colors";
 import { C2S, decode, encode, S2C } from "./protocol";
 
 /**
@@ -158,6 +160,25 @@ export class GameConnection {
               y: entity.y,
               z: entity.z,
               item: entity.item,
+              at: performance.now(),
+            });
+          }
+        } else if (entity?.kind === "CurrencyPickup") {
+          // Collected a loose coin/shard/energy: the Mario coin chime plus a
+          // gold pop where it sat. The "+N" wallet toast rides the WalletUpdate.
+          const dist = Math.hypot(
+            entity.x - game.predicted.x,
+            entity.z - game.predicted.z,
+          );
+          if (dist < 4) {
+            playCoin();
+            game.fx.push({
+              type: "coinBurst",
+              x: entity.x,
+              y: entity.y + 0.3,
+              z: entity.z,
+              count: 3,
+              metal: "gold",
               at: performance.now(),
             });
           }
@@ -306,6 +327,25 @@ export class GameConnection {
           const dead = game.entities.get(ev.d.id);
           if (dead) {
             game.fx.push({ type: "death", x: dead.x, y: dead.y + 1, z: dead.z, at: now });
+            // Body shatters into red chunks (matching the hostile body color)
+            // plus a shower of silver bits, regardless of who landed the kill.
+            game.fx.push({
+              type: "gib",
+              x: dead.x,
+              y: dead.y + 0.6,
+              z: dead.z,
+              color: RED_HEX,
+              at: now,
+            });
+            game.fx.push({
+              type: "coinBurst",
+              x: dead.x,
+              y: dead.y + 0.6,
+              z: dead.z,
+              count: 8,
+              metal: "silver",
+              at: now,
+            });
           }
           // Player-attributed kill: reward it with a power-up chime and a
           // spray of gold coins over the corpse.
@@ -318,6 +358,7 @@ export class GameConnection {
               y: dead.y + 0.8,
               z: dead.z,
               count: 6,
+              metal: "gold",
               at: now,
             });
           }
@@ -430,8 +471,13 @@ export class GameConnection {
           ui.pushPickup({ kind: null, text: "Backpack full", alert: true });
         }
         if (msg.d.gained.length > 0) {
-          // One coin chime per pickup, however many stacks came out of it.
-          playCoin();
+          // One cue per pickup, however many stacks came out of it. Ammo gets
+          // a mechanical cartridge/reload clack; everything else the coin chime.
+          if (msg.d.gained.some((g) => g.kind === "Ammo9mm")) {
+            playAmmo();
+          } else {
+            playCoin();
+          }
         }
         for (const g of msg.d.gained) {
           ui.pushPickup({ kind: g.kind, text: `+${g.count} ${itemLabel(g.kind)}` });

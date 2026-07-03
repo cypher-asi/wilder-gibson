@@ -22,6 +22,7 @@ const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   tracer: 550,
   hit: 800,
   death: 600,
+  gib: 700,
   shockwave: 550,
   flash: 90,
   impact: 380,
@@ -59,25 +60,25 @@ const SHOCKWAVE_GEO = new THREE.RingGeometry(0.82, 1.0, 48);
 const DEATH_RING_GEO = new THREE.RingGeometry(0.7, 0.85, 32);
 
 const TRACER_CORE_MAT = new THREE.MeshBasicMaterial({
-  color: "#fffbe8",
+  color: "#dff3ff",
   toneMapped: false,
 });
 const TRACER_HALO_MAT = new THREE.MeshBasicMaterial({
-  color: "#ffca6a",
+  color: "#4fc3ff",
   transparent: true,
   opacity: 0.55,
   blending: THREE.AdditiveBlending,
   depthWrite: false,
 });
 const TRACER_TRAIL_MAT_BASE = new THREE.MeshBasicMaterial({
-  color: "#ffd27a",
+  color: "#4fd0e0",
   transparent: true,
   opacity: 0.5,
   blending: THREE.AdditiveBlending,
   depthWrite: false,
 });
 const FLASH_MAT_BASE = new THREE.MeshBasicMaterial({
-  color: "#ffe3a0",
+  color: "#bfe9ff",
   transparent: true,
   opacity: 1,
   blending: THREE.AdditiveBlending,
@@ -311,6 +312,8 @@ export function CombatFx() {
           <LootPopFx key={id} ev={ev} />
         ) : ev.type === "coinBurst" ? (
           <CoinBurstFx key={id} ev={ev} />
+        ) : ev.type === "gib" ? (
+          <GibBurst key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -437,7 +440,7 @@ function MuzzleFlashFx({ ev }: { ev: Extract<CombatFxEvent, { type: "flash" }> }
         position={[0.28, 0, 0]}
         dispose={null}
       />
-      <pointLight ref={light} color="#ffbf60" intensity={22} distance={8} />
+      <pointLight ref={light} color="#8fdcff" intensity={22} distance={8} />
     </group>
   );
 }
@@ -720,7 +723,31 @@ const COIN_MAT_BASE = new THREE.MeshStandardMaterial({
   transparent: true,
   opacity: 1,
 });
+// Silver variant for the death shower (distinct from the gold reward coins).
+const COIN_MAT_SILVER = new THREE.MeshStandardMaterial({
+  color: "#d8dde6",
+  emissive: "#9aa6b4",
+  emissiveIntensity: 0.5,
+  metalness: 0.85,
+  roughness: 0.25,
+  transparent: true,
+  opacity: 1,
+});
 const COIN_GRAVITY = 11;
+
+// Small angular chunk flung out when a body is destroyed. Tetrahedron reads as
+// a jagged gib; tint is set per burst to match the dead entity's body color.
+const GIB_GEO = new THREE.TetrahedronGeometry(0.12, 0);
+const GIB_MAT_BASE = new THREE.MeshStandardMaterial({
+  color: "#ff6a7c",
+  emissive: "#ff2d5e",
+  emissiveIntensity: 0.5,
+  roughness: 0.6,
+  metalness: 0.1,
+  transparent: true,
+  opacity: 1,
+});
+const GIB_GRAVITY = 9;
 
 /**
  * Gold coins that pop up out of a spot, spin like Mario coins, arc under
@@ -728,7 +755,9 @@ const COIN_GRAVITY = 11;
  */
 function CoinBurstFx({ ev }: { ev: Extract<CombatFxEvent, { type: "coinBurst" }> }) {
   const group = useRef<THREE.Group>(null);
-  const material = useClonedMaterial(COIN_MAT_BASE);
+  const material = useClonedMaterial(
+    ev.metal === "silver" ? COIN_MAT_SILVER : COIN_MAT_BASE,
+  );
   const coins = useMemo(() => {
     const n = Math.max(1, Math.min(ev.count, 10));
     return Array.from({ length: n }, () => {
@@ -771,6 +800,67 @@ function CoinBurstFx({ ev }: { ev: Extract<CombatFxEvent, { type: "coinBurst" }>
           geometry={COIN_GEO}
           material={material}
           rotation={[Math.PI / 2, 0, 0]}
+          dispose={null}
+        />
+      ))}
+    </group>
+  );
+}
+
+/**
+ * Body-shatter burst: a spray of jagged chunks in the dead entity's body color
+ * that fly outward, tumble, and fall under gravity before fading out.
+ */
+function GibBurst({ ev }: { ev: Extract<CombatFxEvent, { type: "gib" }> }) {
+  const group = useRef<THREE.Group>(null);
+  const material = useClonedMaterial(GIB_MAT_BASE);
+  useMemo(() => {
+    material.color.set(ev.color);
+    material.emissive.set(ev.color);
+  }, [material, ev.color]);
+  const parts = useMemo(
+    () =>
+      Array.from({ length: 12 }, () => {
+        const a = Math.random() * Math.PI * 2;
+        const speed = 1.6 + Math.random() * 2.8;
+        return {
+          vx: Math.cos(a) * speed,
+          vy: 2.2 + Math.random() * 2.6,
+          vz: Math.sin(a) * speed,
+          spinX: 6 + Math.random() * 18,
+          spinZ: 6 + Math.random() * 18,
+          scale: 0.6 + Math.random() * 0.9,
+        };
+      }),
+    [],
+  );
+
+  useFrame(() => {
+    if (!group.current) return;
+    const life = (performance.now() - ev.at) / LIFETIME_MS.gib;
+    group.current.visible = life < 1;
+    if (life >= 1) return;
+    const t = (performance.now() - ev.at) / 1000;
+    material.opacity = THREE.MathUtils.clamp((1 - life) * 2, 0, 1);
+    group.current.children.forEach((child, i) => {
+      const p = parts[i];
+      child.position.set(
+        p.vx * t,
+        p.vy * t - GIB_GRAVITY * t * t * 0.5,
+        p.vz * t,
+      );
+      child.rotation.set(p.spinX * t, 0, p.spinZ * t);
+    });
+  });
+
+  return (
+    <group ref={group} position={[ev.x, ev.y + 0.6, ev.z]}>
+      {parts.map((p, i) => (
+        <mesh
+          key={i}
+          geometry={GIB_GEO}
+          material={material}
+          scale={p.scale}
           dispose={null}
         />
       ))}

@@ -49,6 +49,10 @@ const EXTRACT_SECONDS: f32 = 5.0;
 const NPC_RESPAWN_SECONDS: f32 = 45.0;
 /// Loot containers despawn after this long, seconds.
 const LOOT_TTL_SECONDS: f32 = 120.0;
+/// Loose currency pickups (coins/shards/energy) despawn after this long.
+const CURRENCY_PICKUP_TTL: f32 = 60.0;
+/// Currency pickups auto-collect when a player walks within this distance.
+const CURRENCY_PICKUP_RADIUS: f32 = 1.6;
 /// Static ammo caches scattered through every chunk. Kept off the roads
 /// (pedestrian tiles only, see `ammo_cache_spots`) and dialed back so ammo is
 /// findable but not everywhere; count per chunk and rounds per cache.
@@ -568,6 +572,35 @@ struct LootContainer {
     in_supply: bool,
 }
 
+/// A minted currency that can drop as a loose, collectible pickup.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Currency {
+    Wild,
+    Shards,
+    Energy,
+}
+
+impl Currency {
+    /// Replicated `variant` index the client uses to pick the pickup's look.
+    fn variant(self) -> u32 {
+        match self {
+            Currency::Wild => 0,
+            Currency::Shards => 1,
+            Currency::Energy => 2,
+        }
+    }
+}
+
+/// Loose currency scattered on death; grants its amount when a player walks
+/// over it, then despawns. Purely a faucet (minted on pickup).
+struct CurrencyPickup {
+    entity: EntityId,
+    position: Vec3,
+    currency: Currency,
+    amount: u32,
+    ttl: f32,
+}
+
 struct StaticEntity {
     entity: EntityId,
     kind: EntityKind,
@@ -604,6 +637,8 @@ pub struct World {
     /// Hostile chunks whose NPCs have already been spawned this session.
     npc_seeded_chunks: HashSet<ChunkCoord>,
     loot: HashMap<EntityId, LootContainer>,
+    /// Loose currency dropped on death, auto-collected on walk-over.
+    pickups: HashMap<EntityId, CurrencyPickup>,
     statics: HashMap<EntityId, StaticEntity>,
     nodes: HashMap<EntityId, ResourceNode>,
     static_seeded_chunks: HashSet<ChunkCoord>,
@@ -653,6 +688,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         npcs: HashMap::new(),
         npc_seeded_chunks: HashSet::new(),
         loot: HashMap::new(),
+        pickups: HashMap::new(),
         statics: HashMap::new(),
         nodes: HashMap::new(),
         static_seeded_chunks: HashSet::new(),
@@ -1259,6 +1295,26 @@ impl World {
             // items stay owned by (attributed to) the dead agent until
             // someone picks them up or the container expires.
             self.spawn_loot(drop_pos, items, Some(agent), true);
+            // Loose currency spills out alongside the crate: a random handful
+            // of WILD coins (raiders carry more), plus an occasional shard and
+            // energy cell. These are walk-over collectibles (minted faucet).
+            use rand::Rng;
+            let coins = if is_raider {
+                self.rng.random_range(3..=6)
+            } else {
+                self.rng.random_range(2..=4)
+            };
+            for _ in 0..coins {
+                let amount = self.rng.random_range(1..=3);
+                self.spawn_currency_pickup(drop_pos, Currency::Wild, amount);
+            }
+            if self.rng.random_bool(if is_raider { 0.5 } else { 0.25 }) {
+                let shards = self.rng.random_range(1..=2);
+                self.spawn_currency_pickup(drop_pos, Currency::Shards, shards);
+            }
+            if self.rng.random_bool(0.2) {
+                self.spawn_currency_pickup(drop_pos, Currency::Energy, 1);
+            }
         }
     }
 
@@ -1383,6 +1439,55 @@ impl World {
         let (shards, energy) = (player.shards, player.energy);
         self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Energy { amount }, 0);
         let _ = self.store.update_currencies(account, shards, energy);
+    }
+
+    /// Grant wallet WILD (minted faucet); see `grant_shards`. Used for the
+    /// loose coin pickups dropped on death.
+    fn grant_wild(&mut self, entity: EntityId, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.wallet += amount;
+        let to = player_party(player);
+        let account = player.character.account_id;
+        let wallet = player.wallet;
+        self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Wild { amount }, 0);
+        let _ = self.store.update_wallet(account, wallet);
+    }
+
+    /// Grant currency by kind (routes to the matching faucet helper).
+    fn grant_currency(&mut self, entity: EntityId, currency: Currency, amount: u32) {
+        match currency {
+            Currency::Wild => self.grant_wild(entity, amount),
+            Currency::Shards => self.grant_shards(entity, amount),
+            Currency::Energy => self.grant_energy(entity, amount),
+        }
+    }
+
+    /// Drop a loose currency pickup, jittered around `position` so multiple
+    /// drops from one kill read as separate collectibles on the ground.
+    fn spawn_currency_pickup(&mut self, position: Vec3, currency: Currency, amount: u32) {
+        use rand::Rng;
+        if amount == 0 {
+            return;
+        }
+        let entity = self.alloc_entity();
+        let jitter = Vec3::new(
+            self.rng.random_range(-0.9..=0.9),
+            0.0,
+            self.rng.random_range(-0.9..=0.9),
+        );
+        self.pickups.insert(
+            entity,
+            CurrencyPickup {
+                entity,
+                position: position + jitter,
+                currency,
+                amount,
+                ttl: CURRENCY_PICKUP_TTL,
+            },
+        );
     }
 
     fn interact(&mut self, entity: EntityId, target: EntityId) {
@@ -2977,6 +3082,42 @@ impl World {
                 }
             }
         }
+
+        self.tick_currency_pickups();
+    }
+
+    /// Walk-over auto-collect for loose currency, plus TTL expiry. The client
+    /// hears the pickup cue and shows the "+N" toast off the resulting
+    /// WalletUpdate and the pickup entity's despawn.
+    fn tick_currency_pickups(&mut self) {
+        let mut grabbed: Vec<(EntityId, EntityId, Currency, u32)> = Vec::new();
+        for player in self.players.values() {
+            for pickup in self.pickups.values() {
+                if (pickup.position - player.character.position).length()
+                    <= CURRENCY_PICKUP_RADIUS
+                {
+                    grabbed.push((player.entity, pickup.entity, pickup.currency, pickup.amount));
+                }
+            }
+        }
+        for (pid, cid, currency, amount) in grabbed {
+            // Another player may have grabbed it earlier this pass.
+            if self.pickups.remove(&cid).is_none() {
+                continue;
+            }
+            self.grant_currency(pid, currency, amount);
+        }
+
+        let mut expired = Vec::new();
+        for pickup in self.pickups.values_mut() {
+            pickup.ttl -= TICK_DT;
+            if pickup.ttl <= 0.0 {
+                expired.push(pickup.entity);
+            }
+        }
+        for id in expired {
+            self.pickups.remove(&id);
+        }
     }
 
     fn tick_nodes(&mut self) {
@@ -3350,6 +3491,37 @@ impl World {
                 snap: EntitySnapshot {
                     id: container.entity,
                     position: container.position,
+                    yaw: 0.0,
+                    anim: AnimState::Idle,
+                    health_pct: 1.0,
+                    shield_pct: 0.0,
+                },
+            });
+        }
+        for pickup in self.pickups.values() {
+            all.push(Replicated {
+                id: pickup.entity,
+                chunk: ChunkCoord::from_world(pickup.position),
+                spawn: EntitySpawnData {
+                    id: pickup.entity,
+                    kind: EntityKind::CurrencyPickup,
+                    name: match pickup.currency {
+                        Currency::Wild => "WILD".into(),
+                        Currency::Shards => "Shards".into(),
+                        Currency::Energy => "Energy".into(),
+                    },
+                    appearance: Appearance::default(),
+                    position: pickup.position,
+                    yaw: 0.0,
+                    anim: AnimState::Idle,
+                    health_pct: 1.0,
+                    // Currency type drives the client's pickup look.
+                    variant: pickup.currency.variant(),
+                    item: None,
+                },
+                snap: EntitySnapshot {
+                    id: pickup.entity,
+                    position: pickup.position,
                     yaw: 0.0,
                     anim: AnimState::Idle,
                     health_pct: 1.0,
