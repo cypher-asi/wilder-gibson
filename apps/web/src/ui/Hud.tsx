@@ -6,6 +6,7 @@ import { AbilityKind, ItemKind } from "../net/protocol";
 import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
+import { RED_HEX } from "./colors";
 import { GameMenu } from "./GameMenu";
 import { HoloMap } from "./HoloMap";
 import { Minimap } from "./Minimap";
@@ -107,7 +108,7 @@ function Crosshair() {
               ? game.entities.get(game.hoverTargetId)
               : undefined;
           const onEnemy = !!t && t.healthPct > 0 && t.anim !== "Death";
-          node.style.color = onEnemy ? "#ff3040" : "#ffffff";
+          node.style.color = onEnemy ? RED_HEX : "#ffffff";
         }
       }
       // Aiming hides the OS cursor (crosshair stands in); otherwise a themed

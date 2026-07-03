@@ -18,6 +18,7 @@ import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState } from "../net/protocol";
 import { perf } from "../perf/perf";
 import { game, GameEntity, GunMount, useGame } from "../state/game";
+import { RED_HEX, RED_NUM } from "../ui/colors";
 import { groundHeightAt } from "./Ground";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
@@ -117,7 +118,7 @@ const GUN_RECOIL_KICK = 0.45;
 const GUN_AIM_PITCH = 0.05;
 /** Duration of the red damage flash, ms. */
 const HIT_FLASH_MS = 200;
-const HIT_FLASH_COLOR = new THREE.Color(0xff2822);
+const HIT_FLASH_COLOR = new THREE.Color(RED_NUM);
 
 /**
  * World speed (m/s) each locomotion clip was authored around; playback rate
@@ -280,12 +281,14 @@ function applyMannequinPalette(
       // Flat, light red silhouette: kill all shading/detail so the whole
       // body reads as one translucent shape (the border does the rest).
       m.color.set(0x000000);
-      m.emissive.set(0xff5566);
-      m.emissiveIntensity = 0.8;
+      m.emissive.set(RED_NUM);
+      // Solid, dim flat fill; the brighter rim (drawn after) frames it.
+      m.emissiveIntensity = 0.55;
       m.roughness = 1;
       m.metalness = 0;
-      m.transparent = true;
-      m.opacity = 0.55;
+      m.transparent = false;
+      m.opacity = 1;
+      m.depthWrite = true;
       f.baseEmissive.copy(m.emissive);
       f.baseIntensity = m.emissiveIntensity;
       continue;
@@ -296,13 +299,13 @@ function applyMannequinPalette(
     if (f.joints) {
       if (tron) {
         m.color.set(0x04080c);
-        m.emissive.set(hostile ? 0xff4028 : 0x4fd0e0);
+        m.emissive.set(hostile ? RED_NUM : 0x4fd0e0);
         m.emissiveIntensity = hostile ? 2.6 : 3.2;
         m.roughness = 0.3;
         m.metalness = 0.6;
       } else {
         m.color.set(0x101318);
-        m.emissive.set(hostile ? 0xff3040 : tint || 0x40e8ff);
+        m.emissive.set(hostile ? RED_NUM : tint || 0x40e8ff);
         m.emissiveIntensity = 1.6;
         m.roughness = 0.35;
         m.metalness = 0.5;
@@ -364,9 +367,9 @@ function restyleMannequin(
 }
 
 /** Warning red for the enemy silhouette border (matches reticle/hpbar). */
-const ENEMY_OUTLINE_COLOR = new THREE.Color("#ff3040");
+const ENEMY_OUTLINE_COLOR = new THREE.Color(RED_NUM);
 /** World-space border half-width, in metres. */
-const ENEMY_OUTLINE_THICKNESS = 0.015;
+const ENEMY_OUTLINE_THICKNESS = 0.03;
 
 const ENEMY_OUTLINE_VERT = /* glsl */ `
   #include <common>
@@ -398,7 +401,7 @@ function makeEnemyOutlineMaterial(): THREE.ShaderMaterial {
     depthWrite: false,
     uniforms: {
       color: { value: ENEMY_OUTLINE_COLOR.clone() },
-      opacity: { value: 0.55 },
+      opacity: { value: 0.9 },
       thickness: { value: ENEMY_OUTLINE_THICKNESS },
     },
     vertexShader: ENEMY_OUTLINE_VERT,
@@ -431,7 +434,11 @@ function attachEnemyOutline(scene: THREE.Group): {
     const outline = new THREE.SkinnedMesh(skinned.geometry, mat);
     outline.bind(skinned.skeleton, skinned.bindMatrix);
     outline.frustumCulled = false;
-    outline.renderOrder = -1;
+    // Draw AFTER the body so the expanded back faces are depth-culled inside
+    // the silhouette (the body writes depth) and only survive as a clean rim
+    // around the edge — otherwise the border bleeds through the transparent
+    // interior and the two read as one flat shape.
+    outline.renderOrder = 2;
     skinned.parent!.add(outline);
     materials.push(mat);
     created.push(outline);
@@ -659,7 +666,7 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     }
     if (outlineMats.current.length > 0) {
       // Gentle breathing glow; fade the border out as the enemy dies.
-      const pulse = 0.5 + Math.sin(now * 0.005) * 0.12;
+      const pulse = 0.85 + Math.sin(now * 0.005) * 0.12;
       const alpha = dying ? 0 : pulse;
       for (const mat of outlineMats.current) mat.uniforms.opacity.value = alpha;
     }
@@ -833,13 +840,14 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   const tron = useGame((s) => isTronStyle(s.visualStyle));
   const tint = tron ? new THREE.Color("#4fd0e0") : new THREE.Color(entity.tint);
   const isNpc = entity.kind === "Npc";
-  const bodyColor = tron ? "#040a0e" : isNpc ? "#4a3038" : "#2b3550";
+  const tronNpc = tron && isNpc;
+  const bodyColor = tronNpc ? "#000000" : tron ? "#040a0e" : isNpc ? "#4a3038" : "#2b3550";
   const visor = tron
     ? isNpc
-      ? "#ff4028"
+      ? RED_HEX
       : "#4fd0e0"
     : isNpc
-      ? "#ff4444"
+      ? RED_HEX
       : "#40e8ff";
 
   useFrame(({ clock }) => {
@@ -856,9 +864,22 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
     <group ref={group}>
       <mesh position={[0, 0.85, 0]} castShadow>
         <capsuleGeometry args={[0.32, 0.85, 6, 12]} />
-        <meshStandardMaterial color={bodyColor} roughness={0.55} metalness={0.2} />
+        <meshStandardMaterial
+          color={bodyColor}
+          emissive={tronNpc ? RED_HEX : "#000000"}
+          emissiveIntensity={tronNpc ? 0.55 : 1}
+          roughness={0.55}
+          metalness={0.2}
+        />
         {isNpc && (
-          <Outlines color="#ff3040" thickness={3.5} transparent opacity={0.85} screenspace />
+          <Outlines
+            color={RED_HEX}
+            thickness={3}
+            transparent
+            opacity={0.9}
+            screenspace
+            renderOrder={2}
+          />
         )}
       </mesh>
       {/* shoulder tint band */}
@@ -870,7 +891,14 @@ function ProceduralCharacter({ entity }: { entity: GameEntity }) {
         <sphereGeometry args={[0.21, 12, 12]} />
         <meshStandardMaterial color="#14161c" roughness={0.3} metalness={0.6} />
         {isNpc && (
-          <Outlines color="#ff3040" thickness={3.5} transparent opacity={0.85} screenspace />
+          <Outlines
+            color={RED_HEX}
+            thickness={3}
+            transparent
+            opacity={0.9}
+            screenspace
+            renderOrder={2}
+          />
         )}
       </mesh>
       {/* visor faces +X (yaw 0 looks along +X) */}

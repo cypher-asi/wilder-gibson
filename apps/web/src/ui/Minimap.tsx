@@ -21,6 +21,7 @@ import {
 } from "../game/citymap";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
+import { RED_HEX, redGlow } from "./colors";
 
 /** Canvas size in CSS px (square panel with notched corners). */
 const SIZE = 230;
@@ -38,7 +39,7 @@ const TILE_FILL: Record<number, string> = {
   [CITY_SIDEWALK]: "rgba(5, 13, 26, 0.62)",
   [CITY_PLAZA]: "rgba(6, 16, 32, 0.62)",
   [CITY_PARK]: "rgba(4, 16, 26, 0.62)",
-  [CITY_BUILDING]: "#0a1830",
+  [CITY_BUILDING]: "rgba(6, 12, 22, 0.82)",
 };
 const WATER_FILL = "rgba(1, 4, 10, 0.62)";
 
@@ -121,14 +122,14 @@ export function Minimap() {
           }
         }
       }
-      bctx.strokeStyle = "rgba(79, 195, 255, 0.85)";
+      bctx.strokeStyle = "rgba(255, 255, 255, 0.95)";
       bctx.lineWidth = 1;
-      bctx.shadowColor = "rgba(79, 195, 255, 0.9)";
-      bctx.shadowBlur = 5;
+      bctx.shadowColor = "rgba(255, 255, 255, 0.9)";
+      bctx.shadowBlur = 6;
       bctx.stroke();
       // Second pass without blur sharpens the line over its own glow.
       bctx.shadowBlur = 0;
-      bctx.strokeStyle = "rgba(180, 230, 255, 0.55)";
+      bctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
       bctx.stroke();
 
       baseCx = cx;
@@ -171,7 +172,7 @@ export function Minimap() {
       {
         const [x0, y0] = toScreen(-CHUNK_SIZE, -CHUNK_SIZE);
         const [x1, y1] = toScreen(CHUNK_SIZE * 2, CHUNK_SIZE * 2);
-        ctx.strokeStyle = "rgba(41, 217, 140, 0.8)";
+        ctx.strokeStyle = "rgba(79, 195, 255, 0.8)";
         ctx.lineWidth = 1.5;
         ctx.setLineDash([5, 4]);
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
@@ -184,7 +185,7 @@ export function Minimap() {
         const [sx, sy] = toScreen(entity.x, entity.z);
         if (sx < -8 || sy < -8 || sx > SIZE + 8 || sy > SIZE + 8) continue;
         if (entity.kind === "ExtractionPoint") {
-          ctx.fillStyle = "#ffd24a";
+          ctx.fillStyle = "#ffffff";
           ctx.beginPath();
           ctx.moveTo(sx, sy - 5);
           ctx.lineTo(sx + 5, sy);
@@ -194,11 +195,11 @@ export function Minimap() {
           ctx.fill();
         } else if (entity.kind === "Npc") {
           ctx.save();
-          ctx.shadowColor = "rgba(255, 26, 46, 0.9)";
+          ctx.shadowColor = redGlow(0.9);
           ctx.shadowBlur = 6;
-          ctx.fillStyle = "#ff1a2e";
+          ctx.fillStyle = RED_HEX;
           ctx.beginPath();
-          ctx.arc(sx, sy, 3.4, 0, Math.PI * 2);
+          ctx.arc(sx, sy, 2.38, 0, Math.PI * 2);
           ctx.fill();
           ctx.restore();
         } else if (entity.kind === "Player") {

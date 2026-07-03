@@ -21,7 +21,7 @@ import {
   ToneMapping,
   Vignette,
 } from "@react-three/postprocessing";
-import { ToneMappingMode } from "postprocessing";
+import { BloomEffect, ToneMappingMode } from "postprocessing";
 import type { SunDirectionalLight } from "@takram/three-atmosphere";
 import {
   AerialPerspective,
@@ -33,9 +33,17 @@ import {
 } from "@takram/three-atmosphere/r3f";
 import { Clouds } from "@takram/three-clouds/r3f";
 import { Ellipsoid, Geodetic, radians } from "@takram/three-geospatial";
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import * as THREE from "three";
 import { perf } from "../perf/perf";
+import { animeShadowSize, goldenShadowSize, useQuality } from "../perf/quality";
 import { game, useGame } from "../state/game";
 import { tickFacades } from "./facade";
 import {
@@ -106,6 +114,10 @@ export function SunsetAtmosphere({ children }: { children: ReactNode }) {
 
 function GoldenLighting() {
   const sunRef = useRef<SunDirectionalLight>(null);
+  // 2048 reads the same as the old 4096 through the soft golden light and
+  // normalBias, at a quarter of the shadow-pass fill; low tier halves again.
+  // Keyed remount on tier change so the map is rebuilt at the new size.
+  const shadowSize = goldenShadowSize(useQuality((s) => s.tier));
 
   useFrame(() => {
     // Keep the shadow camera centered on the player so shadows stay crisp.
@@ -119,11 +131,12 @@ function GoldenLighting() {
       {/* Sun radiance comes from the atmosphere's transmittance LUT, so the
           color/intensity is the physical warm low sun automatically. */}
       <SunLight
+        key={shadowSize}
         ref={sunRef}
         distance={90}
         intensity={3}
         castShadow
-        shadow-mapSize={[4096, 4096]}
+        shadow-mapSize={[shadowSize, shadowSize]}
         shadow-camera-left={-70}
         shadow-camera-right={70}
         shadow-camera-top={70}
@@ -154,6 +167,9 @@ function AnimeLighting({ style }: { style: VisualStyle }) {
   const lights = style.lights!;
   const keyRef = useRef<THREE.DirectionalLight>(null);
   const target = useMemo(() => new THREE.Object3D(), []);
+  // Painterly lighting hides shadow resolution well; 1024 is enough (512 on
+  // the low tier). Keyed remount rebuilds the map on tier change.
+  const shadowSize = animeShadowSize(useQuality((s) => s.tier));
 
   useFrame(() => {
     const key = keyRef.current;
@@ -170,12 +186,13 @@ function AnimeLighting({ style }: { style: VisualStyle }) {
     <>
       <primitive object={target} />
       <directionalLight
+        key={shadowSize}
         ref={keyRef}
         color={lights.sunColor}
         intensity={lights.sunIntensity}
         target={target}
         castShadow
-        shadow-mapSize={[2048, 2048]}
+        shadow-mapSize={[shadowSize, shadowSize]}
         shadow-camera-left={-70}
         shadow-camera-right={70}
         shadow-camera-top={70}
@@ -394,44 +411,103 @@ const GROUND_ALBEDO = new THREE.Color(0.1, 0.16, 0.18);
 const WEATHER_VELOCITY = new THREE.Vector2(0.001, 0);
 const SHADOW_MAP_SIZE = new THREE.Vector2(256, 256);
 
-function GoldenEffects() {
-  return (
-    // MSAA off: SMAA handles the edges, which keeps the AO pass cheap.
-    <EffectComposer multisampling={0}>
-      <N8AO halfRes quality="performance" aoRadius={1.9} intensity={1.8} distanceFalloff={1.5} />
-      {/* Volumetric clouds render into buffers here and are composited (with
-          atmosphere overlay/shadow routing) by AerialPerspective below. */}
-      <Clouds
-        qualityPreset="medium"
-        resolutionScale={0.75}
-        coverage={0.27}
-        localWeatherVelocity={WEATHER_VELOCITY}
-        shadow-cascadeCount={1}
-        shadow-mapSize={SHADOW_MAP_SIZE}
-        localWeatherTexture="/clouds/local_weather.png"
-        shapeTexture="/clouds/shape.bin"
-        shapeDetailTexture="/clouds/shape_detail.bin"
-        turbulenceTexture="/clouds/turbulence.png"
-        stbnTexture="/clouds/stbn.bin"
-      />
-      <AerialPerspective stbnTexture="/clouds/stbn.bin" />
-      {/* The composer disables the renderer's built-in tone mapping, so map
-          the physical-luminance HDR buffer to display here (AgX, exposure
-          from gl.toneMappingExposure). */}
-      <ToneMapping mode={ToneMappingMode.AGX} />
-      {/* Bloom runs AFTER tone mapping on display-referred [0,1] values, so
-          its energy is bounded: an HDR sun glint on the ground or the sky's
-          forward-scattering halo (orders of magnitude above any pre-tonemap
-          threshold) can no longer smear a screen-filling glare. Near-white
-          pixels (neon, emissives, the sun's core glow) still get a halo. */}
-      <Bloom intensity={0.25} luminanceThreshold={0.92} luminanceSmoothing={0.08} mipmapBlur />
-      {/* light golden-hour grade: richer color, gentle contrast */}
-      <HueSaturation saturation={0.18} />
-      <BrightnessContrast brightness={0} contrast={0.15} />
-      <SMAA />
-      <Vignette eskil={false} offset={0.15} darkness={0.5} />
-    </EffectComposer>
+/**
+ * Bloom pyramid base height. Bloom is inherently low-frequency (mip blur
+ * spreads everything anyway), so building the luminance + mip chain from
+ * 360p instead of canvas resolution is visually indistinguishable while
+ * cutting the bloom pass cost by ~5-10x at dpr 1.75. This matters most in
+ * tron, whose look leans on a strong full-screen bloom.
+ */
+const BLOOM_HEIGHT = 360;
+
+/**
+ * Bloom with the pyramid capped at BLOOM_HEIGHT. postprocessing's BloomEffect
+ * ignores its `resolution` for the luminance + mipmap passes (setSize hands
+ * them the raw base size), so cap by intercepting setSize on the instance.
+ */
+function CappedBloom(props: ComponentProps<typeof Bloom>) {
+  const gl = useThree((s) => s.gl);
+  const attach = useCallback(
+    (bloom: BloomEffect | null) => {
+      if (!bloom || (bloom as { __capped?: boolean }).__capped) return;
+      (bloom as { __capped?: boolean }).__capped = true;
+      const setSize = bloom.setSize.bind(bloom);
+      bloom.setSize = (width: number, height: number) => {
+        const scale = Math.min(1, BLOOM_HEIGHT / Math.max(1, height));
+        setSize(Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale)));
+      };
+      // The composer sizes effects before refs attach; re-apply immediately.
+      const size = gl.getDrawingBufferSize(bloomSizeScratch);
+      bloom.setSize(size.x, size.y);
+    },
+    [gl],
   );
+  return <Bloom ref={attach} {...props} />;
+}
+
+const bloomSizeScratch = new THREE.Vector2();
+
+function GoldenEffects() {
+  const tier = useQuality((s) => s.tier);
+  const effects = [
+    /* Volumetric clouds render into buffers here and are composited (with
+       atmosphere overlay/shadow routing) by AerialPerspective below. The
+       ray-march resolution follows the quality tier. */
+    <Clouds
+      key={`clouds-${tier}`}
+      qualityPreset={tier === "high" ? "medium" : "low"}
+      resolutionScale={tier === "high" ? 0.75 : 0.5}
+      coverage={0.27}
+      localWeatherVelocity={WEATHER_VELOCITY}
+      shadow-cascadeCount={1}
+      shadow-mapSize={SHADOW_MAP_SIZE}
+      localWeatherTexture="/clouds/local_weather.png"
+      shapeTexture="/clouds/shape.bin"
+      shapeDetailTexture="/clouds/shape_detail.bin"
+      turbulenceTexture="/clouds/turbulence.png"
+      stbnTexture="/clouds/stbn.bin"
+    />,
+    <AerialPerspective key="aerial" stbnTexture="/clouds/stbn.bin" />,
+    /* The composer disables the renderer's built-in tone mapping, so map
+       the physical-luminance HDR buffer to display here (AgX, exposure
+       from gl.toneMappingExposure). */
+    <ToneMapping key="tm" mode={ToneMappingMode.AGX} />,
+    /* Bloom runs AFTER tone mapping on display-referred [0,1] values, so
+       its energy is bounded: an HDR sun glint on the ground or the sky's
+       forward-scattering halo (orders of magnitude above any pre-tonemap
+       threshold) can no longer smear a screen-filling glare. Near-white
+       pixels (neon, emissives, the sun's core glow) still get a halo.
+       Capped at 360p: the mip chain starts small, so the halo cost stays
+       flat as the canvas grows. */
+    <CappedBloom
+      key="bloom"
+      intensity={0.25}
+      luminanceThreshold={0.92}
+      luminanceSmoothing={0.08}
+      mipmapBlur
+    />,
+    /* light golden-hour grade: richer color, gentle contrast */
+    <HueSaturation key="hs" saturation={0.18} />,
+    <BrightnessContrast key="bc" brightness={0} contrast={0.15} />,
+    <SMAA key="smaa" />,
+    <Vignette key="vig" eskil={false} offset={0.15} darkness={0.5} />,
+  ];
+  if (tier !== "low") {
+    // Low tier: skip the AO pass entirely; the soft golden light hides its
+    // absence far better than the frame-time cost hides itself.
+    effects.unshift(
+      <N8AO
+        key="ao"
+        halfRes
+        quality="performance"
+        aoRadius={1.9}
+        intensity={1.8}
+        distanceFalloff={1.5}
+      />,
+    );
+  }
+  // MSAA off: SMAA handles the edges, which keeps the AO pass cheap.
+  return <EffectComposer multisampling={0}>{effects}</EffectComposer>;
 }
 
 /** Post stack for the painted-sky styles: no volumetric clouds — bloom for
@@ -440,8 +516,9 @@ function GoldenEffects() {
  * the grounded contact darkening; the painterly styles skip it for speed). */
 function AnimeEffects({ style }: { style: VisualStyle }) {
   const post = style.post!;
+  const tier = useQuality((s) => s.tier);
   const effects = [
-    <Bloom
+    <CappedBloom
       key="bloom"
       intensity={post.bloom}
       luminanceThreshold={post.bloomThreshold}
@@ -454,7 +531,7 @@ function AnimeEffects({ style }: { style: VisualStyle }) {
     <SMAA key="smaa" />,
     <Vignette key="vig" eskil={false} offset={0.15} darkness={post.vignette} />,
   ];
-  if (post.ao) {
+  if (post.ao && tier !== "low") {
     effects.unshift(
       <N8AO
         key="ao"

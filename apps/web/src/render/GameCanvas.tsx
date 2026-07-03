@@ -1,5 +1,6 @@
 import { Canvas } from "@react-three/fiber";
 import { GameConnection } from "../net/connection";
+import { AdaptiveQuality } from "../perf/AdaptiveQuality";
 import { PerfTracker } from "../perf/PerfTracker";
 import { useGame } from "../state/game";
 import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
@@ -23,7 +24,10 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       shadows
       dpr={[1, 1.75]}
       camera={{ fov: 34, near: 0.5, far: CAMERA_FAR }}
-      gl={{ antialias: true, powerPreference: "high-performance" }}
+      // No MSAA: every style composites through the EffectComposer (which
+      // renders into non-multisampled targets) and SMAA handles the edges,
+      // so default-framebuffer multisampling is pure overhead at high DPR.
+      gl={{ antialias: false, powerPreference: "high-performance" }}
       frameloop={mapOpen || menuOpen ? "never" : "always"}
       style={{ position: "absolute", inset: 0, visibility: mapOpen ? "hidden" : "visible" }}
       onCreated={({ gl, scene }) => {
@@ -40,6 +44,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       }}
     >
       <PerfTracker />
+      <AdaptiveQuality />
       <SunsetAtmosphere>
         <SceneSetup />
         <Lighting />

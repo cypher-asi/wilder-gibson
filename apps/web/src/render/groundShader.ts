@@ -235,19 +235,6 @@ if (uTron > 0.5) {
       float tHalo = (1.0 - smoothstep(0.0, 0.45, tMajor)) * 0.06
                   + (1.0 - smoothstep(0.0, 0.16, tMinor)) * 0.03;
       gEmissive += TRON_BLUE * (tLine * 1.4 + tHalo) * (gW.y * tFade);
-      // Holographic echo: a faint transparent white twin of the grid hugging
-      // each cyan line, nudged toward the camera so it reads as a layer
-      // sitting just under the grid (lower on screen, but still visible).
-      vec2 tToCam = cameraPosition.xz - wp.xz;
-      vec2 tDir = length(tToCam) > 0.001 ? normalize(tToCam) : vec2(0.0, 1.0);
-      vec2 tGhost = wp.xz - tDir * 0.06;
-      vec2 tG4 = (0.5 - abs(fract(tGhost / 4.0) - 0.5)) * 4.0;
-      float tGMinor = min(tG4.x, tG4.y);
-      vec2 tG16 = (0.5 - abs(fract(tGhost / 16.0) - 0.5)) * 16.0;
-      float tGMajor = min(tG16.x, tG16.y);
-      float tGLine = (1.0 - smoothstep(0.004, 0.011 + tAA, tGMinor)) * 0.5
-                   + (1.0 - smoothstep(0.008, 0.02 + tAA, tGMajor)) * 0.9;
-      gEmissive += TRON_WHITE * (tGLine * 0.22) * (gW.y * tFade);
     }
   }
   // Curb circuit: a hot hairline tracing every road edge, with its own bleed.
