@@ -39,7 +39,7 @@ import {
 import { RED_NUM } from "../ui/colors";
 import { CATEGORY_TICK, ITEM_INFO, ItemCategory } from "../ui/ItemIcon";
 import { groundHeightAt } from "./Ground";
-import { itemSpriteMaterialTinted } from "./itemSprite";
+import { itemSpriteMaterial } from "./itemSprite";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
 
@@ -192,6 +192,12 @@ const MOVE_EPSILON = 0.15;
 const MAX_LEG_YAW = (75 * Math.PI) / 180;
 /** Above this speed the sprint clip takes over from the jog (m/s). */
 const SPRINT_MIN = (WALK_SPEED + RUN_SPEED) / 2;
+/**
+ * Ceiling on gait playback rate (multiple of a clip's authored cadence). Feet
+ * stay locked to the ground up to this rate; beyond it we allow a little slide
+ * rather than cranking the legs fast enough to look sped-up / janky.
+ */
+const GAIT_MAX_RATE = 1.35;
 /**
  * At or below this speed the walk clip is used instead of the jog (m/s).
  * Sits just above the player WALK_SPEED (3.0) so walking plays a sped-up
@@ -930,7 +936,8 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     if (gaitAction) {
       const dur = gaitAction.getClip().duration;
       const ref = CLIP_REF_SPEED[gaitName] ?? WALK_SPEED;
-      gaitPhase.current += (gaitDir.current * speed * dt) / (ref * dur);
+      const rate = Math.min(speed / ref, GAIT_MAX_RATE);
+      gaitPhase.current += (gaitDir.current * rate * dt) / dur;
       gaitPhase.current -= Math.floor(gaitPhase.current);
       for (const name of GAIT_CLIPS) {
         const action = actions.current[name];
@@ -1045,19 +1052,32 @@ const DROP_GEO: Record<ItemCategory, THREE.BufferGeometry> = {
   currency: new THREE.CylinderGeometry(0.12, 0.12, 0.03, 16),
   gadget: new THREE.IcosahedronGeometry(0.13, 0),
 };
-const dropMatCache = new Map<ItemCategory, THREE.MeshStandardMaterial>();
-function dropMaterial(cat: ItemCategory): THREE.MeshStandardMaterial {
-  const cached = dropMatCache.get(cat);
+// Minimal look: every pickup body is the same soft white; the only color is a
+// small category "tick" dot stuck on the object (see PICKUP_DOT_GEO below).
+const SOFT_WHITE = "#e6edf5";
+const dropBodyMat = new THREE.MeshStandardMaterial({
+  color: SOFT_WHITE,
+  emissive: "#aebccb",
+  emissiveIntensity: 0.35,
+  metalness: 0.3,
+  roughness: 0.5,
+});
+
+// Shared little colored dot that marks a pickup's category/currency. One tiny
+// sphere geometry, one emissive material per distinct color (cached).
+const PICKUP_DOT_GEO = new THREE.SphereGeometry(0.045, 10, 8);
+const dotMatCache = new Map<string, THREE.MeshStandardMaterial>();
+function dotMaterial(color: string): THREE.MeshStandardMaterial {
+  const cached = dotMatCache.get(color);
   if (cached) return cached;
-  const color = CATEGORY_TICK[cat];
   const mat = new THREE.MeshStandardMaterial({
     color,
     emissive: color,
-    emissiveIntensity: 0.55,
-    metalness: 0.45,
+    emissiveIntensity: 1.3,
+    metalness: 0.2,
     roughness: 0.4,
   });
-  dropMatCache.set(cat, mat);
+  dotMatCache.set(color, mat);
   return mat;
 }
 
@@ -1090,8 +1110,6 @@ function LootCrate({ entity }: { entity: GameEntity }) {
     }
   });
 
-  const glow = cat ? CATEGORY_TICK[cat] : "#ffffff";
-
   return (
     <group
       onClick={(e) => {
@@ -1110,9 +1128,15 @@ function LootCrate({ entity }: { entity: GameEntity }) {
         <group ref={spinner}>
           <mesh
             geometry={DROP_GEO[cat]}
-            material={dropMaterial(cat)}
+            material={dropBodyMat}
             rotation={cat === "currency" ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
             castShadow
+          />
+          {/* Category color lives only in this little dot stuck on the body. */}
+          <mesh
+            geometry={PICKUP_DOT_GEO}
+            material={dotMaterial(CATEGORY_TICK[cat])}
+            position={[0, 0.12, 0]}
           />
         </group>
       ) : (
@@ -1129,7 +1153,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
             raycast={noRaycast}
           />
           <sprite
-            material={itemSpriteMaterialTinted(entity.item)}
+            material={itemSpriteMaterial(entity.item)}
             scale={isAmmo ? [0.5, 0.5, 1] : [0.3, 0.3, 1]}
             raycast={noRaycast}
           />
@@ -1142,7 +1166,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       {isAmmo ? (
         <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />
       ) : (
-        <GroundGlow color={glow} radius={0.55} opacity={0.45} />
+        <GroundGlow color={SOFT_WHITE} radius={0.55} opacity={0.4} />
       )}
     </group>
   );
@@ -1154,40 +1178,19 @@ function LootCrate({ entity }: { entity: GameEntity }) {
 const pickupCoinGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.03, 16);
 const pickupShardGeo = new THREE.OctahedronGeometry(0.12, 0);
 const pickupEnergyGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.18, 8);
-const pickupCoinMat = new THREE.MeshStandardMaterial({
-  color: "#ffcc33",
-  emissive: "#ffb300",
-  emissiveIntensity: 0.7,
-  metalness: 0.75,
-  roughness: 0.3,
-});
-const pickupShardMat = new THREE.MeshStandardMaterial({
-  color: "#8f7dff",
-  emissive: "#7f4dff",
-  emissiveIntensity: 0.9,
-  metalness: 0.4,
-  roughness: 0.25,
-});
-const pickupEnergyMat = new THREE.MeshStandardMaterial({
-  color: "#39ff8e",
-  emissive: "#12d46a",
-  emissiveIntensity: 1.1,
-  metalness: 0.3,
-  roughness: 0.35,
-});
 
 interface PickupStyle {
   geo: THREE.BufferGeometry;
-  mat: THREE.Material;
-  glow: string;
+  /** Color of the little category dot (the only color on the white body). */
+  dot: string;
   /** Face-flat coins flash their broad side; crystals tumble in place. */
   flat: boolean;
 }
 
 const PICKUP_STYLES: PickupStyle[] = [
-  { geo: pickupCoinGeo, mat: pickupCoinMat, glow: "#ffcc33", flat: true },
-  { geo: pickupShardGeo, mat: pickupShardMat, glow: "#8f7dff", flat: false },
-  { geo: pickupEnergyGeo, mat: pickupEnergyMat, glow: "#39ff8e", flat: false },
+  { geo: pickupCoinGeo, dot: "#ffcc33", flat: true },
+  { geo: pickupShardGeo, dot: "#8f7dff", flat: false },
+  { geo: pickupEnergyGeo, dot: "#39ff8e", flat: false },
 ];
 
 function CurrencyPickupView({ entity }: { entity: GameEntity }) {
@@ -1205,12 +1208,18 @@ function CurrencyPickupView({ entity }: { entity: GameEntity }) {
       <group ref={spinner}>
         <mesh
           geometry={style.geo}
-          material={style.mat}
+          material={dropBodyMat}
           rotation={style.flat ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
           castShadow
         />
+        {/* Currency type shows only as this small colored dot on the body. */}
+        <mesh
+          geometry={PICKUP_DOT_GEO}
+          material={dotMaterial(style.dot)}
+          position={[0, 0.09, 0]}
+        />
       </group>
-      <GroundGlow color={style.glow} radius={0.6} opacity={0.5} />
+      <GroundGlow color={SOFT_WHITE} radius={0.6} opacity={0.4} />
     </group>
   );
 }
