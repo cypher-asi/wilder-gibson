@@ -2844,6 +2844,20 @@ body {
   color: var(--accent);
 }
 
+.econ-footer-close {
+  align-self: flex-start;
+  width: fit-content;
+  cursor: pointer;
+}
+
+.econ-footer-close:hover {
+  color: var(--accent-bright);
+}
+
+.econ-footer-close:hover .invx-footer-hint {
+  color: var(--text);
+}
+
 /* ------------------------------------------------------------------ */
 /* Mario-style reward juice: level-up banner, wallet toasts, coin/xp   */
 /* pops. Appended block; .xp-bar override gives the XP flash a frame.   */

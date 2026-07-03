@@ -388,17 +388,19 @@ function TxFeed() {
 export function EconomyDashboard({ connection }: { connection: GameConnection }) {
   const open = useGame((s) => s.economyOpen);
 
+  // Closing spends the Escape/click: suppress the pointer-lock bounce so it does
+  // not read as an "open game menu" Escape (see CameraRig).
+  const close = () => {
+    cameraState.suppressMenuUntil = performance.now() + 1500;
+    useGame.getState().set({ economyOpen: false });
+  };
+
   useEffect(() => {
     if (!open) return;
     connection.send({ t: "EconomySub", d: { on: true } });
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-      if (e.code === "Escape") {
-        // Escape spent on closing the dashboard: don't let the pointer-lock
-        // bounce read as an "open game menu" Escape (see CameraRig).
-        cameraState.suppressMenuUntil = performance.now() + 1500;
-        useGame.getState().set({ economyOpen: false });
-      }
+      if (e.code === "Escape") close();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
@@ -417,7 +419,7 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
         <TxFeed />
         <SupplyPanel />
       </div>
-      <div className="econ-footer">
+      <div className="econ-footer econ-footer-close" onClick={close}>
         <span className="invx-keycap">K</span> / <span className="invx-keycap">ESC</span>
         <span className="invx-footer-hint">CLOSE</span>
       </div>
