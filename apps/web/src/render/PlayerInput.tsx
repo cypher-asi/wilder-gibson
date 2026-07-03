@@ -18,7 +18,7 @@ import { playSfx } from "../assets/audio";
 import { GameConnection } from "../net/connection";
 import { AbilityKind } from "../net/protocol";
 import { perf } from "../perf/perf";
-import { consumableHotbar, game, GameEntity, useGame } from "../state/game";
+import { game, GameEntity, useGame, weaponHotbar } from "../state/game";
 import { cameraKick, cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
 
@@ -129,9 +129,15 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         const panelVisible =
           (ui.inventoryOpen && ui.inventory !== null) ||
           (ui.craftOpen && ui.nearStation !== null) ||
-          (ui.marketOpen && ui.nearMarket);
+          (ui.marketOpen && ui.nearMarket) ||
+          (ui.vendorOpen && ui.nearVendor !== null);
         if (panelVisible) {
-          ui.set({ inventoryOpen: false, craftOpen: false, marketOpen: false });
+          ui.set({
+            inventoryOpen: false,
+            craftOpen: false,
+            marketOpen: false,
+            vendorOpen: false,
+          });
         } else {
           ui.set({ menuOpen: true });
         }
@@ -165,8 +171,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "KeyQ" && !event.repeat) useAbility("Shockwave");
       if (event.code === "KeyE" && !event.repeat) useAbility("Stim");
       if (event.code === "KeyR" && !event.repeat) useAbility("Overcharge");
-      const digit = /^Digit([1-4])$/.exec(event.code);
-      if (digit && !event.repeat) useConsumable(Number(digit[1]) - 1);
+      const digit = /^(?:Digit|Numpad)([0-9])$/.exec(event.code);
+      if (digit && !event.repeat) {
+        const n = Number(digit[1]);
+        if (n === 0) holsterToFists();
+        else switchWeapon(n - 1);
+      }
     };
     const up = (event: KeyboardEvent) => {
       keys.current[event.code] = false;

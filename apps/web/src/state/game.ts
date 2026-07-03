@@ -16,8 +16,11 @@ import {
   Inventory,
   ItemStack,
   MarketListing,
+  PoiInfo,
   ProductionJob,
   Vec3,
+  VendorOffer,
+  ZoneInfo,
 } from "../net/protocol";
 
 export interface RemoteSample {
@@ -249,6 +252,48 @@ export function consumableHotbar(
   return out;
 }
 
+/**
+ * Canonical weapon order for the number-key hotbar (keys 1..N). A weapon type
+ * always keeps the same relative slot regardless of what you have equipped, so
+ * the bind is stable as gear swaps in and out of the backpack.
+ */
+export const WEAPON_ORDER: import("../net/protocol").ItemKind[] = [
+  "Pistol",
+  "Smg",
+  "Pipe",
+  "Knife",
+];
+
+export interface WeaponHotbarEntry {
+  kind: ItemKind;
+  /** Slot to equip from, or null when this weapon is already equipped. */
+  slot: number | null;
+  equipped: boolean;
+}
+
+/**
+ * Weapons the player owns (equipped + carried), in canonical order, mapped to
+ * the number keys. Equipped weapons live outside the slot grid, so we fold the
+ * equipped weapon back in to keep numbering stable across swaps.
+ */
+export function weaponHotbar(inv: Inventory | null): WeaponHotbarEntry[] {
+  if (!inv) return [];
+  const bySlot = new Map<ItemKind, number>();
+  inv.slots.forEach((stack, slot) => {
+    if (stack && WEAPON_ORDER.includes(stack.kind) && !bySlot.has(stack.kind)) {
+      bySlot.set(stack.kind, slot);
+    }
+  });
+  const equipped = inv.equipped_weapon;
+  return WEAPON_ORDER.filter(
+    (kind) => bySlot.has(kind) || kind === equipped,
+  ).map((kind) => ({
+    kind,
+    slot: kind === equipped ? null : (bySlot.get(kind) ?? null),
+    equipped: kind === equipped,
+  }));
+}
+
 /** Client mirror of wilder-combat::armor_shield (shield capacity per armor). */
 export function armorShield(armor: import("../net/protocol").ItemKind | null): number {
   if (armor === "JacketArmor") return 25;
@@ -305,15 +350,28 @@ interface UiState {
   nearMarket: boolean;
   /** Market panel visibility (auto-closes when leaving the terminal). */
   marketOpen: boolean;
+  /** Persistent points of interest (service buildings), sent once on join. */
+  pois: PoiInfo[];
+  /** Named resource-bias zones ringing the spawn district. */
+  zones: ZoneInfo[];
+  /** Latest vendor snapshot (offers + wallet) from the server. */
+  vendor: { id: number; kind: EntityKind; offers: VendorOffer[]; wallet: number } | null;
+  /** Nearest vendor building in interact range, if any. */
+  nearVendor: { kind: EntityKind; id: number } | null;
+  /** Vendor panel visibility (auto-closes when leaving the vendor). */
+  vendorOpen: boolean;
   /** Fullscreen city map overlay (M key). */
   mapOpen: boolean;
   /** Pause/game menu overlay (Escape). */
   menuOpen: boolean;
   /** Active visual style preset (persisted to localStorage). */
   visualStyle: VisualStyleId;
+  /** Transient large pickup notice shown center-left (id bumps per event). */
+  pickupToast: { text: string; id: number } | null;
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
+  showPickup: (text: string) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleMenu: () => void;
@@ -363,13 +421,21 @@ export const useGame: import("zustand").UseBoundStore<
   market: null,
   nearMarket: false,
   marketOpen: false,
+  pois: [],
+  zones: [],
+  vendor: null,
+  nearVendor: null,
+  vendorOpen: false,
   mapOpen: false,
   menuOpen: false,
   visualStyle: loadVisualStyle(),
+  pickupToast: null,
 
   set: (partial) => set(partial),
   pushChat: (line) =>
     set((s) => ({ chat: [...s.chat.slice(-99), line] })),
+  showPickup: (text) =>
+    set((s) => ({ pickupToast: { text, id: (s.pickupToast?.id ?? 0) + 1 } })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
   toggleMenu: () => set((s) => ({ menuOpen: !s.menuOpen })),
@@ -381,6 +447,7 @@ export const useGame: import("zustand").UseBoundStore<
       inventoryOpen: false,
       craftOpen: false,
       marketOpen: false,
+      vendorOpen: false,
     }),
   setVisualStyle: (style) => {
     if (typeof localStorage !== "undefined") {

@@ -14,8 +14,9 @@ import {
   RUN_SPEED,
   WALK_SPEED,
 } from "../game/collision";
+import { POI_STYLES } from "../game/poi";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
-import { AnimState } from "../net/protocol";
+import { AnimState, EntityKind } from "../net/protocol";
 import { perf } from "../perf/perf";
 import { game, GameEntity, GunMount, useGame } from "../state/game";
 import { RED_HEX, RED_NUM } from "../ui/colors";
@@ -1192,6 +1193,50 @@ function ResourceNodeView({ entity }: { entity: GameEntity }) {
   );
 }
 
+/** One cached canvas texture per building kind: the floating holo sign that
+ * labels every service building in-world. ~10 kinds total, shared by all
+ * instances, so texture cost is flat regardless of entity count. */
+const signCache = new Map<string, { tex: THREE.CanvasTexture; aspect: number }>();
+
+function signTexture(kind: EntityKind): { tex: THREE.CanvasTexture; aspect: number } | null {
+  const style = POI_STYLES[kind];
+  if (!style) return null;
+  let entry = signCache.get(kind);
+  if (entry) return entry;
+  const pad = 14;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  ctx.font = "700 40px Rajdhani, system-ui, sans-serif";
+  const tw = Math.ceil(ctx.measureText(style.label).width);
+  canvas.width = tw + pad * 2;
+  canvas.height = 64;
+  ctx.font = "700 40px Rajdhani, system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(5, 10, 18, 0.55)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.shadowColor = style.color;
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = style.color;
+  ctx.fillText(style.label, pad, canvas.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  entry = { tex, aspect: canvas.width / canvas.height };
+  signCache.set(kind, entry);
+  return entry;
+}
+
+/** Floating holographic name sign above a service building. */
+function HoloSign({ kind, y = 3.1 }: { kind: EntityKind; y?: number }) {
+  const sign = signTexture(kind);
+  if (!sign) return null;
+  const h = 0.62;
+  return (
+    <sprite position={[0, y, 0]} scale={[sign.aspect * h, h, 1]} raycast={noRaycast}>
+      <spriteMaterial map={sign.tex} transparent depthWrite={false} />
+    </sprite>
+  );
+}
+
 /** Industrial crafting station (refinery = amber, factory = magenta, lab = cyan). */
 function StationView({ entity }: { entity: GameEntity }) {
   const accent =
@@ -1236,6 +1281,7 @@ function StationView({ entity }: { entity: GameEntity }) {
         <cylinderGeometry args={[0.07, 0.07, 0.5, 8]} />
         <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.2} />
       </mesh>
+      <HoloSign kind={entity.kind} />
       <GroundGlow color={accent} radius={3} />
     </group>
   );
@@ -1260,6 +1306,7 @@ function StashTerminal({ entity }: { entity: GameEntity }) {
         <planeGeometry args={[0.8, 0.5]} />
         <meshStandardMaterial color="#40e8ff" emissive="#40e8ff" emissiveIntensity={1.6} />
       </mesh>
+      <HoloSign kind="Building" y={2.7} />
     </group>
   );
 }
@@ -1301,7 +1348,88 @@ function MarketTerminal({ entity }: { entity: GameEntity }) {
           opacity={0.85}
         />
       </mesh>
+      <HoloSign kind="MarketTerminal" />
       <GroundGlow color="#ffd700" radius={2.6} />
+    </group>
+  );
+}
+
+/** NPC store kiosk (Armory / Bodega / Bank / Dealership): a counter booth
+ * with an awning in the vendor's accent color and its holo sign. */
+function VendorKiosk({ entity }: { entity: GameEntity }) {
+  const accent = POI_STYLES[entity.kind]?.color ?? "#4fc3ff";
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+        if (entity.kind !== "Dealership") {
+          useGame.getState().set({ vendorOpen: true });
+        }
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      {/* counter */}
+      <mesh position={[0, 0.55, 0.45]} castShadow>
+        <boxGeometry args={[1.9, 1.1, 0.5]} />
+        <meshStandardMaterial color="#161c28" roughness={0.5} metalness={0.6} />
+      </mesh>
+      {/* back wall */}
+      <mesh position={[0, 1.1, -0.5]} castShadow>
+        <boxGeometry args={[1.9, 2.2, 0.35]} />
+        <meshStandardMaterial color="#10151f" roughness={0.55} metalness={0.55} />
+      </mesh>
+      {/* awning */}
+      <mesh position={[0, 2.28, 0.15]} rotation={[-0.18, 0, 0]}>
+        <boxGeometry args={[2.1, 0.08, 1.35]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.9} />
+      </mesh>
+      {/* shelf glow strip */}
+      <mesh position={[0, 1.3, -0.31]}>
+        <planeGeometry args={[1.6, 0.5]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={1.6} />
+      </mesh>
+      <HoloSign kind={entity.kind} />
+      <GroundGlow color={accent} radius={2.8} />
+    </group>
+  );
+}
+
+/** Safehouse: a green-lit shelter dome with a ring marking the safety bubble. */
+function SafehouseView({ entity }: { entity: GameEntity }) {
+  const accent = POI_STYLES.Safehouse?.color ?? "#29d98c";
+  const ring = useRef<THREE.Mesh>(null);
+  useFrame(({ clock }) => {
+    if (ring.current) {
+      (ring.current.material as THREE.MeshBasicMaterial).opacity =
+        0.22 + Math.sin(clock.elapsedTime * 1.6) * 0.08;
+    }
+  });
+  return (
+    <group
+      onClick={(e) => {
+        e.stopPropagation();
+        game.send?.({ t: "Interact", d: { entity_id: entity.id } });
+      }}
+      onPointerOver={() => (document.body.style.cursor = "pointer")}
+      onPointerOut={() => (document.body.style.cursor = "default")}
+    >
+      <mesh position={[0, 0.75, 0]} castShadow>
+        <cylinderGeometry args={[1.3, 1.5, 1.5, 8]} />
+        <meshStandardMaterial color="#101b16" roughness={0.5} metalness={0.5} />
+      </mesh>
+      <mesh position={[0, 1.62, 0]}>
+        <sphereGeometry args={[1.32, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2]} />
+        <meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.5} />
+      </mesh>
+      {/* Safety-bubble boundary (matches the server's SAFEHOUSE_RADIUS). */}
+      <mesh ref={ring} position={[0, 0.08, 0]} rotation={[-Math.PI / 2, 0, 0]} raycast={noRaycast}>
+        <ringGeometry args={[9.6, 10, 48]} />
+        <meshBasicMaterial color={accent} transparent opacity={0.25} depthWrite={false} />
+      </mesh>
+      <HoloSign kind="Safehouse" />
+      <GroundGlow color={accent} radius={3} />
     </group>
   );
 }
@@ -1437,6 +1565,15 @@ function EntityView({ entity }: { entity: GameEntity }) {
       break;
     case "MarketTerminal":
       body = <MarketTerminal entity={entity} />;
+      break;
+    case "Armory":
+    case "Bank":
+    case "Bodega":
+    case "Dealership":
+      body = <VendorKiosk entity={entity} />;
+      break;
+    case "Safehouse":
+      body = <SafehouseView entity={entity} />;
       break;
     case "Npc":
       body = (

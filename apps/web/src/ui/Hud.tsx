@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { ROLL_COOLDOWN } from "../game/collision";
+import { isVendorKind, POI_STYLES } from "../game/poi";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
@@ -34,12 +35,14 @@ export function Hud({ connection }: { connection: GameConnection }) {
           </div>
           <ExtractionBar />
           <ExtractHint />
+          <PickupToast />
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
+          <VendorPanel connection={connection} />
           <HoloMap />
           <PerfPanel />
         </>
@@ -890,6 +893,193 @@ function MarketPanel({ connection }: { connection: GameConnection }) {
   );
 }
 
+/** Shared NPC-vendor panel: Armory/Bodega buy-sell, Bank cash conversion,
+ * Dealership stub. Opens from the prompt shown when standing near a vendor. */
+function VendorPanel({ connection }: { connection: GameConnection }) {
+  const nearVendor = useGame((s) => s.nearVendor);
+  const vendorOpen = useGame((s) => s.vendorOpen);
+  const vendor = useGame((s) => s.vendor);
+  const inventory = useGame((s) => s.inventory);
+  const set = useGame((s) => s.set);
+
+  if (!nearVendor) return null;
+  const style = POI_STYLES[nearVendor.kind];
+  const label = style?.label ?? nearVendor.kind.toUpperCase();
+  const isBank = nearVendor.kind === "Bank";
+  const isDealership = nearVendor.kind === "Dealership";
+
+  if (isDealership) {
+    // No trade flow yet: a static prompt keeps the location legible.
+    return (
+      <div className="station-prompt" style={{ cursor: "default", color: style?.color }}>
+        {label} — VEHICLES COMING SOON
+      </div>
+    );
+  }
+
+  if (!vendorOpen) {
+    return (
+      <div
+        className="station-prompt"
+        style={{ color: style?.color }}
+        onClick={() => {
+          set({ vendorOpen: true });
+          // Ask the server for this vendor's offers + wallet.
+          connection.send({ t: "Interact", d: { entity_id: nearVendor.id } });
+        }}
+      >
+        {label} — {isBank ? "CLICK TO CONVERT CASH" : "CLICK TO TRADE"}
+      </div>
+    );
+  }
+
+  const wallet = vendor?.id === nearVendor.id ? vendor.wallet : null;
+  const cash = invCount(inventory, "Cash");
+
+  const sendVendor = (action: import("../net/protocol").VendorActionMsg) =>
+    connection.send({ t: "Vendor", d: { vendor: nearVendor.id, action } });
+
+  const header = (
+    <h3>
+      {label}
+      <span
+        style={{ float: "right", cursor: "pointer", color: "var(--text-dim)" }}
+        onClick={() => set({ vendorOpen: false })}
+      >
+        ✕
+      </span>
+    </h3>
+  );
+
+  if (isBank) {
+    return (
+      <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 360 }}>
+        {header}
+        <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 6 }}>
+          Wallet: {wallet ?? "…"} WILD
+        </div>
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
+          Cash converts 1:1 into WILD minus a 10% handling fee. Whoever holds
+          this territory takes a cut of every conversion.
+        </div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            padding: "6px 8px",
+            border: `1px solid ${cash > 0 ? "var(--accent-dim)" : "var(--steel-border)"}`,
+            opacity: cash > 0 ? 1 : 0.55,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 12, color: "var(--text)" }}>Cash x{cash}</div>
+            <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+              → {cash - Math.floor((cash * 10) / 100)} WILD after fee
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: 10,
+              color: cash > 0 ? "var(--accent)" : "var(--text-dim)",
+              border: `1px solid ${cash > 0 ? "var(--accent-dim)" : "var(--steel-border)"}`,
+              padding: "2px 8px",
+              cursor: cash > 0 ? "pointer" : "default",
+            }}
+            onClick={() => {
+              if (cash > 0) sendVendor({ t: "Convert", d: { count: cash } });
+            }}
+          >
+            CONVERT ALL
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const offers = vendor?.id === nearVendor.id ? vendor.offers : [];
+  return (
+    <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 380 }}>
+      {header}
+      <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 10 }}>
+        Wallet: {wallet ?? "…"} WILD
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {offers.length === 0 && (
+          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Nothing on offer.</div>
+        )}
+        {offers.map((offer) => {
+          const held = invCount(inventory, offer.kind);
+          const canBuy = offer.buy > 0 && (wallet ?? 0) >= offer.buy;
+          const canSell = offer.sell > 0 && held > 0;
+          return (
+            <div
+              key={offer.kind}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 10,
+                padding: "6px 8px",
+                border: "1px solid var(--steel-border)",
+              }}
+            >
+              <div>
+                <div style={{ fontSize: 12, color: "var(--text)" }}>
+                  {shortName(offer.kind)}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+                  {offer.buy > 0 ? `buy ${offer.buy}` : ""}
+                  {offer.buy > 0 && offer.sell > 0 ? " · " : ""}
+                  {offer.sell > 0 ? `sell ${offer.sell}` : ""}
+                  {held > 0 ? ` · ${held} held` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {offer.buy > 0 &&
+                  [1, 5].map((n) => (
+                    <div
+                      key={`b${n}`}
+                      onClick={() => {
+                        if (canBuy) sendVendor({ t: "Buy", d: { kind: offer.kind, count: n } });
+                      }}
+                      style={{
+                        fontSize: 10,
+                        color: canBuy ? "var(--accent)" : "var(--text-dim)",
+                        border: `1px solid ${canBuy ? "var(--accent-dim)" : "var(--steel-border)"}`,
+                        padding: "2px 6px",
+                        cursor: canBuy ? "pointer" : "default",
+                      }}
+                    >
+                      BUY x{n}
+                    </div>
+                  ))}
+                {offer.sell > 0 && (
+                  <div
+                    onClick={() => {
+                      if (canSell) sendVendor({ t: "Sell", d: { kind: offer.kind, count: held } });
+                    }}
+                    style={{
+                      fontSize: 10,
+                      color: canSell ? "#ffcc66" : "var(--text-dim)",
+                      border: `1px solid ${canSell ? "#8a6d2a" : "var(--steel-border)"}`,
+                      padding: "2px 6px",
+                      cursor: canSell ? "pointer" : "default",
+                    }}
+                  >
+                    SELL ALL
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ExtractionBar() {
   const extracting = useGame((s) => s.extracting);
   const [progress, setProgress] = useState(0);
@@ -992,6 +1182,41 @@ function ExtractHint() {
   );
 }
 
+/** Large transient pickup banner on the center-left (e.g. ammo grabbed). */
+function PickupToast() {
+  const toast = useGame((s) => s.pickupToast);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    if (!toast) return;
+    setVisible(true);
+    const timer = setTimeout(() => setVisible(false), 1600);
+    return () => clearTimeout(timer);
+  }, [toast?.id]);
+  if (!toast) return null;
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: "50%",
+        left: 48,
+        transform: `translateY(-50%) scale(${visible ? 1 : 0.85})`,
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.25s ease, transform 0.25s ease",
+        fontSize: 34,
+        fontWeight: 800,
+        letterSpacing: "0.08em",
+        color: "#ffcc33",
+        textShadow:
+          "0 0 18px rgba(255,180,20,0.85), 0 2px 5px rgba(0,0,0,0.6)",
+        pointerEvents: "none",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {toast.text}
+    </div>
+  );
+}
+
 const STATION_KINDS = ["Refinery", "Factory", "Laboratory"] as const;
 
 function PositionReadout() {
@@ -1004,6 +1229,8 @@ function PositionReadout() {
       let nearMarket = false;
       let station: { kind: (typeof STATION_KINDS)[number]; id: number } | null = null;
       let stationDist = 3.5;
+      let vendor: { kind: import("../net/protocol").EntityKind; id: number } | null = null;
+      let vendorDist = 3.5;
       for (const entity of game.entities.values()) {
         const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
         if (entity.kind === "Building" && d < 3.5) {
@@ -1016,6 +1243,10 @@ function PositionReadout() {
         if (STATION_KINDS.includes(kind) && d < stationDist) {
           station = { kind, id: entity.id };
           stationDist = d;
+        }
+        if (isVendorKind(entity.kind) && d < vendorDist) {
+          vendor = { kind: entity.kind, id: entity.id };
+          vendorDist = d;
         }
       }
       const state = useGame.getState();
@@ -1034,6 +1265,13 @@ function PositionReadout() {
           nearStation: station,
           // Leaving the station closes the panel.
           ...(station ? {} : { craftOpen: false }),
+        });
+      }
+      if ((vendor?.id ?? null) !== (state.nearVendor?.id ?? null)) {
+        state.set({
+          nearVendor: vendor,
+          // Leaving the vendor closes the panel.
+          ...(vendor ? {} : { vendorOpen: false }),
         });
       }
     }, 300);

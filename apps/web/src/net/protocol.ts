@@ -13,7 +13,7 @@ export const CHUNK_SIZE = 32;
 export const TILE_SIZE = 2;
 export const TILES_PER_CHUNK = 16;
 /** Territory zone = square block of this many chunks (mirror of wilder-protocol). */
-export const REGION_CHUNKS = 4;
+export const REGION_CHUNKS = 2;
 
 export type TileKind =
   | "Road"
@@ -79,7 +79,8 @@ export type ItemKind =
   | "CircuitBoard"
   | "BioGel"
   | "BlueprintFragment"
-  | "PowerCell";
+  | "PowerCell"
+  | "Cash";
 
 export interface ItemStack {
   kind: ItemKind;
@@ -102,7 +103,23 @@ export type EntityKind =
   | "Refinery"
   | "Factory"
   | "Laboratory"
-  | "MarketTerminal";
+  | "MarketTerminal"
+  | "Armory"
+  | "Bank"
+  | "Bodega"
+  | "Dealership"
+  | "Safehouse";
+
+/** Resource-bias zone around the spawn district. */
+export type ZoneKind =
+  | "BlownUp"
+  | "Mining"
+  | "Industrial"
+  | "TechRuins"
+  | "Overgrowth"
+  | "ChemPlant"
+  | "Scrapyard"
+  | "Mixed";
 
 export type AnimState =
   | "Idle"
@@ -182,6 +199,12 @@ export type MarketActionMsg =
   | Tagged<"Cancel", { listing_id: number }>
   | TaggedUnit<"Refresh">;
 
+export type VendorActionMsg =
+  | Tagged<"Buy", { kind: ItemKind; count: number }>
+  | Tagged<"Sell", { kind: ItemKind; count: number }>
+  | Tagged<"Convert", { count: number }>
+  | TaggedUnit<"Refresh">;
+
 export type C2S =
   | Tagged<"Authenticate", { token: string }>
   | Tagged<"JoinWorld", { character_id: string }>
@@ -201,6 +224,7 @@ export type C2S =
   | Tagged<"Craft", { recipe: string; station: number | null }>
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
   | Tagged<"Market", MarketActionMsg>
+  | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -227,6 +251,30 @@ export interface TerritoryCell {
   rx: number;
   rz: number;
   control: number;
+}
+
+/** A vendor's price line: buy = player pays, sell = vendor pays; 0 = n/a. */
+export interface VendorOffer {
+  kind: ItemKind;
+  buy: number;
+  sell: number;
+}
+
+/** A persistent point of interest (service building) for map/legend UI. */
+export interface PoiInfo {
+  id: number;
+  kind: EntityKind;
+  name: string;
+  x: number;
+  z: number;
+}
+
+/** A named resource-bias zone with its label anchor (world meters). */
+export interface ZoneInfo {
+  kind: ZoneKind;
+  name: string;
+  x: number;
+  z: number;
 }
 
 export type CombatEvent =
@@ -282,6 +330,12 @@ export type S2C =
   | Tagged<"ProductionState", { building: number; jobs: ProductionJob[] }>
   | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
   | Tagged<"MarketResult", { ok: boolean; error: string | null }>
+  | Tagged<
+      "VendorState",
+      { vendor: number; kind: EntityKind; offers: VendorOffer[]; wallet: number }
+    >
+  | Tagged<"VendorResult", { ok: boolean; error: string | null }>
+  | Tagged<"PoiList", { pois: PoiInfo[]; zones: ZoneInfo[] }>
   | Tagged<"TerritoryState", { cells: TerritoryCell[] }>
   | Tagged<"BlueprintsUpdate", { known: string[] }>
   | Tagged<"Chat", { from: string; text: string }>

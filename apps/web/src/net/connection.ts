@@ -321,13 +321,22 @@ export class GameConnection {
         break;
       }
       case "GatherResult": {
-        void playSfx("sfx_pickup", 0.45);
         if (msg.d.gained) {
+          const g = msg.d.gained;
+          if (g.kind === "Ammo9mm") {
+            // Ammo auto-pickup: louder cue + big center-left banner.
+            void playSfx("sfx_pickup", 0.6);
+            ui.showPickup(`+${g.count} 9MM AMMO`);
+          } else {
+            void playSfx("sfx_pickup", 0.45);
+          }
           ui.pushChat({
             from: "system",
-            text: `+${msg.d.gained.count} ${msg.d.gained.kind}`,
+            text: `+${g.count} ${g.kind}`,
             system: true,
           });
+        } else {
+          void playSfx("sfx_pickup", 0.45);
         }
         break;
       }
@@ -370,6 +379,31 @@ export class GameConnection {
             system: true,
           });
         }
+        break;
+      }
+      case "VendorState": {
+        ui.set({
+          vendor: {
+            id: msg.d.vendor,
+            kind: msg.d.kind,
+            offers: msg.d.offers,
+            wallet: msg.d.wallet,
+          },
+        });
+        break;
+      }
+      case "VendorResult": {
+        if (!msg.d.ok) {
+          ui.pushChat({
+            from: "system",
+            text: `Vendor: ${msg.d.error ?? "action failed"}`,
+            system: true,
+          });
+        }
+        break;
+      }
+      case "PoiList": {
+        ui.set({ pois: msg.d.pois, zones: msg.d.zones });
         break;
       }
       case "TerritoryState": {

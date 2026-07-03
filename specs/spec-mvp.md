@@ -54,6 +54,8 @@ committed** (statuses last updated 2026-07-02).
 - [x] Production queues with power budget, laboratory blueprint research (fragment costs)
 - [x] Market: listings, buy/cancel, WILD wallet with fee burn
 - [x] Economy simulator (`wilder-sim`): 10k agents, sinks/faucets, CSV/JSON balance reports
+- [x] Spawn district: 10 service buildings (Storage/Market/Refinery/Factory/Lab/Armory/Bank/Bodega/Dealership/Safehouse) + hostile-ring outposts, POI map legend & holo signage (see §11.5)
+- [x] NPC vendors (Armory/Bodega), Cash -> WILD bank conversion, themed resource zones, territory commerce cut
 - [ ] Crafting professions/specialization (deferred from Phase 3)
 - [ ] Market transaction history (stub)
 - [ ] Production queues persistence (currently in-memory per character, inputs refunded on disconnect)
@@ -334,6 +336,60 @@ Introduce industry; players specialize.
 
 **MVP gate:** players specialize, queue production in buildings, unlock blueprints, and
 trade on a working market.
+
+---
+
+## 11.5 Spawn district, service buildings & commerce
+
+The player's first area — the safe 3x3 hub around spawn — is a full service district.
+Every location has one job, one accent color, and one map glyph (shared taxonomy in
+`apps/web/src/game/poi.ts`; placements in `DISTRICT` in `crates/wilder-world`).
+
+### Building taxonomy
+
+| Building | Glyph | What happens there |
+| --- | --- | --- |
+| **Storage** | S | Stash terminal: deposit/withdraw backpack loot (48 slots) |
+| **Market** | M | Player market: list/buy items in WILD (5% fee) |
+| **Refinery** | R | Refine resources into materials (timed queues, power) |
+| **Factory** | F | Manufacture weapons/gear from materials |
+| **Laboratory** | L | Research blueprint unlocks (fragments + resources) |
+| **Armory** | A | NPC vendor: buy/sell weapons, armor, ammo in WILD |
+| **Bank** | B | Convert looted **Cash** into wallet WILD (10% fee) |
+| **Bodega** | G | NPC general store: sells consumables, buys raw resources cheap |
+| **Dealership** | D | Vehicle showroom — placeholder until vehicles ship |
+| **Safehouse** | H | 10 m safety bubble: hostiles ignore players inside; health regen |
+
+All ten are seeded deterministically at world start across the hub chunks, plus two
+**outposts** (Bodega, Bank) in the hostile ring where the surrounding territory is
+actually capturable. The server sends a `PoiList` message on join (all POIs + zone
+labels), so the fullscreen map (M) can render markers and a legend for the whole
+district regardless of streaming distance; the same taxonomy colors the minimap dots
+and the floating holo signs on the buildings themselves.
+
+### Cash and the Bank loop
+
+NPCs drop **Cash** (a lootable item, not wallet currency) alongside resources — more
+from raiders, double in the Blast Zone. Cash is worthless until carried to a Bank and
+converted to WILD at a 10% fee, making it one more thing to lose (or extract) on a run.
+
+### Resource zones
+
+The hostile ring around the hub (out to ~6 chunks) is split into eight themed octants
+that bias both resource-node variants and NPC drops (`zone_of_chunk`, weights in
+`wilder-economy`): **Blast Zone** (E: chemicals, extra Cash), **Chem Works** (SE),
+**Mining Pits** (S: iron/copper), **Scrapyard** (SW: metals), **Overgrowth** (W:
+biomass), **Industrial Belt** (N: iron/electronics), **Tech Ruins** (NE: electronics),
+and open city (NW and beyond: unbiased). Zone names appear as labels on the map.
+
+### Territory commerce cut
+
+Whoever holds a region takes **10%** of all commerce inside it: vendor purchases and
+sales, bank conversion fees, and the market's 5% sale fee. Since territory control is
+presence-based in this phase, the cut is split evenly among living players standing in
+the player-held region when the transaction happens; on neutral or enemy ground it
+burns. Hub regions are protected (always neutral), so the payout only flows at the
+hostile-ring outposts — a reason to hold ground.
 
 ---
 

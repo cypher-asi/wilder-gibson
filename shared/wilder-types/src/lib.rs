@@ -122,6 +122,8 @@ pub enum ItemKind {
     // Phase 3
     BlueprintFragment,
     PowerCell,
+    /// Looted street currency. Worthless until converted to WILD at a Bank.
+    Cash,
 }
 
 impl ItemKind {
@@ -148,6 +150,7 @@ impl ItemKind {
             ItemKind::BioGel => "Bio-Gel",
             ItemKind::BlueprintFragment => "Blueprint Fragment",
             ItemKind::PowerCell => "Power Cell",
+            ItemKind::Cash => "Cash",
         }
     }
 
@@ -165,6 +168,7 @@ impl ItemKind {
             | ItemKind::BioGel
             | ItemKind::Ammo9mm
             | ItemKind::BlueprintFragment => 100,
+            ItemKind::Cash => 999,
             ItemKind::Medkit => 5,
             _ => 1,
         }
@@ -241,19 +245,66 @@ impl Default for Inventory {
 // Entities (replicated)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityKind {
     Player,
     Npc,
     LootContainer,
     ExtractionPoint,
     ResourceNode,
-    /// Stash terminal.
+    /// Storage (stash) terminal.
     Building,
     Refinery,
     Factory,
     Laboratory,
     MarketTerminal,
+    /// Weapons & armor vendor (WILD buy/sell).
+    Armory,
+    /// Converts looted Cash into wallet WILD (minus a fee).
+    Bank,
+    /// General store: sells consumables, buys raw resources cheap.
+    Bodega,
+    /// Vehicle showroom. Placeholder until vehicles ship.
+    Dealership,
+    /// Safety bubble: hostiles ignore players inside; health regen applies.
+    Safehouse,
+}
+
+/// Resource-bias zone: themed districts around the spawn hub drop different
+/// resources (mining ground yields metals, overgrowth yields biomass, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ZoneKind {
+    /// Bombed-out blocks: chemicals in the rubble, extra Cash on hostiles.
+    BlownUp,
+    /// Open-pit mining ground: iron and copper.
+    Mining,
+    /// Factory belt: iron and electronics.
+    Industrial,
+    /// Collapsed tech quarter: electronics.
+    TechRuins,
+    /// Blocks reclaimed by nature: biomass.
+    Overgrowth,
+    /// Chemical processing works: chemicals.
+    ChemPlant,
+    /// Junked vehicles and machinery: mixed metals.
+    Scrapyard,
+    /// No particular bias.
+    Mixed,
+}
+
+impl ZoneKind {
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            ZoneKind::BlownUp => "Blast Zone",
+            ZoneKind::Mining => "Mining Pits",
+            ZoneKind::Industrial => "Industrial Belt",
+            ZoneKind::TechRuins => "Tech Ruins",
+            ZoneKind::Overgrowth => "Overgrowth",
+            ZoneKind::ChemPlant => "Chem Works",
+            ZoneKind::Scrapyard => "Scrapyard",
+            ZoneKind::Mixed => "Open City",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

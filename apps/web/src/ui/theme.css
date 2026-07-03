@@ -1372,6 +1372,79 @@ body {
   pointer-events: none;
 }
 
+/* Map legend: what every POI badge / marker on the holo map means. */
+.map-legend {
+  position: absolute;
+  top: 52px;
+  right: 20px;
+  max-height: calc(100% - 120px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(6, 14, 22, 0.82);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  pointer-events: auto;
+}
+
+.map-legend-title {
+  font: 800 11px/1 var(--font-display);
+  letter-spacing: 0.3em;
+  color: var(--accent);
+  margin-bottom: 4px;
+  text-shadow: var(--hud-glow);
+}
+
+.map-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 700 10px/1.2 var(--font-display);
+  letter-spacing: 0.08em;
+}
+
+.map-legend-badge {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid;
+  font-size: 9px;
+}
+
+.map-legend-label {
+  flex: 0 0 auto;
+  width: 108px;
+  color: var(--text);
+}
+
+.map-legend-desc {
+  color: var(--text-dim);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* Context prompt near a service building ("ARMORY — CLICK TO TRADE"). */
+.station-prompt {
+  position: absolute;
+  bottom: 192px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 12px;
+  letter-spacing: 0.15em;
+  color: var(--accent);
+  text-shadow: 0 0 10px rgba(79, 195, 255, 0.5);
+  cursor: pointer;
+  pointer-events: auto;
+  background: rgba(9, 15, 24, 0.7);
+  border: 1px solid var(--accent-dim);
+  padding: 6px 14px;
+}
+
 /* Performance panel (F3): live fps + per-system frame cost readout. */
 .perf-chip {
   position: absolute;

@@ -19,6 +19,7 @@ import {
   cityTileAt,
   onCityMapReady,
 } from "../game/citymap";
+import { POI_STYLES } from "../game/poi";
 import { enemyRegions, REGION_SIZE } from "../game/territory";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
@@ -231,8 +232,8 @@ export function Minimap() {
           ctx.fill();
           ctx.restore();
         } else if (entity.kind !== "LootContainer" && entity.kind !== "ResourceNode") {
-          // Hub stations / stash / market terminals.
-          ctx.fillStyle = "rgba(79, 195, 255, 0.9)";
+          // Service buildings, each in its taxonomy color (see game/poi.ts).
+          ctx.fillStyle = POI_STYLES[entity.kind]?.color ?? "rgba(79, 195, 255, 0.9)";
           ctx.fillRect(sx - 2.5, sy - 2.5, 5, 5);
         }
       }

@@ -51,6 +51,9 @@ const LOOT_TTL_SECONDS: f32 = 120.0;
 /// easy to find; count per chunk and rounds per cache.
 const AMMO_CACHE_COUNT: usize = 3;
 const AMMO_CACHE_ROUNDS: u32 = 24;
+/// Ammo caches are grabbed automatically when a player walks within this
+/// distance (metres) - no click required.
+const AMMO_PICKUP_RADIUS: f32 = 2.0;
 /// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
 const NODE_CHARGES: u32 = 5;
 const NODE_RESPAWN_SECONDS: f32 = 60.0;
@@ -59,10 +62,17 @@ const NODE_GATHER_COOLDOWN: f32 = 1.2;
 const FRAGMENT_CHANCE: f64 = 0.10;
 /// Global hub power budget (kW) shared by all production jobs.
 const POWER_BUDGET: f32 = 100.0;
-/// Market fee (percent) burned on every sale.
+/// Market fee (percent) taken from every sale: routed to whoever holds the
+/// market's territory, burned otherwise.
 const MARKET_FEE_PCT: u32 = 5;
 /// WILD granted to every account once.
 const WALLET_GRANT: u32 = 200;
+/// Safehouse bubble radius (metres): hostiles ignore players inside and
+/// health regen applies as if in the safe hub.
+const SAFEHOUSE_RADIUS: f32 = 10.0;
+/// Themed resource zones ring the hub out to this chunk radius (Chebyshev);
+/// everything beyond is `ZoneKind::Mixed`.
+const ZONE_RING_CHUNKS: i32 = 6;
 /// Recipes every character knows from the start; the rest need lab research.
 const DEFAULT_BLUEPRINTS: &[&str] =
     &["steel_plate", "copper_wire", "pipe", "knife", "ammo_9mm", "medkit"];
@@ -128,12 +138,88 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
     coord.x.abs() <= SAFE_RADIUS && coord.z.abs() <= SAFE_RADIUS
 }
 
-/// Walkable spots for the hub stations in the spawn chunk: prefer sidewalk /
-/// plaza tiles (off the road), keep spots at least 2 tiles apart, and stay
-/// close to spawn.
-fn hub_spots(chunk: &ChunkData, count: usize) -> Vec<Vec3> {
-    let spawn_tx = (SPAWN.x / TILE_SIZE) as i32;
-    let spawn_tz = (SPAWN.z / TILE_SIZE) as i32;
+/// Zone kind of the octant at index `oct`, where octant 0 points along +X
+/// (east) and octants advance counter-clockwise in world space (+Z = south).
+fn zone_of_octant(oct: i32) -> ZoneKind {
+    match oct.rem_euclid(8) {
+        0 => ZoneKind::BlownUp,    // E
+        1 => ZoneKind::ChemPlant,  // SE
+        2 => ZoneKind::Mining,     // S
+        3 => ZoneKind::Scrapyard,  // SW
+        4 => ZoneKind::Overgrowth, // W
+        5 => ZoneKind::Mixed,      // NW
+        6 => ZoneKind::Industrial, // N
+        _ => ZoneKind::TechRuins,  // NE
+    }
+}
+
+/// Resource-bias zone containing a chunk: the safe hub and everything beyond
+/// the zone ring are Mixed; the ring itself is split into eight themed
+/// octants around the hub. Pure and O(1), so drop rolls can call it freely.
+pub fn zone_of_chunk(coord: ChunkCoord) -> ZoneKind {
+    if is_safe_chunk(coord) {
+        return ZoneKind::Mixed;
+    }
+    if coord.x.abs() > ZONE_RING_CHUNKS || coord.z.abs() > ZONE_RING_CHUNKS {
+        return ZoneKind::Mixed;
+    }
+    let angle = (coord.z as f32).atan2(coord.x as f32);
+    zone_of_octant((angle / std::f32::consts::FRAC_PI_4).round() as i32)
+}
+
+/// Named zone labels (anchor = middle of each octant ring) for the map UI.
+fn zone_infos() -> Vec<ZoneInfo> {
+    let radius = ZONE_RING_CHUNKS as f32 * 0.6 * CHUNK_SIZE;
+    (0..8)
+        .filter_map(|oct| {
+            let kind = zone_of_octant(oct);
+            if kind == ZoneKind::Mixed {
+                return None;
+            }
+            let angle = oct as f32 * std::f32::consts::FRAC_PI_4;
+            Some(ZoneInfo {
+                kind,
+                name: kind.display_name().to_string(),
+                x: angle.cos() * radius + CHUNK_SIZE / 2.0,
+                z: angle.sin() * radius + CHUNK_SIZE / 2.0,
+            })
+        })
+        .collect()
+}
+
+/// Spawn-district service buildings: (chunk offset from the hub, kind, name).
+/// Spread across the safe 3x3 so every service is a short walk from spawn.
+const DISTRICT: &[((i32, i32), EntityKind, &str)] = &[
+    ((0, 0), EntityKind::Building, "Storage"),
+    ((0, 0), EntityKind::MarketTerminal, "Market"),
+    ((1, 0), EntityKind::Refinery, "Refinery"),
+    ((1, 0), EntityKind::Factory, "Factory"),
+    ((-1, 0), EntityKind::Bank, "Bank"),
+    ((-1, 0), EntityKind::Laboratory, "Laboratory"),
+    ((0, 1), EntityKind::Armory, "Armory"),
+    ((0, 1), EntityKind::Bodega, "Bodega"),
+    ((0, -1), EntityKind::Safehouse, "Safehouse"),
+    ((0, -1), EntityKind::Dealership, "Dealership"),
+];
+
+/// Commerce outposts in the hostile ring. Unlike the protected hub regions,
+/// the ground around these can be player-held, so the territory commerce cut
+/// actually pays out here.
+const OUTPOSTS: &[((i32, i32), EntityKind, &str)] = &[
+    ((3, 0), EntityKind::Bodega, "Bodega Outpost"),
+    ((0, 3), EntityKind::Bank, "Bank Outpost"),
+];
+
+/// Walkable spots for service buildings in a chunk: prefer sidewalk/plaza
+/// tiles (off the road) near the anchor (spawn in the spawn chunk, chunk
+/// centre elsewhere), keep spots at least 2 tiles apart. Returns world-space
+/// positions; may be shorter than `count` on cramped chunks.
+fn station_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3> {
+    let (anchor_tx, anchor_tz) = if coord.x == 0 && coord.z == 0 {
+        ((SPAWN.x / TILE_SIZE) as i32, (SPAWN.z / TILE_SIZE) as i32)
+    } else {
+        (TILES_PER_CHUNK as i32 / 2, TILES_PER_CHUNK as i32 / 2)
+    };
     let mut candidates: Vec<(i32, usize, usize)> = Vec::new();
     for tz in 0..TILES_PER_CHUNK {
         for tx in 0..TILES_PER_CHUNK {
@@ -141,9 +227,9 @@ fn hub_spots(chunk: &ChunkData, count: usize) -> Vec<Vec3> {
             if !kind.walkable() {
                 continue;
             }
-            let d = (tx as i32 - spawn_tx).abs().max((tz as i32 - spawn_tz).abs());
+            let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
             if d < 2 {
-                continue; // keep the spawn tile itself clear
+                continue; // keep the anchor tile itself clear
             }
             // Prefer off-road tiles; road tiles rank behind everything else.
             let penalty = if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
@@ -166,7 +252,11 @@ fn hub_spots(chunk: &ChunkData, count: usize) -> Vec<Vec3> {
     spots
         .into_iter()
         .map(|(tx, tz)| {
-            Vec3::new((tx as f32 + 0.5) * TILE_SIZE, 0.0, (tz as f32 + 0.5) * TILE_SIZE)
+            Vec3::new(
+                coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
+                0.0,
+                coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
+            )
         })
         .collect()
 }
@@ -435,7 +525,7 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
     let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
 
     let (tx, rx) = mpsc::unbounded_channel();
-    let world = World {
+    let mut world = World {
         store: store.clone(),
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
         market,
@@ -455,6 +545,8 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         rx,
         territory: HashMap::new(),
     };
+    // Seed the spawn district up front so PoiList is complete on every join.
+    world.seed_district();
     tokio::spawn(world.run());
     WorldHandle { tx, seed }
 }
@@ -596,6 +688,7 @@ impl World {
             known: player.blueprints.iter().cloned().collect(),
         });
         let _ = tx.send(S2C::TerritoryState { cells: self.territory_cells() });
+        let _ = tx.send(S2C::PoiList { pois: self.poi_list(), zones: zone_infos() });
         for ability in AbilityKind::ALL {
             let _ = tx.send(S2C::AbilityUpdate { ability, cooldown: 0.0, active: 0.0 });
         }
@@ -709,6 +802,7 @@ impl World {
                 self.queue_production(entity, building, &recipe, count)
             }
             C2S::Market(action) => self.market_action(entity, action),
+            C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
             C2S::Pong { .. } => {}
             C2S::Authenticate { .. } | C2S::JoinWorld { .. } => {}
         }
@@ -746,6 +840,7 @@ impl World {
                     "circuit" => ItemKind::CircuitBoard,
                     "biogel" => ItemKind::BioGel,
                     "fragment" => ItemKind::BlueprintFragment,
+                    "cash" => ItemKind::Cash,
                     _ => {
                         let _ = player.tx.send(S2C::Error { message: format!("unknown item {item}") });
                         return;
@@ -998,20 +1093,27 @@ impl World {
             let mut items: Vec<ItemStack> = Vec::new();
             {
                 use rand::Rng;
+                let zone = zone_of_chunk(ChunkCoord::from_world(drop_pos));
                 let rng = &mut self.rng;
-                // Resources always drop (Phase 2 economy feeds on these).
-                let table = [
-                    ItemKind::Iron,
-                    ItemKind::Copper,
-                    ItemKind::Biomass,
-                    ItemKind::Chemicals,
-                    ItemKind::Electronics,
-                ];
+                // Resources always drop (Phase 2 economy feeds on these),
+                // biased by the zone the NPC died in.
                 let pulls = if is_raider { 3 } else { 2 };
                 for _ in 0..pulls {
-                    let kind = table[rng.random_range(0..table.len())];
+                    let idx = wilder_economy::zone_resource_index(zone, rng.random());
+                    let kind = wilder_economy::RESOURCES[idx];
                     items.push(ItemStack { kind, count: rng.random_range(1..4) });
                 }
+                // Cash feeds the Bank loop; blast-zone rubble hides more.
+                let (lo, hi) = if is_raider {
+                    wilder_economy::CASH_DROP_RAIDER
+                } else {
+                    wilder_economy::CASH_DROP_SCAV
+                };
+                let mut cash = rng.random_range(lo..=hi);
+                if zone == ZoneKind::BlownUp {
+                    cash *= 2;
+                }
+                items.push(ItemStack { kind: ItemKind::Cash, count: cash });
                 if rng.random_bool(0.7) {
                     items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(10..25) });
                 }
@@ -1179,6 +1281,15 @@ impl World {
             }
             EntityKind::MarketTerminal => {
                 self.send_market_state(entity);
+            }
+            EntityKind::Armory | EntityKind::Bodega | EntityKind::Bank | EntityKind::Dealership => {
+                self.send_vendor_state(entity, target);
+            }
+            EntityKind::Safehouse => {
+                let _ = player.tx.send(S2C::Chat {
+                    from: "system".into(),
+                    text: "Safehouse: hostiles won't follow you in here.".into(),
+                });
             }
             _ => {}
         }
@@ -1657,6 +1768,20 @@ impl World {
                     self.market.remove(idx);
                 }
                 self.save_market();
+
+                // The market's fee is commerce: whoever holds the terminal's
+                // territory takes it, otherwise it burns as before.
+                let terminal = self
+                    .statics
+                    .values()
+                    .find(|s| {
+                        s.kind == EntityKind::MarketTerminal
+                            && (s.position - buyer_pos).length() < 3.5
+                    })
+                    .map(|s| s.position);
+                if let Some(terminal_pos) = terminal {
+                    self.distribute_commerce(terminal_pos, fee);
+                }
                 Ok(())
             }
             MarketAction::Cancel { listing_id } => {
@@ -1680,6 +1805,170 @@ impl World {
                 self.save_market();
                 Ok(())
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // NPC vendors & bank
+    // -----------------------------------------------------------------------
+
+    fn send_vendor_state(&self, entity: EntityId, vendor: EntityId) {
+        let (Some(player), Some(station)) =
+            (self.players.get(&entity), self.statics.get(&vendor))
+        else {
+            return;
+        };
+        let offers: Vec<VendorOffer> = wilder_economy::vendor_offers(station.kind)
+            .iter()
+            .map(|e| VendorOffer { kind: e.kind, buy: e.buy, sell: e.sell })
+            .collect();
+        let _ = player.tx.send(S2C::VendorState {
+            vendor,
+            kind: station.kind,
+            offers,
+            wallet: player.wallet,
+        });
+    }
+
+    fn vendor_action(&mut self, entity: EntityId, vendor: EntityId, action: VendorAction) {
+        let result = self.apply_vendor_action(entity, vendor, action);
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::VendorResult {
+                ok: result.is_ok(),
+                error: result.err(),
+            });
+            let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+        }
+        self.send_vendor_state(entity, vendor);
+    }
+
+    fn apply_vendor_action(
+        &mut self,
+        entity: EntityId,
+        vendor: EntityId,
+        action: VendorAction,
+    ) -> Result<(), String> {
+        let (kind, pos) = self
+            .statics
+            .get(&vendor)
+            .map(|s| (s.kind, s.position))
+            .ok_or("no such vendor")?;
+        {
+            let player = self.players.get(&entity).ok_or("not in world")?;
+            if (pos - player.character.position).length() > 3.5 {
+                return Err("too far away".into());
+            }
+        }
+        match action {
+            VendorAction::Refresh => Ok(()),
+            VendorAction::Buy { kind: item, count } => {
+                let offer = wilder_economy::vendor_offers(kind)
+                    .iter()
+                    .find(|e| e.kind == item && e.buy > 0)
+                    .ok_or("not sold here")?;
+                let count = count.clamp(1, 100);
+                let cost = offer.buy.saturating_mul(count);
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                if player.wallet < cost {
+                    return Err(format!("need {cost} WILD, have {}", player.wallet));
+                }
+                player.wallet -= cost;
+                let account = player.character.account_id;
+                let wallet = player.wallet;
+                let player_pos = player.character.position;
+                let leftover = inv::add_items(&mut player.inventory.slots, item, count);
+                player.dirty = true;
+                let _ = self.store.update_wallet(account, wallet);
+                if leftover > 0 {
+                    self.spawn_loot(player_pos, vec![ItemStack { kind: item, count: leftover }]);
+                }
+                // Whoever holds this ground skims a cut; the rest burns.
+                self.distribute_commerce(pos, cost * wilder_economy::COMMERCE_CUT_PCT / 100);
+                Ok(())
+            }
+            VendorAction::Sell { kind: item, count } => {
+                let offer = wilder_economy::vendor_offers(kind)
+                    .iter()
+                    .find(|e| e.kind == item && e.sell > 0)
+                    .ok_or("not bought here")?;
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                let have = inv::count_items(&player.inventory.slots, item);
+                if have == 0 {
+                    return Err(format!("no {} to sell", item.display_name()));
+                }
+                let count = count.clamp(1, have);
+                inv::remove_items(&mut player.inventory.slots, item, count);
+                let gross = offer.sell.saturating_mul(count);
+                let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
+                player.wallet += gross - cut;
+                let account = player.character.account_id;
+                let wallet = player.wallet;
+                player.dirty = true;
+                let _ = self.store.update_wallet(account, wallet);
+                self.distribute_commerce(pos, cut);
+                Ok(())
+            }
+            VendorAction::Convert { count } => {
+                if kind != EntityKind::Bank {
+                    return Err("only a Bank converts Cash".into());
+                }
+                let player = self.players.get_mut(&entity).ok_or("not in world")?;
+                let have = inv::count_items(&player.inventory.slots, ItemKind::Cash);
+                if have == 0 {
+                    return Err("no Cash to convert".into());
+                }
+                let count = count.clamp(1, have);
+                inv::remove_items(&mut player.inventory.slots, ItemKind::Cash, count);
+                let fee = count * wilder_economy::BANK_FEE_PCT / 100;
+                player.wallet += count - fee;
+                let account = player.character.account_id;
+                let wallet = player.wallet;
+                player.dirty = true;
+                let _ = self.store.update_wallet(account, wallet);
+                // The bank's fee is the commerce that territory holders skim.
+                self.distribute_commerce(pos, fee);
+                Ok(())
+            }
+        }
+    }
+
+    /// Route a commerce cut to whoever holds the territory it happened in:
+    /// split evenly among alive players standing in a player-held region
+    /// (presence is control in this phase). Neutral or enemy ground burns it,
+    /// as do rounding remainders.
+    fn distribute_commerce(&mut self, pos: Vec3, cut: u32) {
+        if cut == 0 {
+            return;
+        }
+        let region = region_of(pos);
+        if self.territory.get(&region) != Some(&CONTROL_PLAYER) {
+            return;
+        }
+        let holders: Vec<EntityId> = self
+            .players
+            .values()
+            .filter(|p| {
+                p.character.health > 0.0 && region_of(p.character.position) == region
+            })
+            .map(|p| p.entity)
+            .collect();
+        if holders.is_empty() {
+            return;
+        }
+        let share = cut / holders.len() as u32;
+        if share == 0 {
+            return;
+        }
+        for id in holders {
+            let Some(player) = self.players.get_mut(&id) else { continue };
+            player.wallet += share;
+            let account = player.character.account_id;
+            let wallet = player.wallet;
+            let _ = self.store.update_wallet(account, wallet);
+            let _ = player.tx.send(S2C::Chat {
+                from: "system".into(),
+                text: format!("+{share} WILD — commerce cut from territory you hold"),
+            });
         }
     }
 
@@ -1936,12 +2225,28 @@ impl World {
         }
     }
 
+    /// Positions of every Safehouse building (a handful at most).
+    fn safehouse_positions(&self) -> Vec<Vec3> {
+        self.statics
+            .values()
+            .filter(|s| s.kind == EntityKind::Safehouse)
+            .map(|s| s.position)
+            .collect()
+    }
+
     fn tick_npcs(&mut self) {
-        // Respawns and AI.
+        // Respawns and AI. Players sheltering inside a safehouse bubble are
+        // invisible to hostiles: they can't be targeted or chased.
+        let safehouses = self.safehouse_positions();
         let player_positions: Vec<(EntityId, Vec3)> = self
             .players
             .values()
             .filter(|p| p.character.health > 0.0)
+            .filter(|p| {
+                !safehouses
+                    .iter()
+                    .any(|s| (*s - p.character.position).length() < SAFEHOUSE_RADIUS)
+            })
             .map(|p| (p.entity, p.character.position))
             .collect();
 
@@ -2035,6 +2340,49 @@ impl World {
     }
 
     fn tick_loot(&mut self) {
+        // Auto-pickup: walking within range of an ammo cache grabs it instantly.
+        let mut grabbed: Vec<(EntityId, EntityId)> = Vec::new();
+        for player in self.players.values() {
+            for container in self.loot.values() {
+                if container.variant != 1 {
+                    continue;
+                }
+                if (container.position - player.character.position).length() <= AMMO_PICKUP_RADIUS {
+                    grabbed.push((player.entity, container.entity));
+                }
+            }
+        }
+        for (pid, cid) in grabbed {
+            let (Some(container), Some(player)) =
+                (self.loot.get_mut(&cid), self.players.get_mut(&pid))
+            else {
+                continue;
+            };
+            let mut ammo_gained = 0u32;
+            let mut leftovers = Vec::new();
+            for stack in container.items.drain(..) {
+                let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
+                if stack.kind == ItemKind::Ammo9mm {
+                    ammo_gained += stack.count - rem;
+                }
+                if rem > 0 {
+                    leftovers.push(ItemStack { kind: stack.kind, count: rem });
+                }
+            }
+            let empty = leftovers.is_empty();
+            container.items = leftovers;
+            if ammo_gained > 0 {
+                player.dirty = true;
+                let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+                let _ = player.tx.send(S2C::GatherResult {
+                    gained: Some(ItemStack { kind: ItemKind::Ammo9mm, count: ammo_gained }),
+                });
+            }
+            if empty {
+                self.loot.remove(&cid);
+            }
+        }
+
         let mut expired = Vec::new();
         for container in self.loot.values_mut() {
             container.ttl -= TICK_DT;
@@ -2061,9 +2409,14 @@ impl World {
     }
 
     fn tick_regen(&mut self) {
+        let safehouses = self.safehouse_positions();
         for player in self.players.values_mut() {
             let coord = ChunkCoord::from_world(player.character.position);
-            if is_safe_chunk(coord) && player.character.health < player.character.max_health {
+            let sheltered = is_safe_chunk(coord)
+                || safehouses
+                    .iter()
+                    .any(|s| (*s - player.character.position).length() < SAFEHOUSE_RADIUS);
+            if sheltered && player.character.health < player.character.max_health {
                 player.character.health =
                     (player.character.health + 2.0 * TICK_DT).min(player.character.max_health);
             }
@@ -2096,6 +2449,57 @@ impl World {
     // Streaming / replication
     // -----------------------------------------------------------------------
 
+    /// Place every spawn-district service building and hostile-ring outpost.
+    /// Runs once at world start (before any player joins) so the POI list is
+    /// always complete and positions never depend on who streamed what first.
+    fn seed_district(&mut self) {
+        let placements = || DISTRICT.iter().chain(OUTPOSTS.iter());
+        let mut chunk_order: Vec<(i32, i32)> = Vec::new();
+        for &(c, _, _) in placements() {
+            if !chunk_order.contains(&c) {
+                chunk_order.push(c);
+            }
+        }
+        for c in chunk_order {
+            let stations: Vec<(EntityKind, &str)> = placements()
+                .filter(|&&(cc, _, _)| cc == c)
+                .map(|&(_, kind, name)| (kind, name))
+                .collect();
+            let coord = ChunkCoord::new(c.0, c.1);
+            let chunk = self.chunks.get(coord);
+            let spots = station_spots(&chunk, coord, stations.len());
+            if spots.len() < stations.len() {
+                tracing::warn!(?coord, "chunk too cramped for all district buildings");
+            }
+            for (&(kind, name), pos) in stations.iter().zip(spots) {
+                let entity = self.alloc_entity();
+                self.statics.insert(
+                    entity,
+                    StaticEntity { entity, kind, position: pos, name: name.into(), variant: 0 },
+                );
+            }
+        }
+    }
+
+    /// Every persistent service building, for the map/legend UI. Extraction
+    /// points are excluded: they seed lazily and replicate like entities.
+    fn poi_list(&self) -> Vec<PoiInfo> {
+        let mut pois: Vec<PoiInfo> = self
+            .statics
+            .values()
+            .filter(|s| s.kind != EntityKind::ExtractionPoint)
+            .map(|s| PoiInfo {
+                id: s.entity,
+                kind: s.kind,
+                name: s.name.clone(),
+                x: s.position.x,
+                z: s.position.z,
+            })
+            .collect();
+        pois.sort_by_key(|p| p.id);
+        pois
+    }
+
     fn seed_chunk_content(&mut self, coord: ChunkCoord) {
         // NPCs in hostile chunks.
         if !is_safe_chunk(coord) && !self.npc_seeded_chunks.contains(&coord) {
@@ -2106,33 +2510,16 @@ impl World {
                 self.npcs.insert(entity, Npc::new(entity, archetype, pos));
             }
         }
-        // Static entities: extraction points + hub stash terminal.
+        // Static entities: extraction points (service buildings are seeded
+        // eagerly by `seed_district` at world start).
         if !self.static_seeded_chunks.contains(&coord) {
             self.static_seeded_chunks.insert(coord);
-            if coord.x == 0 && coord.z == 0 {
-                // Hub statics: stash terminal + crafting stations on walkable
-                // spots near spawn (positions come from the baked city map).
-                let hub: &[(EntityKind, &str)] = &[
-                    (EntityKind::Building, "Stash Terminal"),
-                    (EntityKind::Refinery, "Refinery"),
-                    (EntityKind::Factory, "Factory"),
-                    (EntityKind::Laboratory, "Laboratory"),
-                    (EntityKind::MarketTerminal, "Market Terminal"),
-                ];
-                let spots = hub_spots(&self.chunks.get(coord), hub.len());
-                for (&(kind, name), pos) in hub.iter().zip(spots) {
-                    let entity = self.alloc_entity();
-                    self.statics.insert(
-                        entity,
-                        StaticEntity { entity, kind, position: pos, name: name.into(), variant: 0 },
-                    );
-                }
-            }
-            // Resource nodes: roughly every other hostile chunk gets one.
+            // Resource nodes: roughly every other hostile chunk gets one,
+            // yielding whatever its zone favors (mining ground -> metals...).
             let nh = (coord.x.wrapping_mul(198491317) ^ coord.z.wrapping_mul(6542989)) as u32;
             if !is_safe_chunk(coord) && nh % 2 == 0 {
                 let chunk = self.chunks.get(coord);
-                let variant = (nh >> 8) % wilder_economy::RESOURCES.len() as u32;
+                let variant = wilder_economy::zone_resource_index(zone_of_chunk(coord), nh >> 8) as u32;
                 // Deterministic walkable spot (offset scan so nodes don't stack
                 // on the extraction beacon which scans from (2,2)).
                 'node: for tz in (3..TILES_PER_CHUNK).step_by(2) {
@@ -2418,4 +2805,90 @@ impl World {
 /// Starting position for new characters.
 pub fn spawn_position() -> Vec3 {
     SPAWN
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zone_ring_octants() {
+        // Cardinal directions map to their themed zones (+Z = south).
+        assert_eq!(zone_of_chunk(ChunkCoord::new(4, 0)), ZoneKind::BlownUp); // E
+        assert_eq!(zone_of_chunk(ChunkCoord::new(0, 4)), ZoneKind::Mining); // S
+        assert_eq!(zone_of_chunk(ChunkCoord::new(-4, 0)), ZoneKind::Overgrowth); // W
+        assert_eq!(zone_of_chunk(ChunkCoord::new(0, -4)), ZoneKind::Industrial); // N
+        assert_eq!(zone_of_chunk(ChunkCoord::new(4, 4)), ZoneKind::ChemPlant); // SE
+        assert_eq!(zone_of_chunk(ChunkCoord::new(-4, 4)), ZoneKind::Scrapyard); // SW
+        assert_eq!(zone_of_chunk(ChunkCoord::new(4, -4)), ZoneKind::TechRuins); // NE
+        assert_eq!(zone_of_chunk(ChunkCoord::new(-4, -4)), ZoneKind::Mixed); // NW
+        // The safe hub and the far city are unbiased.
+        assert_eq!(zone_of_chunk(ChunkCoord::new(0, 0)), ZoneKind::Mixed);
+        assert_eq!(zone_of_chunk(ChunkCoord::new(1, 1)), ZoneKind::Mixed);
+        assert_eq!(zone_of_chunk(ChunkCoord::new(40, 0)), ZoneKind::Mixed);
+    }
+
+    #[test]
+    fn district_covers_every_service() {
+        use std::collections::HashSet;
+        let kinds: HashSet<EntityKind> = DISTRICT.iter().map(|&(_, k, _)| k).collect();
+        for kind in [
+            EntityKind::Building,
+            EntityKind::Refinery,
+            EntityKind::Factory,
+            EntityKind::Laboratory,
+            EntityKind::MarketTerminal,
+            EntityKind::Armory,
+            EntityKind::Bank,
+            EntityKind::Bodega,
+            EntityKind::Dealership,
+            EntityKind::Safehouse,
+        ] {
+            assert!(kinds.contains(&kind), "{kind:?} missing from the spawn district");
+        }
+        // Every district building sits inside the safe hub.
+        for &((x, z), _, _) in DISTRICT {
+            assert!(is_safe_chunk(ChunkCoord::new(x, z)));
+        }
+        // Outposts sit on capturable (unprotected, hostile) ground.
+        for &((x, z), _, _) in OUTPOSTS {
+            let coord = ChunkCoord::new(x, z);
+            assert!(!is_safe_chunk(coord));
+            let region = (x.div_euclid(REGION_CHUNKS), z.div_euclid(REGION_CHUNKS));
+            assert!(!region_is_protected(region));
+        }
+    }
+
+    #[test]
+    fn district_placements_have_room() {
+        // Every district/outpost chunk on the baked map yields enough
+        // walkable, spread-out spots for its buildings.
+        let generator = TerrainGenerator::new(0);
+        for &(c, _, _) in DISTRICT.iter().chain(OUTPOSTS.iter()) {
+            let coord = ChunkCoord::new(c.0, c.1);
+            let chunk = generator.generate(coord);
+            let wanted = DISTRICT
+                .iter()
+                .chain(OUTPOSTS.iter())
+                .filter(|&&(cc, _, _)| cc == c)
+                .count();
+            let spots = station_spots(&chunk, coord, wanted);
+            assert_eq!(spots.len(), wanted, "chunk {coord:?} too cramped");
+            for pos in &spots {
+                assert_eq!(ChunkCoord::from_world(*pos), coord);
+            }
+        }
+    }
+
+    #[test]
+    fn bank_and_commerce_math() {
+        // Bank conversion: 10% fee floor-divides in the house's favor.
+        let count = 95u32;
+        let fee = count * wilder_economy::BANK_FEE_PCT / 100;
+        assert_eq!(fee, 9);
+        assert_eq!(count - fee, 86);
+        // Territory tax still reduces yields only on enemy ground.
+        assert_eq!(apply_territory_tax(100, true), 75);
+        assert_eq!(apply_territory_tax(100, false), 100);
+    }
 }

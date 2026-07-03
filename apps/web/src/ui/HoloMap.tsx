@@ -24,6 +24,7 @@ import {
   getCityMapManifest,
   onCityMapReady,
 } from "../game/citymap";
+import { POI_STYLES } from "../game/poi";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
 
@@ -150,6 +151,7 @@ function HoloMapView() {
         <HoloScene view={view} />
       </Canvas>
       <div className="map-overlay-title">WIAMI</div>
+      <MapLegend />
       <button
         className="map-view-toggle"
         onClick={() => {
@@ -174,6 +176,9 @@ function HoloScene({ view }: { view: RefObject<HoloView> }) {
       <SafeZoneOutline />
       <PlayerMarker view={view} />
       <ExtractionMarkers view={view} />
+      <AmmoMarkers view={view} />
+      <PoiMarkers view={view} />
+      <ZoneLabels />
       <DistrictLabels />
       <EffectComposer multisampling={8}>
         <Bloom
@@ -679,6 +684,229 @@ function ExtractionMarkers({ view }: { view: RefObject<HoloView> }) {
         </mesh>
       ))}
     </group>
+  );
+}
+
+/** Amber markers on every replicated ammo cache so ammo is easy to locate. */
+function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
+  const [points, setPoints] = useState<{ id: number; x: number; z: number }[]>([]);
+  useEffect(() => {
+    const poll = () => {
+      const next: { id: number; x: number; z: number }[] = [];
+      for (const e of game.entities.values()) {
+        if (e.kind === "LootContainer" && e.variant === 1) {
+          next.push({ id: e.id, x: e.x, z: e.z });
+        }
+      }
+      setPoints((prev) =>
+        prev.length === next.length && prev.every((p, i) => p.id === next[i].id)
+          ? prev
+          : next,
+      );
+    };
+    poll();
+    const timer = setInterval(poll, 500);
+    return () => clearInterval(timer);
+  }, []);
+  const group = useRef<THREE.Group>(null);
+  useFrame(({ clock }) => {
+    const g = group.current;
+    if (!g) return;
+    const s = Math.min(Math.max(4, view.current.sDist * 0.009), 36);
+    const pulse = 1 + 0.2 * Math.sin(clock.elapsedTime * 4);
+    for (const child of g.children) child.scale.setScalar(s * pulse);
+  });
+  return (
+    <group ref={group}>
+      {points.map((p) => (
+        <mesh key={p.id} position={[p.x, 6, p.z]}>
+          <octahedronGeometry args={[1]} />
+          <meshBasicMaterial
+            color={new THREE.Color(2.4, 1.5, 0.3)}
+            blending={THREE.AdditiveBlending}
+            depthWrite={false}
+            transparent
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Service buildings (POIs) + resource zones + legend
+// ---------------------------------------------------------------------------
+
+/** One cached texture per building kind: a colored badge with its glyph. */
+const poiBadgeCache = new Map<string, THREE.CanvasTexture>();
+
+function poiBadgeTexture(kind: string, glyph: string, color: string): THREE.CanvasTexture {
+  let tex = poiBadgeCache.get(kind);
+  if (tex) return tex;
+  const s = 64;
+  const canvas = document.createElement("canvas");
+  canvas.width = s;
+  canvas.height = s;
+  const ctx = canvas.getContext("2d")!;
+  // Diamond badge with the kind's accent color and glyph.
+  ctx.translate(s / 2, s / 2);
+  ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = "rgba(6, 12, 20, 0.9)";
+  ctx.fillRect(-19, -19, 38, 38);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3.5;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 8;
+  ctx.strokeRect(-19, -19, 38, 38);
+  ctx.rotate(-Math.PI / 4);
+  ctx.shadowBlur = 0;
+  ctx.font = "800 26px Rajdhani, system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = color;
+  ctx.fillText(glyph, 0, 2);
+  tex = new THREE.CanvasTexture(canvas);
+  poiBadgeCache.set(kind, tex);
+  return tex;
+}
+
+/** Screen-fixed-size markers for every service building, from the join-time
+ * POI list (visible map-wide, not just inside the streaming radius). */
+function PoiMarkers({ view }: { view: RefObject<HoloView> }) {
+  const pois = useGame((s) => s.pois);
+  const group = useRef<THREE.Group>(null);
+  useFrame(() => {
+    const g = group.current;
+    if (!g) return;
+    // Shrink slightly as the camera zooms out so a packed district stays
+    // readable without the badges swallowing the city.
+    const k = THREE.MathUtils.clamp(0.055 - view.current.sDist * 0.000002, 0.03, 0.055);
+    for (const child of g.children) {
+      child.scale.set(k, k, 1);
+    }
+  });
+  return (
+    <group ref={group}>
+      {pois.map((p) => {
+        const style = POI_STYLES[p.kind];
+        if (!style) return null;
+        return (
+          <sprite key={p.id} position={[p.x, 14, p.z]} renderOrder={9}>
+            <spriteMaterial
+              map={poiBadgeTexture(p.kind, style.glyph, style.color)}
+              transparent
+              depthTest={false}
+              sizeAttenuation={false}
+            />
+          </sprite>
+        );
+      })}
+    </group>
+  );
+}
+
+const zoneLabelCache = new Map<string, THREE.Sprite>();
+
+/** Always-visible dim labels naming the resource zones around the hub. */
+function makeZoneLabelSprite(name: string): THREE.Sprite {
+  let sprite = zoneLabelCache.get(name);
+  if (sprite) return sprite;
+  const pad = 10;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  ctx.font = "700 30px system-ui, sans-serif";
+  const text = name.toUpperCase();
+  const tw = Math.ceil(ctx.measureText(text).width);
+  canvas.width = tw + pad * 2;
+  canvas.height = 44;
+  ctx.font = "700 30px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(255, 176, 64, 0.5)";
+  ctx.shadowBlur = 5;
+  ctx.fillStyle = "rgba(255, 214, 150, 0.75)";
+  ctx.fillText(text, pad, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    sizeAttenuation: false,
+    opacity: 0.75,
+  });
+  sprite = new THREE.Sprite(mat);
+  const k = 0.02;
+  sprite.scale.set((canvas.width / canvas.height) * k, k, 1);
+  sprite.renderOrder = 10;
+  zoneLabelCache.set(name, sprite);
+  return sprite;
+}
+
+function ZoneLabels() {
+  const zones = useGame((s) => s.zones);
+  return (
+    <group>
+      {zones.map((z) => (
+        <primitive
+          key={z.kind}
+          object={makeZoneLabelSprite(z.name)}
+          position={[z.x, 40, z.z]}
+          dispose={null}
+        />
+      ))}
+    </group>
+  );
+}
+
+/** DOM legend panel: what every marker on the map means. */
+function MapLegend() {
+  const pois = useGame((s) => s.pois);
+  // Only list building kinds that actually exist in the world.
+  const kinds = [...new Set(pois.map((p) => p.kind))];
+  return (
+    <div className="map-legend">
+      <div className="map-legend-title">LEGEND</div>
+      {kinds.map((kind) => {
+        const style = POI_STYLES[kind];
+        if (!style) return null;
+        return (
+          <div key={kind} className="map-legend-row" title={style.desc}>
+            <span className="map-legend-badge" style={{ borderColor: style.color, color: style.color }}>
+              {style.glyph}
+            </span>
+            <span className="map-legend-label">{style.label}</span>
+            <span className="map-legend-desc">{style.desc}</span>
+          </div>
+        );
+      })}
+      <div className="map-legend-row">
+        <span className="map-legend-badge" style={{ borderColor: "#ffcf55", color: "#ffcf55" }}>
+          ◆
+        </span>
+        <span className="map-legend-label">EXTRACTION</span>
+        <span className="map-legend-desc">Channel to bank loot</span>
+      </div>
+      <div className="map-legend-row">
+        <span className="map-legend-badge" style={{ borderColor: "#ffbe28", color: "#ffbe28" }}>
+          ●
+        </span>
+        <span className="map-legend-label">AMMO CACHE</span>
+        <span className="map-legend-desc">Free 9mm rounds</span>
+      </div>
+      <div className="map-legend-row">
+        <span className="map-legend-badge" style={{ borderColor: "#29d98c", color: "#29d98c" }}>
+          ▢
+        </span>
+        <span className="map-legend-label">SAFE ZONE</span>
+        <span className="map-legend-desc">No hostiles, health regen</span>
+      </div>
+      <div className="map-legend-row">
+        <span className="map-legend-badge" style={{ borderColor: "#ff4d5e", color: "#ff4d5e" }}>
+          ▣
+        </span>
+        <span className="map-legend-label">ENEMY TERRITORY</span>
+        <span className="map-legend-desc">25% tax on gather & extract</span>
+      </div>
+    </div>
   );
 }
 
