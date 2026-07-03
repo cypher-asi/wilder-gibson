@@ -18,8 +18,8 @@ pub fn weapon_stats(kind: ItemKind) -> Option<WeaponStats> {
     match kind {
         ItemKind::Pipe => Some(WeaponStats { damage: 12.0, range: 2.0, cooldown: 1.0, ranged: false }),
         ItemKind::Knife => Some(WeaponStats { damage: 9.0, range: 1.6, cooldown: 0.55, ranged: false }),
-        ItemKind::Pistol => Some(WeaponStats { damage: 16.0, range: 18.0, cooldown: 0.6, ranged: true }),
-        ItemKind::Smg => Some(WeaponStats { damage: 8.0, range: 15.0, cooldown: 0.15, ranged: true }),
+        ItemKind::Pistol => Some(WeaponStats { damage: 16.0, range: 18.0, cooldown: 0.3, ranged: true }),
+        ItemKind::Smg => Some(WeaponStats { damage: 8.0, range: 15.0, cooldown: 0.1, ranged: true }),
         _ => None,
     }
 }

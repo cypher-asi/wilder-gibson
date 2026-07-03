@@ -91,7 +91,9 @@ function upperBodyClip(clip: THREE.AnimationClip): THREE.AnimationClip {
 const UPPER_CLIPS = ["Pistol_Shoot", "Hit_Chest"];
 
 /** How long the gun mesh bucks after a shot, ms. */
-const GUN_KICK_MS = 130;
+const GUN_KICK_MS = 110;
+/** Seconds the shoot clip takes; keeps the arm pose ahead of the fire rate. */
+const SHOOT_ANIM_TIME = 0.25;
 // --- Sidearm hold / aim tuning (see attachPistol + the per-frame aim) -------
 /** Uniform scale applied to the pistol GLB in the hand. */
 const GUN_SCALE = 0.35;
@@ -444,7 +446,11 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
     if (shotMark > seenShot.current) {
       seenShot.current = shotMark;
       if (!isNpc && !dying) {
-        playUpper("Pistol_Shoot", 1.6);
+        // Scale the clip so the full recoil pose completes within the fire
+        // interval even at high rates of fire.
+        const clipDur =
+          upperActions.current["Pistol_Shoot"]?.getClip().duration ?? 0.4;
+        playUpper("Pistol_Shoot", clipDur / SHOOT_ANIM_TIME);
         gunKickAt.current = now;
       }
     }

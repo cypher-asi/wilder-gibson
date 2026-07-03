@@ -226,7 +226,8 @@ export class GameConnection {
             const fy = muzzle?.y ?? 1.35;
             const fz = muzzle?.z ?? attacker.z;
             if (!isLocal) {
-              // The local shooter already played its flash + sfx on click.
+              // The local shooter already played its flash, projectile and
+              // sfx on click; only remote shots spawn them from the server.
               void playSfx("sfx_shoot", 0.3);
               attacker.lastShotAt = now;
               game.fx.push({
@@ -237,17 +238,17 @@ export class GameConnection {
                 yaw: Math.atan2(ev.d.tz - attacker.z, ev.d.tx - attacker.x),
                 at: now,
               });
+              game.fx.push({
+                type: "tracer",
+                fx,
+                fy,
+                fz,
+                tx: ev.d.tx,
+                ty: 1.25,
+                tz: ev.d.tz,
+                at: now,
+              });
             }
-            game.fx.push({
-              type: "tracer",
-              fx,
-              fy,
-              fz,
-              tx: ev.d.tx,
-              ty: 1.25,
-              tz: ev.d.tz,
-              at: now,
-            });
           }
         } else if (ev.t === "EntityDied") {
           void playSfx("sfx_death", 0.4);

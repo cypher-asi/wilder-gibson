@@ -25,8 +25,8 @@ const TICK_DT = 1 / 20;
 
 /** Client mirror of server weapon cooldowns (seconds) for fire pacing. */
 const WEAPON_COOLDOWN: Record<string, number> = {
-  Pistol: 0.6,
-  Smg: 0.15,
+  Pistol: 0.3,
+  Smg: 0.1,
   Pipe: 1.0,
   Knife: 0.55,
 };
@@ -380,12 +380,12 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const target = fireTarget();
     connection.send({ t: "Attack", d: { seq, tx: target.x, tz: target.z } });
 
-    // Instant local feedback: muzzle flash, shell, recoil, sfx. The server's
-    // MuzzleFlash event only adds the tracer for our own shots.
+    // Instant local feedback: muzzle flash, projectile, shell, recoil, sfx.
+    // The server's MuzzleFlash event is skipped for our own shots.
     if (hasRangedWeapon()) {
       void playSfx("sfx_shoot", 0.3);
-      // Orient the FX toward the resolved target so the flash/tracer follow the
-      // shot even when aim assist snapped it onto a nearby enemy.
+      // Orient the FX toward the resolved target so the flash/projectile
+      // follow the shot even when aim assist snapped it onto a nearby enemy.
       const yaw = Math.atan2(
         target.z - game.rendered.z,
         target.x - game.rendered.x,
@@ -398,6 +398,18 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       const my = muzzle?.y ?? 1.35;
       const mz = muzzle?.z ?? game.rendered.z + Math.sin(yaw) * 0.5;
       game.fx.push({ type: "flash", x: mx, y: my, z: mz, yaw, at: now });
+      // Projectile spawns immediately so rapid fire has zero server lag on
+      // your own bullets (remote players' bolts come from MuzzleFlash).
+      game.fx.push({
+        type: "tracer",
+        fx: mx,
+        fy: my,
+        fz: mz,
+        tx: target.x,
+        ty: 1.25,
+        tz: target.z,
+        at: now,
+      });
       game.fx.push({
         type: "shell",
         x: mx,

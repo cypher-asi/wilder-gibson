@@ -10,8 +10,12 @@ import * as THREE from "three";
 import { CombatFxEvent, game } from "../state/game";
 import { groundHeightAt } from "./Ground";
 
+/** Projectile travel speed (m/s); the bolt's lifetime scales with distance. */
+const PROJECTILE_SPEED = 40;
+
 const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
-  tracer: 170,
+  // Upper bound for pruning: max weapon range / projectile speed.
+  tracer: 550,
   hit: 800,
   death: 600,
   shockwave: 550,
@@ -76,54 +80,70 @@ export function CombatFx() {
 const UP = new THREE.Vector3(0, 1, 0);
 
 /**
- * Bullet streak racing from the muzzle to the end point: a short bright
- * segment whose head travels the full distance over the tracer lifetime.
+ * Visible projectile: a bright bolt that flies from the muzzle to the end
+ * point at a constant speed (so nearby shots arrive fast and long shots read
+ * as a travelling bullet), dragging a fading streak trail behind it.
  */
 function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
-  const mesh = useRef<THREE.Mesh>(null);
+  const group = useRef<THREE.Group>(null);
+  const trail = useRef<THREE.Mesh>(null);
 
-  const { from, dir, dist, quat, streak } = useMemo(() => {
+  const { from, dir, dist, quat, travelMs } = useMemo(() => {
     const from = new THREE.Vector3(ev.fx, ev.fy, ev.fz);
     const to = new THREE.Vector3(ev.tx, ev.ty, ev.tz);
     const delta = to.clone().sub(from);
     const dist = Math.max(delta.length(), 0.1);
     const dir = delta.normalize();
     const quat = new THREE.Quaternion().setFromUnitVectors(UP, dir);
-    // Streak length scales with range but stays a "bullet", not a laser.
-    const streak = THREE.MathUtils.clamp(dist * 0.35, 0.8, 2.6);
-    return { from, dir, dist, quat, streak };
+    const travelMs = (dist / PROJECTILE_SPEED) * 1000;
+    return { from, dir, dist, quat, travelMs };
   }, [ev]);
 
   useFrame(() => {
-    if (!mesh.current) return;
-    const t = (performance.now() - ev.at) / LIFETIME_MS.tracer;
+    if (!group.current) return;
+    const t = (performance.now() - ev.at) / travelMs;
     if (t >= 1) {
-      mesh.current.visible = false;
+      group.current.visible = false;
       return;
     }
-    mesh.current.visible = true;
-    const head = Math.min(1, t * 1.15) * dist;
-    const tail = Math.max(0, head - streak);
-    const len = Math.max(head - tail, 0.05);
-    mesh.current.position
-      .copy(from)
-      .addScaledVector(dir, (head + tail) / 2);
-    mesh.current.scale.set(1, len, 1);
-    (mesh.current.material as THREE.MeshBasicMaterial).opacity =
-      THREE.MathUtils.clamp(1.2 - t, 0, 1) * 0.9;
+    group.current.visible = true;
+    const head = t * dist;
+    group.current.position.copy(from).addScaledVector(dir, head);
+    if (trail.current) {
+      // Trail stretches behind the bolt but never past the muzzle.
+      const len = Math.min(head, 0.9);
+      trail.current.scale.set(1, Math.max(len, 0.05), 1);
+      trail.current.position.set(0, -len / 2 - 0.06, 0);
+      (trail.current.material as THREE.MeshBasicMaterial).opacity =
+        THREE.MathUtils.clamp(1 - t * 0.5, 0, 1) * 0.5;
+    }
   });
 
   return (
-    <mesh ref={mesh} quaternion={quat} visible={false}>
-      <cylinderGeometry args={[0.03, 0.03, 1, 5]} />
-      <meshBasicMaterial
-        color="#ffd27a"
-        transparent
-        opacity={0.9}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-      />
-    </mesh>
+    <group ref={group} quaternion={quat} visible={false}>
+      {/* Bolt head: hot elongated slug. */}
+      <mesh scale={[1, 0.16, 1]}>
+        <cylinderGeometry args={[0.035, 0.035, 1, 6]} />
+        <meshBasicMaterial
+          color="#fff2c8"
+          transparent
+          opacity={1}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Fading streak trail behind the bolt. */}
+      <mesh ref={trail}>
+        <cylinderGeometry args={[0.022, 0.022, 1, 5]} />
+        <meshBasicMaterial
+          color="#ffd27a"
+          transparent
+          opacity={0.5}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+    </group>
   );
 }
 
