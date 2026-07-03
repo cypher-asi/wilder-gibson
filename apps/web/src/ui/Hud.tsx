@@ -464,12 +464,9 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
     <div className="weapon-dock">
       <div className="weapon-dock-main">
         <div className="weapon-dock-info">
-          <span className="weapon-dock-tag" title={weapon ?? "Unarmed"}>
-            {label}
-          </span>
-          <div className="weapon-dock-ammo-tag">
+          <div className="weapon-dock-ammo-tag" title={weapon ?? "Unarmed"}>
             <span className="ammo-chevron">»</span>
-            {ranged ? ":: AMMO" : ":: MELEE"}
+            {`:: ${label}`}
           </div>
           {ranged && (
             <div className="weapon-dock-ammo-row">
