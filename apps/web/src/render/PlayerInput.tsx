@@ -111,6 +111,8 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       // While the fullscreen map is open only map keys work (HoloMap handles
       // Escape/T itself); everything else must not reach the paused game.
       if (useGame.getState().mapOpen && event.code !== "KeyM") return;
+      // Same for the economy dashboard (it handles Escape itself).
+      if (useGame.getState().economyOpen && event.code !== "KeyK") return;
       // While the game menu is open, Escape (resume) is the only game key.
       if (useGame.getState().menuOpen) {
         if (event.code === "Escape" && !event.repeat) {
@@ -132,6 +134,11 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
           (ui.marketOpen && ui.nearMarket) ||
           (ui.vendorOpen && ui.nearVendor !== null);
         if (panelVisible) {
+          // This Escape is spent closing the panel. Closing it re-acquires
+          // pointer lock, and the browser can immediately kick that lock back
+          // out for the very same Escape press — CameraRig must not treat
+          // that unlock as "open the game menu".
+          cameraState.suppressMenuUntil = performance.now() + 1500;
           ui.set({
             inventoryOpen: false,
             craftOpen: false,
@@ -151,6 +158,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "KeyM") {
         event.preventDefault();
         useGame.getState().toggleMap();
+      }
+      if (event.code === "KeyK") {
+        event.preventDefault();
+        useGame.getState().toggleEconomy();
       }
       if (event.code === "ShiftLeft" || event.code === "ShiftRight") {
         running.current = true;
@@ -210,8 +221,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
       // The unlocked canvas click only (re)acquires pointer lock (CameraRig);
-      // it must not double as a trigger pull.
-      if (!cameraState.locked) return;
+      // it must not double as a trigger pull. When pointer lock is denied
+      // outright (embedded browsers, test harnesses) the twin-stick fallback
+      // stays live, so clicks keep firing there.
+      if (!cameraState.locked && !cameraState.lockUnavailable) return;
       const now = performance.now();
       // Draw is a ranged-only concept: melee/fists punch immediately with no
       // draw delay and no invisible-gun aim pose.

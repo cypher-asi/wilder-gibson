@@ -1861,9 +1861,10 @@ body {
 
 /* Slot cards */
 .invx-slot {
+  --slot-edge: var(--steel-border);
   position: relative;
   background: var(--invx-card);
-  border: 1px solid var(--steel-border);
+  border: 1px solid var(--slot-edge);
   clip-path: var(--clip-notch-sm);
   width: 64px;
   height: 64px;
@@ -1874,18 +1875,37 @@ body {
   transition: border-color 0.12s ease, background 0.12s ease;
 }
 
+/* The clip-path removes the border along the notched corner, so redraw the
+   diagonal edge with a thin gradient stripe just inside the clip line. */
+.invx-slot::after,
+.invx-corner-glyph::after,
+.invx-keycap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Notch cut line sits at 6px/sqrt(2) = 4.24px from the corner. */
+  background: linear-gradient(
+    -45deg,
+    transparent 4.2px,
+    var(--slot-edge, var(--steel-border)) 4.2px,
+    var(--slot-edge, var(--steel-border)) 5.8px,
+    transparent 5.8px
+  );
+}
+
 .invx-slot:hover {
-  border-color: var(--accent);
+  --slot-edge: var(--accent);
   background: var(--accent-faint);
 }
 
 .invx-slot.filled {
-  border-color: var(--accent-dim);
+  --slot-edge: var(--accent-dim);
   background: var(--accent-faint);
 }
 
 .invx-slot.selected {
-  border-color: var(--invx-accent);
+  --slot-edge: var(--invx-accent);
   background: var(--hatch);
   box-shadow: 0 0 10px rgba(79, 195, 255, 0.3) inset;
 }
@@ -1896,7 +1916,7 @@ body {
 }
 
 .invx-slot.highlight {
-  border-color: var(--invx-accent);
+  --slot-edge: var(--invx-accent);
   box-shadow: 0 0 8px rgba(79, 195, 255, 0.4);
 }
 
@@ -1908,7 +1928,8 @@ body {
 }
 
 .invx-slot.locked:hover {
-  border-color: var(--steel-border);
+  --slot-edge: var(--steel-border);
+  background: var(--hatch-steel);
 }
 
 /* Attachment/gadget placeholders: 190px card + 3x42px locks + gaps = 336px,
@@ -1930,7 +1951,7 @@ body {
 }
 
 .invx-weapon-card.active {
-  border-color: var(--accent-dim);
+  --slot-edge: var(--accent-dim);
   box-shadow: 0 0 12px rgba(79, 195, 255, 0.25) inset, 0 0 8px rgba(79, 195, 255, 0.2);
 }
 
@@ -1992,10 +2013,10 @@ body {
 
 .invx-count {
   position: absolute;
-  right: 5px;
+  right: 6px;
   bottom: 3px;
   font-size: 10px;
-  color: var(--invx-dim);
+  color: var(--accent-bright);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2025,21 +2046,26 @@ body {
   gap: 8px;
   margin-top: 12px;
   font-size: 12px;
-  color: var(--invx-teal);
+  letter-spacing: 0.1em;
+  color: var(--invx-accent);
+  text-shadow: 0 0 8px rgba(79, 195, 255, 0.35);
 }
 
 .invx-keycap {
+  --slot-edge: var(--accent-dim);
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   min-width: 20px;
   height: 20px;
   padding: 0 5px;
-  border: 1px solid rgba(53, 224, 200, 0.5);
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid var(--accent-dim);
+  clip-path: var(--clip-notch-sm);
+  background: rgba(9, 15, 24, 0.8);
   font-size: 11px;
   font-weight: 700;
+  color: var(--accent-bright);
 }
 
 .invx-footer-hint {
@@ -2058,17 +2084,17 @@ body {
   opacity: 0.35;
 }
 
-/* Hovered valid drop target (slot or equip card): teal highlight. */
+/* Hovered valid drop target (slot or equip card): cyan highlight. */
 .invx-slot.drop-ok {
-  border-color: var(--invx-teal);
-  box-shadow: 0 0 8px rgba(53, 224, 200, 0.35);
-  background: rgba(53, 224, 200, 0.08);
+  --slot-edge: var(--invx-accent);
+  box-shadow: 0 0 8px rgba(79, 195, 255, 0.4);
+  background: var(--accent-faint);
 }
 
 /* Whole-panel drop target (deposit / withdraw / unequip). */
 .invx-panel.drop-ok {
-  border-color: var(--invx-teal);
-  box-shadow: 0 0 10px rgba(53, 224, 200, 0.25) inset, 0 0 8px rgba(53, 224, 200, 0.2);
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 12px rgba(79, 195, 255, 0.2) inset, var(--holo-layers);
 }
 
 /* Floating dragged-item ghost, centered on the cursor. */

@@ -25,14 +25,7 @@ import {
 } from "../game/collision";
 import { POI_STYLES } from "../game/poi";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
-import {
-  AnimState,
-  BuildingInstance,
-  CHUNK_SIZE,
-  EntityKind,
-  TILE_SIZE,
-  TILES_PER_CHUNK,
-} from "../net/protocol";
+import { AnimState, CHUNK_SIZE, EntityKind, TILE_SIZE } from "../net/protocol";
 import { perf } from "../perf/perf";
 import {
   activeWeaponKind,
@@ -44,8 +37,6 @@ import {
   useGame,
 } from "../state/game";
 import { RED_NUM } from "../ui/colors";
-import { buildShopUnit, ShopFrontStyle } from "./building";
-import { getBuildingMaterial } from "./facade";
 import { groundHeightAt } from "./Ground";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
@@ -1182,19 +1173,6 @@ function HoloSign({ kind, y = 3.1 }: { kind: EntityKind; y?: number }) {
 // Service POI storefronts
 // ---------------------------------------------------------------------------
 
-/** Front treatment per service kind (see buildShopUnit). */
-const SHOP_FRONTS: Partial<Record<EntityKind, ShopFrontStyle>> = {
-  Armory: "retail",
-  Bank: "retail",
-  Bodega: "retail",
-  Dealership: "retail",
-  MarketTerminal: "retail",
-  Building: "storage",
-  Refinery: "industrial",
-  Factory: "industrial",
-  Laboratory: "industrial",
-};
-
 /** Panel opened alongside the Interact message when a shop is clicked. */
 function openShopPanel(kind: EntityKind): void {
   const { set } = useGame.getState();
@@ -1268,92 +1246,86 @@ function shopSignMaterial(kind: EntityKind): { mat: THREE.MeshBasicMaterial; asp
   return entry;
 }
 
-function tileKindAt(wx: number, wz: number): string | null {
-  const cx = Math.floor(wx / CHUNK_SIZE);
-  const cz = Math.floor(wz / CHUNK_SIZE);
+/**
+ * The building whose street face hosts this POI. The server places service
+ * entities on the sidewalk tile fronting a building footprint (-z face), so
+ * the hosting building is the nearest one whose front row is just behind
+ * the entity. Returns placement data in world space, or null while the
+ * chunk hasn't streamed in yet.
+ */
+interface HostFace {
+  /** World x-extent of the hosting building's front face. */
+  x0: number;
+  x1: number;
+  /** World z of the front wall plane (building side; front is -z). */
+  wallZ: number;
+}
+
+function hostBuildingFace(x: number, z: number): HostFace | null {
+  const cx = Math.floor(x / CHUNK_SIZE);
+  const cz = Math.floor(z / CHUNK_SIZE);
   const chunk = game.chunks.chunks.get(chunkKey(cx, cz));
   if (!chunk) return null;
-  const tx = Math.min(Math.floor((wx - cx * CHUNK_SIZE) / TILE_SIZE), TILES_PER_CHUNK - 1);
-  const tz = Math.min(Math.floor((wz - cz * CHUNK_SIZE) / TILE_SIZE), TILES_PER_CHUNK - 1);
-  return chunk.tiles[tz * TILES_PER_CHUNK + tx];
-}
-
-/** Yaw pointing the shop's front (-z local) at the nearest road tile, snapped
- * to a cardinal. Null while the POI's own chunk hasn't streamed in yet. */
-function shopFacingYaw(x: number, z: number): number | null {
-  if (tileKindAt(x, z) === null) return null;
-  let best: { dx: number; dz: number; d2: number } | null = null;
-  const R = 6; // search radius in tiles
-  for (let dz = -R; dz <= R; dz++) {
-    for (let dx = -R; dx <= R; dx++) {
-      if (dx === 0 && dz === 0) continue;
-      const kind = tileKindAt(x + dx * TILE_SIZE, z + dz * TILE_SIZE);
-      if (kind !== "Road" && kind !== "RoadLine") continue;
-      const d2 = dx * dx + dz * dz;
-      if (!best || d2 < best.d2) best = { dx, dz, d2 };
+  const ox = cx * CHUNK_SIZE;
+  const oz = cz * CHUNK_SIZE;
+  let best: HostFace | null = null;
+  let bestD = Infinity;
+  for (const b of chunk.buildings) {
+    const x0 = ox + b.tx0 * TILE_SIZE;
+    const x1 = ox + b.tx1 * TILE_SIZE;
+    const wallZ = oz + b.tz0 * TILE_SIZE;
+    // The entity must stand in front of the face (within one tile of the
+    // wall) and within its x-extent.
+    if (x < x0 - 0.5 || x > x1 + 0.5) continue;
+    const dz = wallZ - z;
+    if (dz < 0 || dz > TILE_SIZE * 1.5) continue;
+    if (dz < bestD) {
+      bestD = dz;
+      best = { x0, x1, wallZ };
     }
   }
-  if (!best) return 0;
-  if (Math.abs(best.dx) > Math.abs(best.dz)) {
-    return best.dx > 0 ? -Math.PI / 2 : Math.PI / 2;
-  }
-  return best.dz > 0 ? Math.PI : 0;
+  return best;
 }
 
-// Emissive/glass overlays don't participate in shadows (mirrors Buildings.tsx).
-const SHOP_NO_SHADOW = new Set(["neon", "glass"]);
-
-/** Service POI rendered as a real one-story procedural storefront: shared
- * city building materials, a text fascia sign, and a restrained accent. */
+/**
+ * Service POI anchored to the procedural storefront of its hosting city
+ * building: a text sign board mounted on the building's fascia over the
+ * entity, a soft accent strip, and an invisible interaction volume over
+ * the storefront bay. The building itself renders through Chunks/Buildings
+ * as usual — nothing extra is built here.
+ */
 function ShopFront({ entity }: { entity: GameEntity }) {
   const accent = POI_STYLES[entity.kind]?.color ?? "#4fc3ff";
-  const front = SHOP_FRONTS[entity.kind] ?? "retail";
-  const model = useMemo(
-    () => buildShopUnit(front, accent, (entity.id * 2654435761) >>> 0),
-    [front, accent, entity.id],
+  // The hosting building's chunk may stream in after the entity spawns.
+  const [host, setHost] = useState<HostFace | null>(() =>
+    hostBuildingFace(entity.x, entity.z),
   );
-  useEffect(() => {
-    return () => {
-      for (const [, geom] of model.geoms) geom.dispose();
-    };
-  }, [model]);
-  // Synthetic building instance so getBuildingMaterial picks a per-shop
-  // facade texture/tint from the shared city palette.
-  const materialKey = useMemo<BuildingInstance>(
-    () => ({
-      archetype: entity.id % 3,
-      tx0: 0,
-      tz0: 0,
-      tx1: 3,
-      tz1: 2,
-      stories: 1,
-      style: (entity.id * 747796405 + 0x9e3779b9) >>> 0,
-    }),
-    [entity.id],
-  );
-  // Face the nearest street; chunk data may land after the entity spawns,
-  // so retry until the shop's own chunk is loaded.
-  const [yaw, setYaw] = useState<number | null>(() => shopFacingYaw(entity.x, entity.z));
   useFrame(() => {
-    if (yaw === null) {
-      const resolved = shopFacingYaw(entity.x, entity.z);
-      if (resolved !== null) setYaw(resolved);
+    if (host === null) {
+      const resolved = hostBuildingFace(entity.x, entity.z);
+      if (resolved !== null) setHost(resolved);
     }
   });
 
   const sign = shopSignMaterial(entity.kind);
-  // Fit the label plane inside the fascia board, preserving text aspect.
-  let signH = model.sign.height - 0.14;
-  let signW = signH * (sign?.aspect ?? 1);
-  const maxW = model.sign.width - 0.1;
+  // Everything below is positioned relative to the entity (the group's
+  // origin), which stands on the sidewalk tile fronting the building.
+  // Fascia geometry constants mirror building.ts buildStorefront: fascia
+  // band centered at y 3.95, proud 0.34 of the wall plane.
+  const wallDz = host ? host.wallZ - entity.z : TILE_SIZE / 2;
+  const signY = 3.95;
+  // Sign plane sized from the texture aspect, clamped to the hosting face.
+  const faceW = host ? host.x1 - host.x0 : 6;
+  let signH = 0.66;
+  let signW = signH * (sign?.aspect ?? 4);
+  const maxW = Math.min(5.2, faceW - 0.8);
   if (signW > maxW) {
     signW = maxW;
-    signH = signW / (sign?.aspect ?? 1);
+    signH = signW / (sign?.aspect ?? 4);
   }
 
   return (
     <group
-      rotation={[0, yaw ?? 0, 0]}
       onClick={(e) => {
         e.stopPropagation();
         game.send?.({ t: "Interact", d: { entity_id: entity.id } });
@@ -1362,25 +1334,29 @@ function ShopFront({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      {model.geoms.map(([key, geom]) => (
-        <mesh
-          key={key}
-          geometry={geom}
-          material={getBuildingMaterial(key, materialKey)}
-          castShadow={!SHOP_NO_SHADOW.has(key)}
-          receiveShadow={!SHOP_NO_SHADOW.has(key)}
-        />
-      ))}
-      {sign && (
-        <mesh
-          position={[0, model.sign.y, model.sign.z]}
-          rotation={[0, Math.PI, 0]}
-          material={sign.mat}
-        >
-          <planeGeometry args={[signW, signH]} />
+      {/* Sign board on the hosting building's fascia: dark backing + text. */}
+      <group position={[0, signY, wallDz - 0.46]}>
+        <mesh position={[0, 0, 0.06]} castShadow>
+          <boxGeometry args={[signW + 0.24, signH + 0.22, 0.12]} />
+          <meshStandardMaterial color="#1c1e22" roughness={0.5} metalness={0.75} />
         </mesh>
-      )}
-      <GroundGlow color={accent} radius={2.6} opacity={0.12} />
+        {sign && (
+          <mesh rotation={[0, Math.PI, 0]} position={[0, 0, -0.005]} material={sign.mat}>
+            <planeGeometry args={[signW, signH]} />
+          </mesh>
+        )}
+        {/* Thin accent strip under the sign board. */}
+        <mesh rotation={[0, Math.PI, 0]} position={[0, -(signH / 2) - 0.17, 0]}>
+          <planeGeometry args={[signW + 0.24, 0.05]} />
+          <meshBasicMaterial color={accent} toneMapped={false} />
+        </mesh>
+      </group>
+      {/* Invisible interaction volume over the storefront bay. */}
+      <mesh position={[0, 1.7, wallDz / 2]} visible={false}>
+        <boxGeometry args={[Math.max(signW + 0.4, 3), 3.4, Math.max(wallDz, 1.2)]} />
+        <meshBasicMaterial />
+      </mesh>
+      <GroundGlow color={accent} radius={2.4} opacity={0.12} />
     </group>
   );
 }

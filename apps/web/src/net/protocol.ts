@@ -231,6 +231,7 @@ export type C2S =
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
   | Tagged<"Market", MarketActionMsg>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
+  | Tagged<"EconomySub", { on: boolean }>
   | Tagged<"Chat", { text: string }>
   | Tagged<"Pong", { nonce: number }>;
 
@@ -281,6 +282,76 @@ export interface ZoneInfo {
   name: string;
   x: number;
   z: number;
+}
+
+// ---------------------------------------------------------------------------
+// Economy ledger (K dashboard)
+// ---------------------------------------------------------------------------
+
+/** One side of an economy transaction (mirror of wilder-types TxParty). */
+export type TxParty =
+  | Tagged<"Player", { id: string; name: string }>
+  | Tagged<"Agent", { id: string; name: string }>
+  | TaggedUnit<"Mint">
+  | TaggedUnit<"Burn">;
+
+/** What a transaction is denominated in. */
+export type TxAmount =
+  | Tagged<"Item", { kind: ItemKind; count: number }>
+  | Tagged<"Wild", { amount: number }>
+  | Tagged<"Blueprint", { recipe: string }>;
+
+export type TxKind =
+  | "Mint"
+  | "Burn"
+  | "LootPickup"
+  | "Drop"
+  | "VendorBuy"
+  | "VendorSell"
+  | "BankConvert"
+  | "MarketList"
+  | "MarketBuy"
+  | "MarketCancel"
+  | "CraftConsume"
+  | "CraftProduce"
+  | "Fee"
+  | "Extract";
+
+/** A ledger entry. hash/block are mock values until the chain is real. */
+export interface EconTx {
+  seq: number;
+  hash: string;
+  block: number;
+  at_ms: number;
+  kind: TxKind;
+  from: TxParty;
+  to: TxParty;
+  amount: TxAmount;
+  fee: number;
+}
+
+/** Live supply counters for one item kind. */
+export interface ItemSupply {
+  kind: ItemKind;
+  minted: number;
+  burned: number;
+}
+
+/** Aggregate economy snapshot pushed to dashboard subscribers. */
+export interface EconomyStats {
+  block: number;
+  tx_count: number;
+  wild_minted: number;
+  wild_burned: number;
+  wild_circulating: number;
+  wild_agent_held: number;
+  items: ItemSupply[];
+  blueprints_learned: number;
+  players_online: number;
+  agents_alive: number;
+  deaths: number;
+  npc_kills: number;
+  trades: number;
 }
 
 export type CombatEvent =
@@ -344,6 +415,8 @@ export type S2C =
   | Tagged<"PoiList", { pois: PoiInfo[]; zones: ZoneInfo[] }>
   | Tagged<"TerritoryState", { cells: TerritoryCell[] }>
   | Tagged<"BlueprintsUpdate", { known: string[] }>
+  | Tagged<"EconomyState", { stats: EconomyStats; recent: EconTx[] }>
+  | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>
   | Tagged<"Error", { message: string }>;

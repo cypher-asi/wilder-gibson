@@ -4,6 +4,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { GameConnection } from "../net/connection";
+import { cameraState } from "../render/CameraRig";
 import { useGame } from "../state/game";
 
 const TABS = ["CHAT", "COMBAT", "STATUS"] as const;
@@ -135,6 +136,9 @@ export function ChatWindow({ connection }: { connection: GameConnection }) {
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
+                // Escape spent on closing chat: don't let the relock/unlock
+                // bounce read as an "open game menu" Escape (see CameraRig).
+                cameraState.suppressMenuUntil = performance.now() + 1500;
                 set({ chatOpen: false });
                 (e.target as HTMLInputElement).blur();
               }

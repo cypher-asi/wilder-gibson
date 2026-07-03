@@ -9,6 +9,13 @@ use crate::TICK_DT;
 
 pub struct Npc {
     pub entity: EntityId,
+    /// Persistent economic identity: minted fresh on spawn and again on every
+    /// respawn (a respawned NPC is a brand-new agent with its own inventory).
+    pub agent_id: AgentId,
+    /// Unique display name for the ledger feed, e.g. "SCAV-3F2A".
+    pub agent_name: String,
+    /// Items this agent carries (rolled at spawn, dropped on death).
+    pub inventory: Vec<ItemStack>,
     pub archetype: &'static NpcArchetype,
     pub home: Vec3,
     pub position: Vec3,
@@ -34,10 +41,22 @@ const PROVOKE_SECONDS: f32 = 8.0;
 /// Provoked NPCs give up beyond this distance from the attacker.
 const PROVOKE_LEASH: f32 = 40.0;
 
+/// Mint a fresh agent identity: unique id plus a feed-friendly name like
+/// "SCAV-3F2A" (archetype + first hex nibbles of the id).
+pub fn mint_agent_identity(archetype: &NpcArchetype) -> (AgentId, String) {
+    let id = uuid::Uuid::new_v4();
+    let short = id.simple().to_string()[..4].to_uppercase();
+    (id, format!("{}-{}", archetype.name.to_uppercase(), short))
+}
+
 impl Npc {
     pub fn new(entity: EntityId, archetype: &'static NpcArchetype, home: Vec3) -> Self {
+        let (agent_id, agent_name) = mint_agent_identity(archetype);
         Self {
             entity,
+            agent_id,
+            agent_name,
+            inventory: Vec::new(),
             archetype,
             home,
             position: home,

@@ -1,7 +1,7 @@
 // Audio: file-based SFX via Howler + a synthesized rain/city ambience bed
 // (filtered noise through Web Audio, so no large looping asset is needed).
 
-import { Howl } from "howler";
+import { Howl, Howler } from "howler";
 import { getAudioUrl } from "./catalog";
 
 const sfxCache = new Map<string, Howl | null>();
@@ -40,7 +40,19 @@ async function ensureMusic(): Promise<Howl | null> {
 /** Start (or resume) the looping main-music bed, if it is enabled. */
 async function startMusic() {
   const howl = await ensureMusic();
-  if (howl && musicEnabled && !howl.playing()) howl.play();
+  if (!howl || !musicEnabled) return;
+  // Howler's shared AudioContext is created lazily on the first Howl and, when
+  // that happens outside a direct user gesture, starts suspended — so play()
+  // would be silent. Resume it (works under the sticky activation from the
+  // join click / the toggle click) before/after starting playback.
+  const ctx = Howler.ctx as AudioContext | undefined;
+  if (ctx && ctx.state !== "running") void ctx.resume();
+  if (!howl.playing()) {
+    howl.play();
+    howl.once("unlock", () => {
+      if (musicEnabled && !howl.playing()) howl.play();
+    });
+  }
 }
 
 /** Stop the main-music bed without forgetting the enabled preference. */

@@ -39,6 +39,11 @@ export const cameraState = {
   // the game stays fully playable on the legacy twin-stick scheme, so
   // PlayerInput must not gate firing on a lock that can never engage.
   lockUnavailable: false,
+  // Set (to a performance.now() deadline) when Escape was consumed to close
+  // a panel. The same keypress can kick out the freshly re-acquired pointer
+  // lock via the browser's built-in Escape-unlocks behavior; that unlock
+  // must not be read as "open the game menu".
+  suppressMenuUntil: 0,
 };
 
 // Debug handle for development tooling (mirrors window.__game in state/game).
@@ -181,8 +186,12 @@ export function CameraRig() {
         // Escape exits pointer lock at the browser level without the keydown
         // ever reaching the page, so an unlock with no panel open is the
         // Escape shortcut: bring up the game menu (matches PlayerInput's
-        // unlocked Escape handling).
-        if (!uiBlocksPointerLock(useGame.getState())) {
+        // unlocked Escape handling). Skip it right after an Escape that
+        // closed a panel — that press already did its job.
+        if (
+          !uiBlocksPointerLock(useGame.getState()) &&
+          performance.now() > cameraState.suppressMenuUntil
+        ) {
           useGame.getState().set({ menuOpen: true });
         }
       }

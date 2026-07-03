@@ -422,6 +422,19 @@ export class GameConnection {
         ui.set({ blueprints: msg.d.known });
         break;
       }
+      case "EconomyState": {
+        // Full snapshot on subscribe; server sends the ring oldest-first.
+        ui.set({
+          economy: { stats: msg.d.stats, feed: [...msg.d.recent].reverse() },
+        });
+        break;
+      }
+      case "EconomyTxs": {
+        const cur = useGame.getState().economy;
+        const feed = [...msg.d.txs].reverse().concat(cur?.feed ?? []).slice(0, 300);
+        ui.set({ economy: { stats: msg.d.stats, feed } });
+        break;
+      }
       case "Error": {
         ui.pushChat({ from: "system", text: msg.d.message, system: true });
         break;

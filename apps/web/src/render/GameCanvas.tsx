@@ -1,16 +1,37 @@
-import { Canvas } from "@react-three/fiber";
+import { Canvas, events } from "@react-three/fiber";
 import { GameConnection } from "../net/connection";
 import { AdaptiveQuality } from "../perf/AdaptiveQuality";
 import { PerfTracker } from "../perf/PerfTracker";
 import { useGame } from "../state/game";
 import { Effects, Lighting, SceneSetup, SkyBackdrop, SunsetAtmosphere } from "./Atmosphere";
-import { CAMERA_FAR, CameraRig } from "./CameraRig";
+import { CAMERA_FAR, CameraRig, cameraState } from "./CameraRig";
 import { Chunks } from "./Chunks";
 import { CityProxy } from "./CityProxy";
 import { CombatFx } from "./CombatFx";
 import { Entities } from "./Entities";
 import { Ocean } from "./Ocean";
 import { PlayerInput } from "./PlayerInput";
+
+/**
+ * While the canvas holds pointer lock the OS cursor is gone and mouse events
+ * report frozen coordinates, so all scene picking (enemy hover, interactable
+ * clicks) is recomputed from the center crosshair instead of the event
+ * position. Unlocked, this matches the default r3f compute.
+ */
+const pointerLockEvents: typeof events = (store) => ({
+  ...events(store),
+  compute(event, state) {
+    if (cameraState.locked) {
+      state.pointer.set(0, 0);
+    } else {
+      state.pointer.set(
+        (event.offsetX / state.size.width) * 2 - 1,
+        -(event.offsetY / state.size.height) * 2 + 1,
+      );
+    }
+    state.raycaster.setFromCamera(state.pointer, state.camera);
+  },
+});
 
 export function GameCanvas({ connection }: { connection: GameConnection }) {
   // While the fullscreen map is open, stop rendering the world entirely (the
@@ -28,6 +49,7 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
       // renders into non-multisampled targets) and SMAA handles the edges,
       // so default-framebuffer multisampling is pure overhead at high DPR.
       gl={{ antialias: false, powerPreference: "high-performance" }}
+      events={pointerLockEvents}
       frameloop={mapOpen || menuOpen ? "never" : "always"}
       style={{ position: "absolute", inset: 0, visibility: mapOpen ? "hidden" : "visible" }}
       onCreated={({ gl, scene }) => {

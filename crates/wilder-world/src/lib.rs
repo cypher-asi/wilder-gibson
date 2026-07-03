@@ -4,6 +4,7 @@
 //! through a command channel; it replies through per-player message channels.
 
 mod chunks;
+mod ledger;
 mod npc;
 
 use std::collections::{HashMap, HashSet};
@@ -31,7 +32,8 @@ use wilder_terrain::TerrainGenerator;
 use wilder_types::*;
 
 pub use chunks::ChunkCache;
-use npc::{npc_spawns_for_chunk, Npc};
+use ledger::{Ledger, LedgerSave, SupplyEffect};
+use npc::{mint_agent_identity, npc_spawns_for_chunk, Npc};
 
 pub const TICK_HZ: u32 = 20;
 pub const TICK_DT: f32 = 1.0 / TICK_HZ as f32;
@@ -134,6 +136,69 @@ fn ensure_starting_weapon(inventory: &mut Inventory) {
         // A weapon is equipped but the hand points at the empty slot.
         inventory.active_weapon = if inventory.equipped_weapon.is_some() { 0 } else { 1 };
     }
+}
+
+/// Ledger party for a player character.
+fn player_party(p: &Player) -> TxParty {
+    TxParty::Player { id: p.character.id, name: p.character.name.clone() }
+}
+
+/// Ledger party for an NPC agent.
+fn npc_party(n: &Npc) -> TxParty {
+    TxParty::Agent { id: n.agent_id, name: n.agent_name.clone() }
+}
+
+/// Ledger party for a service building (vendor / bank / market terminal).
+fn static_party(s: &StaticEntity) -> TxParty {
+    TxParty::Agent { id: s.agent_id, name: s.name.clone() }
+}
+
+/// Stable per-session agent id for a service building, derived from the world
+/// seed and the building's entity id (identical across restarts because the
+/// district seeds in a fixed order before any player joins).
+fn static_agent_id(seed: u64, entity: EntityId) -> AgentId {
+    uuid::Uuid::from_u64_pair(seed ^ 0xA6E7_7A6E_7A6E_77AA, entity)
+}
+
+/// Roll the loot an NPC agent carries. Called at spawn (and respawn) so the
+/// agent owns its inventory while alive; the same items drop on death.
+fn roll_npc_loot(rng: &mut SmallRng, zone: ZoneKind, is_raider: bool) -> Vec<ItemStack> {
+    use rand::Rng;
+    let mut items: Vec<ItemStack> = Vec::new();
+    // Resources always drop (Phase 2 economy feeds on these), biased by the
+    // zone the NPC lives in.
+    let pulls = if is_raider { 3 } else { 2 };
+    for _ in 0..pulls {
+        let idx = wilder_economy::zone_resource_index(zone, rng.random());
+        let kind = wilder_economy::RESOURCES[idx];
+        items.push(ItemStack { kind, count: rng.random_range(1..4) });
+    }
+    // Cash feeds the Bank loop; blast-zone rubble hides more.
+    let (lo, hi) = if is_raider {
+        wilder_economy::CASH_DROP_RAIDER
+    } else {
+        wilder_economy::CASH_DROP_SCAV
+    };
+    let mut cash = rng.random_range(lo..=hi);
+    if zone == ZoneKind::BlownUp {
+        cash *= 2;
+    }
+    items.push(ItemStack { kind: ItemKind::Cash, count: cash });
+    if rng.random_bool(0.7) {
+        items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(10..25) });
+    }
+    if rng.random_bool(0.15) {
+        items.push(ItemStack { kind: ItemKind::Medkit, count: 1 });
+    }
+    if is_raider && rng.random_bool(0.25) {
+        let weapon = if rng.random_bool(0.3) { ItemKind::Pistol } else { ItemKind::Pipe };
+        items.push(ItemStack { kind: weapon, count: 1 });
+    }
+    // Rare blueprint fragments feed Laboratory research (Phase 3).
+    if rng.random_bool(FRAGMENT_CHANCE) {
+        items.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
+    }
+    items
 }
 
 /// Reduce a yield count by the territory tax when `enemy` is true.
@@ -240,31 +305,43 @@ const OUTPOSTS: &[((i32, i32), EntityKind, &str)] = &[
     ((0, -3), EntityKind::Building, "Storage Depot North"),
 ];
 
-/// Walkable spots for service buildings in a chunk: prefer sidewalk/plaza
-/// tiles (off the road) near the anchor (spawn in the spawn chunk, chunk
-/// centre elsewhere), keep spots at least 2 tiles apart. Returns world-space
-/// positions; may be shorter than `count` on cramped chunks.
+/// Spots for service locations in a chunk: each spot is the sidewalk tile in
+/// front of an existing building's street face (-z side, matching the
+/// client's storefront convention), so every service lives in a real
+/// storefront. Prefers doors near the anchor (spawn in the spawn chunk,
+/// chunk centre elsewhere) and keeps doors at least 3 tiles apart. Falls
+/// back to plain walkable tiles on chunks without enough suitable
+/// buildings. Returns world-space positions; may be shorter than `count`
+/// on cramped chunks.
 fn station_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3> {
     let (anchor_tx, anchor_tz) = if coord.x == 0 && coord.z == 0 {
         ((SPAWN.x / TILE_SIZE) as i32, (SPAWN.z / TILE_SIZE) as i32)
     } else {
         (TILES_PER_CHUNK as i32 / 2, TILES_PER_CHUNK as i32 / 2)
     };
+    // Door candidates: the tile just outside the front-face midpoint of
+    // every building footprint in the chunk.
     let mut candidates: Vec<(i32, usize, usize)> = Vec::new();
-    for tz in 0..TILES_PER_CHUNK {
-        for tx in 0..TILES_PER_CHUNK {
-            let kind = chunk.tile(tx, tz);
-            if !kind.walkable() {
-                continue;
-            }
-            let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
-            if d < 2 {
-                continue; // keep the anchor tile itself clear
-            }
-            // Prefer off-road tiles; road tiles rank behind everything else.
-            let penalty = if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
-            candidates.push((d + penalty, tx, tz));
+    for b in &chunk.buildings {
+        if b.tz0 == 0 {
+            continue; // front row would be outside the chunk
         }
+        let tz = b.tz0 as usize - 1;
+        let tx = (b.tx0 as usize + b.tx1 as usize - 1) / 2;
+        if tx >= TILES_PER_CHUNK || tz >= TILES_PER_CHUNK {
+            continue;
+        }
+        let kind = chunk.tile(tx, tz);
+        if !kind.walkable() {
+            continue;
+        }
+        let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
+        if d < 2 {
+            continue; // keep the anchor tile itself clear
+        }
+        // Doors opening straight onto a road rank behind sidewalk doors.
+        let penalty = if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
+        candidates.push((d + penalty, tx, tz));
     }
     candidates.sort();
     let mut spots: Vec<(usize, usize)> = Vec::new();
@@ -274,9 +351,41 @@ fn station_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3
         }
         if spots
             .iter()
-            .all(|&(sx, sz)| (sx as i32 - tx as i32).abs() + (sz as i32 - tz as i32).abs() >= 2)
+            .all(|&(sx, sz)| (sx as i32 - tx as i32).abs().max((sz as i32 - tz as i32).abs()) >= 3)
         {
             spots.push((tx, tz));
+        }
+    }
+    // Fallback for chunks without enough hosting buildings: nearest plain
+    // walkable off-road tiles, as before.
+    if spots.len() < count {
+        let mut fallback: Vec<(i32, usize, usize)> = Vec::new();
+        for tz in 0..TILES_PER_CHUNK {
+            for tx in 0..TILES_PER_CHUNK {
+                let kind = chunk.tile(tx, tz);
+                if !kind.walkable() {
+                    continue;
+                }
+                let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
+                if d < 2 {
+                    continue;
+                }
+                let penalty =
+                    if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
+                fallback.push((d + penalty, tx, tz));
+            }
+        }
+        fallback.sort();
+        for &(_, tx, tz) in &fallback {
+            if spots.len() >= count {
+                break;
+            }
+            if spots
+                .iter()
+                .all(|&(sx, sz)| (sx as i32 - tx as i32).abs().max((sz as i32 - tz as i32).abs()) >= 3)
+            {
+                spots.push((tx, tz));
+            }
         }
     }
     spots
@@ -490,6 +599,13 @@ struct LootContainer {
     ttl: f32,
     /// 0 = generic drop, 1 = ammo cache (persistent, highlighted client-side).
     variant: u32,
+    /// Ledger party the contents still belong to (dead NPC, dropping player).
+    /// Pickups are attributed as transfers from this owner.
+    owner: Option<TxParty>,
+    /// Whether the contents still count toward circulating supply. False for
+    /// death drops (burned when the player died) and world-seeded ammo caches
+    /// (issued on pickup), so pickups from those re-mint instead of transfer.
+    in_supply: bool,
 }
 
 struct StaticEntity {
@@ -498,6 +614,8 @@ struct StaticEntity {
     position: Vec3,
     name: String,
     variant: u32,
+    /// Economic identity: vendor buildings and the market trade as agents.
+    agent_id: AgentId,
 }
 
 struct ResourceNode {
@@ -540,6 +658,10 @@ pub struct World {
     next_job_id: u64,
     /// Non-neutral territory control per region (recomputed from presence).
     territory: HashMap<(i32, i32), u8>,
+    /// Economy transaction ledger + supply counters (K dashboard).
+    ledger: Ledger,
+    /// Players subscribed to live ledger updates.
+    econ_subs: HashSet<EntityId>,
 }
 
 /// Create the world and spawn its tick loop. Returns a handle for connections.
@@ -557,6 +679,8 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
     let market: Vec<wilder_market::Listing> =
         store.meta("market_listings").ok().flatten().unwrap_or_default();
     let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
+    // Ledger aggregates survive restarts; the recent-tx feed is in-memory.
+    let ledger_save: LedgerSave = store.meta("econ_ledger").ok().flatten().unwrap_or_default();
 
     let (tx, rx) = mpsc::unbounded_channel();
     let mut world = World {
@@ -578,6 +702,8 @@ pub fn spawn_world(store: Arc<RocksStore>) -> WorldHandle {
         rng: SmallRng::seed_from_u64(seed ^ 0xC0FFEE),
         rx,
         territory: HashMap::new(),
+        ledger: Ledger::new(ledger_save),
+        econ_subs: HashSet::new(),
     };
     // Seed the spawn district up front so PoiList is complete on every join.
     world.seed_district();
@@ -664,6 +790,13 @@ impl World {
             wallet += WALLET_GRANT;
             let _ = self.store.update_wallet(account, wallet);
             let _ = self.store.save_meta(&grant_key, &true);
+            self.ledger.record(
+                TxKind::Mint,
+                TxParty::Mint,
+                TxParty::Player { id: character.id, name: character.name.clone() },
+                TxAmount::Wild { amount: WALLET_GRANT },
+                0,
+            );
         }
 
         let entity = self.alloc_entity();
@@ -744,13 +877,26 @@ impl World {
                     let pending = job.count - job.done;
                     for &(kind, count) in job.recipe.inputs {
                         let refund = count * pending;
+                        if refund == 0 {
+                            continue;
+                        }
                         let leftover = inv::add_items(&mut player.inventory.slots, kind, refund);
                         if leftover > 0 {
                             inv::add_items(&mut player.stash.slots, kind, leftover);
                         }
+                        // Inputs were burned when the job was queued; the
+                        // refund re-mints them to the leaving player.
+                        self.ledger.record(
+                            TxKind::Mint,
+                            TxParty::Mint,
+                            player_party(&player),
+                            TxAmount::Item { kind, count: refund },
+                            0,
+                        );
                     }
                 }
             }
+            self.econ_subs.remove(&entity);
             self.persist_player(&player);
             tracing::info!(entity, name = %player.character.name, "player left");
         }
@@ -839,6 +985,7 @@ impl World {
             }
             C2S::Market(action) => self.market_action(entity, action),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
+            C2S::EconomySub { on } => self.economy_sub(entity, on),
             C2S::Pong { .. } => {}
             C2S::Authenticate { .. } | C2S::JoinWorld { .. } => {}
         }
@@ -884,6 +1031,13 @@ impl World {
                 };
                 inv::add_items(&mut player.inventory.slots, kind, count);
                 player.dirty = true;
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    player_party(player),
+                    TxAmount::Item { kind, count },
+                    0,
+                );
                 let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             }
             ["heal"] => {
@@ -923,13 +1077,20 @@ impl World {
         let weapon = player.inventory.active_weapon_kind();
         let stats = weapon.and_then(weapon_stats).unwrap_or(FIST);
 
-        // Ranged weapons consume ammo.
+        // Ranged weapons consume ammo (each round fired burns out of supply).
         if stats.ranged {
             let removed = inv::remove_items(&mut player.inventory.slots, ItemKind::Ammo9mm, 1);
             if removed == 0 {
                 let _ = player.tx.send(S2C::Error { message: "out of ammo".into() });
                 return;
             }
+            self.ledger.record(
+                TxKind::Burn,
+                player_party(player),
+                TxParty::Burn,
+                TxAmount::Item { kind: ItemKind::Ammo9mm, count: 1 },
+                0,
+            );
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             player.dirty = true;
         }
@@ -1103,7 +1264,10 @@ impl World {
                 npc.state = wilder_ai::NpcState::Dead;
                 npc.respawn_in = NPC_RESPAWN_SECONDS;
                 npc.anim = AnimState::Death;
-                Some((npc.position, npc.archetype.variant == 2))
+                // The dead agent's inventory becomes its loot drop; every
+                // pickup is then a ledger transfer from this agent.
+                let items = std::mem::take(&mut npc.inventory);
+                Some((npc.position, npc.archetype.variant == 2, items, npc_party(npc)))
             } else {
                 // Getting shot provokes the NPC even from beyond its passive
                 // aggro radius, so sniping draws retaliation.
@@ -1121,51 +1285,14 @@ impl World {
             y: impact.y,
             z: impact.z,
         });
-        if let Some((drop_pos, is_raider)) = died_info {
+        if let Some((drop_pos, is_raider, items, agent)) = died_info {
             self.broadcast_combat(CombatEvent::EntityDied { id: target });
             self.grant_xp(attacker, if is_raider { XP_RAIDER_KILL } else { XP_SCAV_KILL });
-
-            // Roll loot.
-            let mut items: Vec<ItemStack> = Vec::new();
-            {
-                use rand::Rng;
-                let zone = zone_of_chunk(ChunkCoord::from_world(drop_pos));
-                let rng = &mut self.rng;
-                // Resources always drop (Phase 2 economy feeds on these),
-                // biased by the zone the NPC died in.
-                let pulls = if is_raider { 3 } else { 2 };
-                for _ in 0..pulls {
-                    let idx = wilder_economy::zone_resource_index(zone, rng.random());
-                    let kind = wilder_economy::RESOURCES[idx];
-                    items.push(ItemStack { kind, count: rng.random_range(1..4) });
-                }
-                // Cash feeds the Bank loop; blast-zone rubble hides more.
-                let (lo, hi) = if is_raider {
-                    wilder_economy::CASH_DROP_RAIDER
-                } else {
-                    wilder_economy::CASH_DROP_SCAV
-                };
-                let mut cash = rng.random_range(lo..=hi);
-                if zone == ZoneKind::BlownUp {
-                    cash *= 2;
-                }
-                items.push(ItemStack { kind: ItemKind::Cash, count: cash });
-                if rng.random_bool(0.7) {
-                    items.push(ItemStack { kind: ItemKind::Ammo9mm, count: rng.random_range(10..25) });
-                }
-                if rng.random_bool(0.15) {
-                    items.push(ItemStack { kind: ItemKind::Medkit, count: 1 });
-                }
-                if is_raider && rng.random_bool(0.25) {
-                    let weapon = if rng.random_bool(0.3) { ItemKind::Pistol } else { ItemKind::Pipe };
-                    items.push(ItemStack { kind: weapon, count: 1 });
-                }
-                // Rare blueprint fragments feed Laboratory research (Phase 3).
-                if rng.random_bool(FRAGMENT_CHANCE) {
-                    items.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
-                }
-            }
-            self.spawn_loot(drop_pos, items);
+            self.ledger.npc_kills += 1;
+            // The agent's spawn-minted inventory drops where it fell; the
+            // items stay owned by (attributed to) the dead agent until
+            // someone picks them up or the container expires.
+            self.spawn_loot(drop_pos, items, Some(agent), true);
         }
     }
 
@@ -1190,19 +1317,37 @@ impl World {
         });
     }
 
-    fn spawn_loot(&mut self, position: Vec3, items: Vec<ItemStack>) {
+    /// Drop a loot container. `owner` is the ledger party the contents are
+    /// attributed to on pickup; `in_supply` is false when the contents no
+    /// longer count toward circulating supply (death drops, seeded caches).
+    fn spawn_loot(
+        &mut self,
+        position: Vec3,
+        items: Vec<ItemStack>,
+        owner: Option<TxParty>,
+        in_supply: bool,
+    ) {
         if items.is_empty() {
             return;
         }
         let entity = self.alloc_entity();
         self.loot.insert(
             entity,
-            LootContainer { entity, position, items, ttl: LOOT_TTL_SECONDS, variant: 0 },
+            LootContainer {
+                entity,
+                position,
+                items,
+                ttl: LOOT_TTL_SECONDS,
+                variant: 0,
+                owner,
+                in_supply,
+            },
         );
     }
 
     /// A persistent, highlighted cache of ammo placed in the world. Uses an
     /// infinite TTL so scattered supplies stay put until a player grabs them.
+    /// World-seeded stock enters supply when a player picks it up.
     fn spawn_ammo_cache(&mut self, position: Vec3, count: u32) {
         let entity = self.alloc_entity();
         self.loot.insert(
@@ -1213,8 +1358,35 @@ impl World {
                 items: vec![ItemStack { kind: ItemKind::Ammo9mm, count }],
                 ttl: f32::INFINITY,
                 variant: 1,
+                owner: None,
+                in_supply: false,
             },
         );
+    }
+
+    /// Record every stack a player pulled out of a loot container: a transfer
+    /// from the container's owner when the items are still in supply, or a
+    /// (re-)mint when they aren't (death drops, world-seeded caches).
+    fn record_loot_pickup(
+        &mut self,
+        picker: TxParty,
+        owner: Option<TxParty>,
+        in_supply: bool,
+        taken: &[ItemStack],
+    ) {
+        for stack in taken {
+            let from = owner.clone().unwrap_or(TxParty::Mint);
+            let kind = if owner.is_some() { TxKind::LootPickup } else { TxKind::Mint };
+            let effect = if in_supply { SupplyEffect::Auto } else { SupplyEffect::Mint };
+            self.ledger.record_ex(
+                kind,
+                from,
+                picker.clone(),
+                TxAmount::Item { kind: stack.kind, count: stack.count },
+                0,
+                effect,
+            );
+        }
     }
 
     fn interact(&mut self, entity: EntityId, target: EntityId) {
@@ -1226,26 +1398,34 @@ impl World {
                 return;
             }
             let mut leftovers = Vec::new();
+            let mut taken: Vec<ItemStack> = Vec::new();
             let mut ammo_gained = 0u32;
             for stack in container.items.drain(..) {
                 let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
                 if stack.kind == ItemKind::Ammo9mm {
                     ammo_gained += stack.count - rem;
                 }
+                if stack.count > rem {
+                    taken.push(ItemStack { kind: stack.kind, count: stack.count - rem });
+                }
                 if rem > 0 {
                     leftovers.push(ItemStack { kind: stack.kind, count: rem });
                 }
             }
             container.items = leftovers;
+            let owner = container.owner.clone();
+            let in_supply = container.in_supply;
             player.dirty = true;
+            let picker = player_party(player);
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             // Surface ammo pickups (chat + SFX) so the caches feel rewarding.
             let gained = (ammo_gained > 0)
                 .then_some(ItemStack { kind: ItemKind::Ammo9mm, count: ammo_gained });
             let _ = player.tx.send(S2C::GatherResult { gained });
-            if container.items.is_empty() {
+            if self.loot.get(&target).is_some_and(|c| c.items.is_empty()) {
                 self.loot.remove(&target);
             }
+            self.record_loot_pickup(picker, owner, in_supply, &taken);
             return;
         }
 
@@ -1275,9 +1455,26 @@ impl World {
             let count = apply_territory_tax(rolled, enemy);
             let leftover = inv::add_items(&mut player.inventory.slots, kind, count);
             let gained = count - leftover;
+            if gained > 0 {
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    player_party(player),
+                    TxAmount::Item { kind, count: gained },
+                    0,
+                );
+            }
             // Rare blueprint fragments feed Laboratory research (Phase 3).
-            if self.rng.random_bool(FRAGMENT_CHANCE) {
-                inv::add_items(&mut player.inventory.slots, ItemKind::BlueprintFragment, 1);
+            if self.rng.random_bool(FRAGMENT_CHANCE)
+                && inv::add_items(&mut player.inventory.slots, ItemKind::BlueprintFragment, 1) == 0
+            {
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    player_party(player),
+                    TxAmount::Item { kind: ItemKind::BlueprintFragment, count: 1 },
+                    0,
+                );
             }
             player.dirty = true;
             let _ = player.tx.send(S2C::GatherResult {
@@ -1292,7 +1489,9 @@ impl World {
         let kind = static_entity.kind;
         let pos = static_entity.position;
         let Some(player) = self.players.get_mut(&entity) else { return };
-        if (pos - player.character.position).length() > 3.5 {
+        // Service buildings render as 6x4 m storefronts around their entity
+        // position, so allow interacting from their street side.
+        if (pos - player.character.position).length() > 5.0 {
             let _ = player.tx.send(S2C::Error { message: "too far away".into() });
             return;
         }
@@ -1363,7 +1562,7 @@ impl World {
         let near_station = self.statics.values().any(|s| {
             s.kind == station_kind
                 && station.map(|id| s.entity == id).unwrap_or(true)
-                && (s.position - player.character.position).length() < 3.5
+                && (s.position - player.character.position).length() < 5.0
         });
         if !near_station {
             fail(player, &format!("no {:?} in reach", recipe.station));
@@ -1381,18 +1580,38 @@ impl World {
                 return;
             }
         }
+        let crafter = player_party(player);
         for &(kind, count) in recipe.inputs {
             inv::remove_items(&mut player.inventory.slots, kind, count);
+            self.ledger.record(
+                TxKind::CraftConsume,
+                crafter.clone(),
+                TxParty::Burn,
+                TxAmount::Item { kind, count },
+                0,
+            );
         }
         let (out_kind, out_count) = recipe.output;
         let leftover = inv::add_items(&mut player.inventory.slots, out_kind, out_count);
         player.dirty = true;
+        self.ledger.record(
+            TxKind::CraftProduce,
+            TxParty::Mint,
+            crafter.clone(),
+            TxAmount::Item { kind: out_kind, count: out_count },
+            0,
+        );
         let produced = ItemStack { kind: out_kind, count: out_count - leftover };
         let _ = player.tx.send(S2C::CraftResult { ok: true, error: None, produced: Some(produced) });
         let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
         if leftover > 0 {
             let pos = player.character.position;
-            self.spawn_loot(pos, vec![ItemStack { kind: out_kind, count: leftover }]);
+            self.spawn_loot(
+                pos,
+                vec![ItemStack { kind: out_kind, count: leftover }],
+                Some(crafter),
+                true,
+            );
         }
     }
 
@@ -1404,7 +1623,7 @@ impl World {
             .map(|p| {
                 self.statics.values().any(|s| {
                     s.kind == EntityKind::Laboratory
-                        && (s.position - p.character.position).length() < 3.5
+                        && (s.position - p.character.position).length() < 5.0
                 })
             })
             .unwrap_or(false);
@@ -1445,10 +1664,33 @@ impl World {
             ItemKind::BlueprintFragment,
             RESEARCH_FRAGMENTS,
         );
+        let researcher = player_party(player);
+        self.ledger.record(
+            TxKind::CraftConsume,
+            researcher.clone(),
+            TxParty::Burn,
+            TxAmount::Item { kind: ItemKind::BlueprintFragment, count: RESEARCH_FRAGMENTS },
+            0,
+        );
         for &(kind, count) in RESEARCH_RESOURCES {
             inv::remove_items(&mut player.inventory.slots, kind, count);
+            self.ledger.record(
+                TxKind::CraftConsume,
+                researcher.clone(),
+                TxParty::Burn,
+                TxAmount::Item { kind, count },
+                0,
+            );
         }
         player.blueprints.insert(recipe.id.to_string());
+        self.ledger.blueprints_learned += 1;
+        self.ledger.record(
+            TxKind::CraftProduce,
+            TxParty::Mint,
+            researcher,
+            TxAmount::Blueprint { recipe: recipe.id.to_string() },
+            0,
+        );
         player.dirty = true;
         let known: Vec<String> = player.blueprints.iter().cloned().collect();
         let _ = self
@@ -1483,7 +1725,7 @@ impl World {
             fail(player, "no such building");
             return;
         };
-        if (pos - player.character.position).length() > 3.5 {
+        if (pos - player.character.position).length() > 5.0 {
             fail(player, "too far from the building");
             return;
         }
@@ -1512,8 +1754,16 @@ impl World {
                 return;
             }
         }
+        let producer = player_party(player);
         for &(k, c) in recipe.inputs {
             inv::remove_items(&mut player.inventory.slots, k, c * count);
+            self.ledger.record(
+                TxKind::CraftConsume,
+                producer.clone(),
+                TxParty::Burn,
+                TxAmount::Item { kind: k, count: c * count },
+                0,
+            );
         }
         let job = ProductionJobState {
             id: self.next_job_id,
@@ -1567,6 +1817,16 @@ impl World {
                             let (kind, count) = job.recipe.output;
                             let leftover =
                                 inv::add_items(&mut player.inventory.slots, kind, count);
+                            self.ledger.record(
+                                TxKind::CraftProduce,
+                                TxParty::Mint,
+                                TxParty::Player {
+                                    id: player.character.id,
+                                    name: player.character.name.clone(),
+                                },
+                                TxAmount::Item { kind, count },
+                                0,
+                            );
                             completions.push((
                                 pid,
                                 player.character.position,
@@ -1600,9 +1860,10 @@ impl World {
         }
 
         // Overflow output that didn't fit the inventory drops at the player's feet.
-        for (_pid, pos, stack) in completions {
+        for (pid, pos, stack) in completions {
             if stack.count > 0 {
-                self.spawn_loot(pos, vec![stack]);
+                let owner = self.players.get(&pid).map(player_party);
+                self.spawn_loot(pos, vec![stack], owner, true);
             }
         }
     }
@@ -1724,7 +1985,21 @@ impl World {
         self.send_market_state(entity);
     }
 
+    /// The market trades as an agent: the terminal's identity, or a stable
+    /// fallback when no terminal is seeded (never in practice).
+    fn market_party(&self) -> TxParty {
+        self.statics
+            .values()
+            .find(|s| s.kind == EntityKind::MarketTerminal)
+            .map(static_party)
+            .unwrap_or(TxParty::Agent {
+                id: static_agent_id(self.seed, 0),
+                name: "Market".into(),
+            })
+    }
+
     fn apply_market_action(&mut self, entity: EntityId, action: MarketAction) -> Result<(), String> {
+        let market_agent = self.market_party();
         match action {
             MarketAction::Refresh => Ok(()),
             MarketAction::List { kind, count, price_each } => {
@@ -1738,6 +2013,14 @@ impl World {
                 }
                 inv::remove_items(&mut player.inventory.slots, kind, count);
                 player.dirty = true;
+                // Escrow: the listed items move onto the market agent.
+                self.ledger.record(
+                    TxKind::MarketList,
+                    player_party(player),
+                    market_agent,
+                    TxAmount::Item { kind, count },
+                    0,
+                );
                 let listing = wilder_market::Listing {
                     id: self.next_listing_id,
                     seller: player.character.id,
@@ -1770,11 +2053,17 @@ impl World {
                 buyer.wallet -= cost;
                 let buyer_account = buyer.character.account_id;
                 let buyer_pos = buyer.character.position;
+                let buyer_party = player_party(buyer);
                 let leftover = inv::add_items(&mut buyer.inventory.slots, kind, count);
                 buyer.dirty = true;
                 let _ = self.store.update_wallet(buyer_account, self.players[&entity].wallet);
                 if leftover > 0 {
-                    self.spawn_loot(buyer_pos, vec![ItemStack { kind, count: leftover }]);
+                    self.spawn_loot(
+                        buyer_pos,
+                        vec![ItemStack { kind, count: leftover }],
+                        Some(buyer_party.clone()),
+                        true,
+                    );
                 }
 
                 // Credit the seller (minus the burn fee), online or offline.
@@ -1796,7 +2085,34 @@ impl World {
                             .update_wallet(account.id, account.wallet + proceeds);
                     }
                 }
-                let _ = seller_name; // (transaction history is post-MVP)
+                // Ledger: escrowed items leave the market agent for the
+                // buyer; the buyer's WILD splits into seller proceeds and
+                // the market fee (routed to territory holders or burned).
+                let seller_party = TxParty::Player { id: seller, name: seller_name };
+                self.ledger.record(
+                    TxKind::MarketBuy,
+                    market_agent.clone(),
+                    buyer_party.clone(),
+                    TxAmount::Item { kind, count },
+                    fee,
+                );
+                self.ledger.record(
+                    TxKind::MarketBuy,
+                    buyer_party.clone(),
+                    seller_party,
+                    TxAmount::Wild { amount: proceeds },
+                    fee,
+                );
+                if fee > 0 {
+                    self.ledger.record(
+                        TxKind::Fee,
+                        buyer_party,
+                        market_agent.clone(),
+                        TxAmount::Wild { amount: fee },
+                        0,
+                    );
+                }
+                self.ledger.trades += 1;
 
                 let l = &mut self.market[idx];
                 l.count -= count;
@@ -1812,11 +2128,20 @@ impl World {
                     .values()
                     .find(|s| {
                         s.kind == EntityKind::MarketTerminal
-                            && (s.position - buyer_pos).length() < 3.5
+                            && (s.position - buyer_pos).length() < 5.0
                     })
                     .map(|s| s.position);
                 if let Some(terminal_pos) = terminal {
-                    self.distribute_commerce(terminal_pos, fee);
+                    self.distribute_commerce(terminal_pos, fee, market_agent, false);
+                } else if fee > 0 {
+                    // No terminal in reach: the collected fee burns outright.
+                    self.ledger.record(
+                        TxKind::Fee,
+                        market_agent,
+                        TxParty::Burn,
+                        TxAmount::Wild { amount: fee },
+                        0,
+                    );
                 }
                 Ok(())
             }
@@ -1835,8 +2160,22 @@ impl World {
                     inv::add_items(&mut player.inventory.slots, listing.kind, listing.count);
                 player.dirty = true;
                 let pos = player.character.position;
+                let canceller = player_party(player);
+                // Escrow returns from the market agent to the seller.
+                self.ledger.record(
+                    TxKind::MarketCancel,
+                    market_agent,
+                    canceller.clone(),
+                    TxAmount::Item { kind: listing.kind, count: listing.count },
+                    0,
+                );
                 if leftover > 0 {
-                    self.spawn_loot(pos, vec![ItemStack { kind: listing.kind, count: leftover }]);
+                    self.spawn_loot(
+                        pos,
+                        vec![ItemStack { kind: listing.kind, count: leftover }],
+                        Some(canceller),
+                        true,
+                    );
                 }
                 self.save_market();
                 Ok(())
@@ -1884,14 +2223,14 @@ impl World {
         vendor: EntityId,
         action: VendorAction,
     ) -> Result<(), String> {
-        let (kind, pos) = self
+        let (kind, pos, vendor_agent) = self
             .statics
             .get(&vendor)
-            .map(|s| (s.kind, s.position))
+            .map(|s| (s.kind, s.position, static_party(s)))
             .ok_or("no such vendor")?;
         {
             let player = self.players.get(&entity).ok_or("not in world")?;
-            if (pos - player.character.position).length() > 3.5 {
+            if (pos - player.character.position).length() > 5.0 {
                 return Err("too far away".into());
             }
         }
@@ -1912,14 +2251,42 @@ impl World {
                 let account = player.character.account_id;
                 let wallet = player.wallet;
                 let player_pos = player.character.position;
+                let buyer = player_party(player);
                 let leftover = inv::add_items(&mut player.inventory.slots, item, count);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
+                // Ledger: WILD moves onto the vendor agent; the stock the
+                // vendor hands over is fresh issuance (bottomless shelves).
+                self.ledger.record(
+                    TxKind::VendorBuy,
+                    buyer.clone(),
+                    vendor_agent.clone(),
+                    TxAmount::Wild { amount: cost },
+                    0,
+                );
+                self.ledger.record_ex(
+                    TxKind::VendorBuy,
+                    vendor_agent.clone(),
+                    buyer.clone(),
+                    TxAmount::Item { kind: item, count },
+                    0,
+                    SupplyEffect::Mint,
+                );
                 if leftover > 0 {
-                    self.spawn_loot(player_pos, vec![ItemStack { kind: item, count: leftover }]);
+                    self.spawn_loot(
+                        player_pos,
+                        vec![ItemStack { kind: item, count: leftover }],
+                        Some(buyer),
+                        true,
+                    );
                 }
                 // Whoever holds this ground skims a cut; the rest burns.
-                self.distribute_commerce(pos, cost * wilder_economy::COMMERCE_CUT_PCT / 100);
+                self.distribute_commerce(
+                    pos,
+                    cost * wilder_economy::COMMERCE_CUT_PCT / 100,
+                    vendor_agent,
+                    false,
+                );
                 Ok(())
             }
             VendorAction::Sell { kind: item, count } => {
@@ -1939,9 +2306,27 @@ impl World {
                 player.wallet += gross - cut;
                 let account = player.character.account_id;
                 let wallet = player.wallet;
+                let seller = player_party(player);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
-                self.distribute_commerce(pos, cut);
+                // Ledger: sold items are absorbed out of supply; the payout
+                // comes off the vendor agent's balance.
+                self.ledger.record_ex(
+                    TxKind::VendorSell,
+                    seller.clone(),
+                    vendor_agent.clone(),
+                    TxAmount::Item { kind: item, count },
+                    0,
+                    SupplyEffect::Burn,
+                );
+                self.ledger.record(
+                    TxKind::VendorSell,
+                    vendor_agent.clone(),
+                    seller,
+                    TxAmount::Wild { amount: gross - cut },
+                    cut,
+                );
+                self.distribute_commerce(pos, cut, vendor_agent, false);
                 Ok(())
             }
             VendorAction::Convert { count } => {
@@ -1959,10 +2344,29 @@ impl World {
                 player.wallet += count - fee;
                 let account = player.character.account_id;
                 let wallet = player.wallet;
+                let converter = player_party(player);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
+                // Ledger: Cash burns out of supply and WILD mints in its
+                // place (minus the fee, routed below as commerce).
+                self.ledger.record_ex(
+                    TxKind::BankConvert,
+                    converter.clone(),
+                    vendor_agent.clone(),
+                    TxAmount::Item { kind: ItemKind::Cash, count },
+                    fee,
+                    SupplyEffect::Burn,
+                );
+                self.ledger.record_ex(
+                    TxKind::BankConvert,
+                    vendor_agent.clone(),
+                    converter,
+                    TxAmount::Wild { amount: count - fee },
+                    fee,
+                    SupplyEffect::Mint,
+                );
                 // The bank's fee is the commerce that territory holders skim.
-                self.distribute_commerce(pos, fee);
+                self.distribute_commerce(pos, fee, vendor_agent, true);
                 Ok(())
             }
         }
@@ -1972,39 +2376,60 @@ impl World {
     /// split evenly among alive players standing in a player-held region
     /// (presence is control in this phase). Neutral or enemy ground burns it,
     /// as do rounding remainders.
-    fn distribute_commerce(&mut self, pos: Vec3, cut: u32) {
+    ///
+    /// Ledger: `from` is the agent routing the cut. When `minted` is true the
+    /// cut is new WILD (bank conversion fee) — paid shares are mint legs and
+    /// unrouted WILD simply never enters supply; otherwise the cut is real
+    /// WILD the agent collected, so unrouted amounts burn.
+    fn distribute_commerce(&mut self, pos: Vec3, cut: u32, from: TxParty, minted: bool) {
         if cut == 0 {
             return;
         }
+        // Anything not paid out either burns (real WILD) or is never minted.
+        let mut unrouted = cut;
         let region = region_of(pos);
-        if self.territory.get(&region) != Some(&CONTROL_PLAYER) {
-            return;
+        if self.territory.get(&region) == Some(&CONTROL_PLAYER) {
+            let holders: Vec<EntityId> = self
+                .players
+                .values()
+                .filter(|p| {
+                    p.character.health > 0.0 && region_of(p.character.position) == region
+                })
+                .map(|p| p.entity)
+                .collect();
+            let share = if holders.is_empty() { 0 } else { cut / holders.len() as u32 };
+            if share > 0 {
+                for id in holders {
+                    let Some(player) = self.players.get_mut(&id) else { continue };
+                    player.wallet += share;
+                    unrouted -= share;
+                    let account = player.character.account_id;
+                    let wallet = player.wallet;
+                    let holder = player_party(player);
+                    let _ = self.store.update_wallet(account, wallet);
+                    self.ledger.record_ex(
+                        TxKind::Fee,
+                        from.clone(),
+                        holder,
+                        TxAmount::Wild { amount: share },
+                        0,
+                        if minted { SupplyEffect::Mint } else { SupplyEffect::Auto },
+                    );
+                    let _ = player.tx.send(S2C::Chat {
+                        from: "system".into(),
+                        text: format!("+{share} WILD — commerce cut from territory you hold"),
+                    });
+                }
+            }
         }
-        let holders: Vec<EntityId> = self
-            .players
-            .values()
-            .filter(|p| {
-                p.character.health > 0.0 && region_of(p.character.position) == region
-            })
-            .map(|p| p.entity)
-            .collect();
-        if holders.is_empty() {
-            return;
-        }
-        let share = cut / holders.len() as u32;
-        if share == 0 {
-            return;
-        }
-        for id in holders {
-            let Some(player) = self.players.get_mut(&id) else { continue };
-            player.wallet += share;
-            let account = player.character.account_id;
-            let wallet = player.wallet;
-            let _ = self.store.update_wallet(account, wallet);
-            let _ = player.tx.send(S2C::Chat {
-                from: "system".into(),
-                text: format!("+{share} WILD — commerce cut from territory you hold"),
-            });
+        if unrouted > 0 && !minted {
+            self.ledger.record(
+                TxKind::Fee,
+                from,
+                TxParty::Burn,
+                TxAmount::Wild { amount: unrouted },
+                0,
+            );
         }
     }
 
@@ -2018,6 +2443,13 @@ impl World {
             player.character.health =
                 (player.character.health + 50.0).min(player.character.max_health);
             player.dirty = true;
+            self.ledger.record(
+                TxKind::Burn,
+                player_party(player),
+                TxParty::Burn,
+                TxAmount::Item { kind: ItemKind::Medkit, count: 1 },
+                0,
+            );
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
         }
     }
@@ -2042,11 +2474,21 @@ impl World {
                 if let Some(s) = player.inventory.slots.get_mut(slot as usize) {
                     if let Some(stack) = s.take() {
                         let pos = player.character.position;
+                        let dropper = player_party(player);
+                        // Dropping keeps ownership: the tx is a self-transfer
+                        // and the container stays attributed to the dropper.
+                        self.ledger.record(
+                            TxKind::Drop,
+                            dropper.clone(),
+                            dropper.clone(),
+                            TxAmount::Item { kind: stack.kind, count: stack.count },
+                            0,
+                        );
                         let items = vec![stack];
                         // Defer loot spawn until after borrow ends.
                         let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
                         player.dirty = true;
-                        self.spawn_loot(pos, items);
+                        self.spawn_loot(pos, items, Some(dropper), true);
                         return;
                     }
                 }
@@ -2091,7 +2533,7 @@ impl World {
         let Some(player) = self.players.get(&entity) else { return false };
         self.statics.values().any(|s| {
             s.kind == EntityKind::Building
-                && (s.position - player.character.position).length() < 3.5
+                && (s.position - player.character.position).length() < 5.0
         })
     }
 
@@ -2101,6 +2543,7 @@ impl World {
 
     fn step(&mut self) {
         self.tick += 1;
+        self.ledger.set_tick(self.tick);
 
         self.apply_movement();
         self.tick_extraction();
@@ -2112,6 +2555,7 @@ impl World {
         self.tick_regen();
         self.update_interest();
         self.replicate();
+        self.flush_economy();
 
         // Clear per-tick attack flags only after replicate so the Attack anim
         // state actually reaches other clients (attacks are processed on
@@ -2236,15 +2680,34 @@ impl World {
                 .unwrap_or(false);
             let Some(player) = self.players.get_mut(&entity) else { continue };
             player.extracting = None;
+            let extractor = player_party(player);
             // Bank everything carried into the stash.
             let mut banked: Vec<ItemStack> = Vec::new();
             for slot in player.inventory.slots.iter_mut() {
                 if let Some(stack) = slot.take() {
                     let bankable = apply_territory_tax(stack.count, taxed);
+                    // The territory tax seizes (burns) part of the haul.
+                    if stack.count > bankable {
+                        self.ledger.record(
+                            TxKind::Burn,
+                            extractor.clone(),
+                            TxParty::Burn,
+                            TxAmount::Item { kind: stack.kind, count: stack.count - bankable },
+                            0,
+                        );
+                    }
                     let rem = inv::add_items(&mut player.stash.slots, stack.kind, bankable);
                     let banked_count = bankable - rem;
                     if banked_count > 0 {
                         banked.push(ItemStack { kind: stack.kind, count: banked_count });
+                        // Extraction is a self-transfer: backpack -> stash.
+                        self.ledger.record(
+                            TxKind::Extract,
+                            extractor.clone(),
+                            extractor.clone(),
+                            TxAmount::Item { kind: stack.kind, count: banked_count },
+                            0,
+                        );
                     }
                     if rem > 0 {
                         *slot = Some(ItemStack { kind: stack.kind, count: rem });
@@ -2298,6 +2761,25 @@ impl World {
                     npc.state = wilder_ai::NpcState::Patrol;
                     npc.position = npc.home;
                     npc.anim = AnimState::Idle;
+                    // A respawn is a brand-new agent: fresh identity and a
+                    // freshly minted inventory (the old agent's items are
+                    // in its death drop, not carried over).
+                    let (agent_id, agent_name) = mint_agent_identity(npc.archetype);
+                    npc.agent_id = agent_id;
+                    npc.agent_name = agent_name;
+                    let zone = zone_of_chunk(ChunkCoord::from_world(npc.home));
+                    npc.inventory =
+                        roll_npc_loot(&mut self.rng, zone, npc.archetype.variant == 2);
+                    let agent = npc_party(npc);
+                    for stack in &npc.inventory {
+                        self.ledger.record(
+                            TxKind::Mint,
+                            TxParty::Mint,
+                            agent.clone(),
+                            TxAmount::Item { kind: stack.kind, count: stack.count },
+                            0,
+                        );
+                    }
                 }
                 continue;
             }
@@ -2362,6 +2844,20 @@ impl World {
                 dropped.push(stack);
             }
         }
+        // Ledger: everything in the backpack burns out of supply on death.
+        // The physical drop is salvage — whoever picks it up re-mints it,
+        // attributed as a transfer from the dead player.
+        let victim = player_party(player);
+        for stack in &dropped {
+            self.ledger.record(
+                TxKind::Burn,
+                victim.clone(),
+                TxParty::Burn,
+                TxAmount::Item { kind: stack.kind, count: stack.count },
+                0,
+            );
+        }
+        self.ledger.deaths += 1;
         // Equipped gear survives (jacket stays on your back).
         player.extracting = None;
         player.path.clear();
@@ -2374,7 +2870,7 @@ impl World {
         let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
         let entity = player.entity;
         self.broadcast_combat(CombatEvent::EntityDied { id: entity });
-        self.spawn_loot(drop_pos, dropped);
+        self.spawn_loot(drop_pos, dropped, Some(victim), false);
         self.persist_player_entity(target);
     }
 
@@ -2399,10 +2895,14 @@ impl World {
             };
             let mut ammo_gained = 0u32;
             let mut leftovers = Vec::new();
+            let mut taken: Vec<ItemStack> = Vec::new();
             for stack in container.items.drain(..) {
                 let rem = inv::add_items(&mut player.inventory.slots, stack.kind, stack.count);
                 if stack.kind == ItemKind::Ammo9mm {
                     ammo_gained += stack.count - rem;
+                }
+                if stack.count > rem {
+                    taken.push(ItemStack { kind: stack.kind, count: stack.count - rem });
                 }
                 if rem > 0 {
                     leftovers.push(ItemStack { kind: stack.kind, count: rem });
@@ -2410,6 +2910,9 @@ impl World {
             }
             let empty = leftovers.is_empty();
             container.items = leftovers;
+            let owner = container.owner.clone();
+            let in_supply = container.in_supply;
+            let picker = player_party(player);
             if ammo_gained > 0 {
                 player.dirty = true;
                 let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
@@ -2420,6 +2923,7 @@ impl World {
             if empty {
                 self.loot.remove(&cid);
             }
+            self.record_loot_pickup(picker, owner, in_supply, &taken);
         }
 
         let mut expired = Vec::new();
@@ -2430,7 +2934,21 @@ impl World {
             }
         }
         for id in expired {
-            self.loot.remove(&id);
+            let Some(container) = self.loot.remove(&id) else { continue };
+            // Unclaimed loot rots out of the world: burn what was still in
+            // supply, attributed to whoever owned it last.
+            if container.in_supply {
+                let from = container.owner.unwrap_or(TxParty::Mint);
+                for stack in container.items {
+                    self.ledger.record(
+                        TxKind::Burn,
+                        from.clone(),
+                        TxParty::Burn,
+                        TxAmount::Item { kind: stack.kind, count: stack.count },
+                        0,
+                    );
+                }
+            }
         }
     }
 
@@ -2485,6 +3003,47 @@ impl World {
     }
 
     // -----------------------------------------------------------------------
+    // Economy ledger (K dashboard)
+    // -----------------------------------------------------------------------
+
+    fn agents_alive(&self) -> u32 {
+        self.npcs.values().filter(|n| n.alive()).count() as u32
+    }
+
+    /// Subscribe/unsubscribe a player to live ledger updates. Subscribing
+    /// answers with a full snapshot (stats + the recent-tx ring).
+    fn economy_sub(&mut self, entity: EntityId, on: bool) {
+        if !on {
+            self.econ_subs.remove(&entity);
+            return;
+        }
+        let stats = self.ledger.stats(self.players.len() as u32, self.agents_alive());
+        let recent = self.ledger.recent();
+        if let Some(player) = self.players.get(&entity) {
+            let _ = player.tx.send(S2C::EconomyState { stats, recent });
+            self.econ_subs.insert(entity);
+        }
+    }
+
+    /// Push the tick's new transactions (plus refreshed stats) to subscribers.
+    fn flush_economy(&mut self) {
+        if !self.ledger.has_pending() {
+            return;
+        }
+        let txs = self.ledger.take_pending();
+        self.econ_subs.retain(|id| self.players.contains_key(id));
+        if self.econ_subs.is_empty() {
+            return;
+        }
+        let stats = self.ledger.stats(self.players.len() as u32, self.agents_alive());
+        for id in &self.econ_subs {
+            if let Some(player) = self.players.get(id) {
+                let _ = player.tx.send(S2C::EconomyTxs { txs: txs.clone(), stats: stats.clone() });
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Streaming / replication
     // -----------------------------------------------------------------------
 
@@ -2514,7 +3073,14 @@ impl World {
                 let entity = self.alloc_entity();
                 self.statics.insert(
                     entity,
-                    StaticEntity { entity, kind, position: pos, name: name.into(), variant: 0 },
+                    StaticEntity {
+                        entity,
+                        kind,
+                        position: pos,
+                        name: name.into(),
+                        variant: 0,
+                        agent_id: static_agent_id(self.seed, entity),
+                    },
                 );
             }
         }
@@ -2544,9 +3110,24 @@ impl World {
         if !is_safe_chunk(coord) && !self.npc_seeded_chunks.contains(&coord) {
             self.npc_seeded_chunks.insert(coord);
             let chunk = self.chunks.get(coord);
+            let zone = zone_of_chunk(coord);
             for (archetype, pos) in npc_spawns_for_chunk(coord, &chunk) {
                 let entity = self.alloc_entity();
-                self.npcs.insert(entity, Npc::new(entity, archetype, pos));
+                let mut npc = Npc::new(entity, archetype, pos);
+                // Agents spawn with their inventory minted to them, so what
+                // they drop on death was theirs all along.
+                npc.inventory = roll_npc_loot(&mut self.rng, zone, archetype.variant == 2);
+                let agent = npc_party(&npc);
+                for stack in &npc.inventory {
+                    self.ledger.record(
+                        TxKind::Mint,
+                        TxParty::Mint,
+                        agent.clone(),
+                        TxAmount::Item { kind: stack.kind, count: stack.count },
+                        0,
+                    );
+                }
+                self.npcs.insert(entity, npc);
             }
         }
         // Static entities: extraction points (service buildings are seeded
@@ -2606,6 +3187,7 @@ impl World {
                                     ),
                                     name: "Extraction Point".into(),
                                     variant: 0,
+                                    agent_id: static_agent_id(self.seed, entity),
                                 },
                             );
                             break 'find;
@@ -2810,6 +3392,10 @@ impl World {
             }
         }
         self.chunks.save_dirty();
+        // Ledger aggregates (supply counters, KPI totals) survive restarts.
+        if let Err(e) = self.store.save_meta("econ_ledger", &self.ledger.save()) {
+            tracing::error!("ledger save failed: {e}");
+        }
         tracing::debug!(
             tick = self.tick,
             players = self.players.len(),

@@ -1596,6 +1596,7 @@ dependencies = [
  "anyhow",
  "glam",
  "rand",
+ "serde",
  "tempfile",
  "tokio",
  "tracing",

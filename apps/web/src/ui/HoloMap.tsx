@@ -26,6 +26,7 @@ import {
 } from "../game/citymap";
 import { POI_STYLES } from "../game/poi";
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
+import { cameraState } from "../render/CameraRig";
 import { game, useGame } from "../state/game";
 
 const FOV = 40;
@@ -96,7 +97,12 @@ function HoloMapView({ open }: { open: boolean }) {
     setTopDown(false);
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
-      if (e.code === "Escape") useGame.getState().set({ mapOpen: false });
+      if (e.code === "Escape") {
+        // Escape spent on closing the map: don't let the relock/unlock
+        // bounce read as an "open game menu" Escape (see CameraRig).
+        cameraState.suppressMenuUntil = performance.now() + 1500;
+        useGame.getState().set({ mapOpen: false });
+      }
       if (e.code === "KeyT") {
         setTopDown((t) => {
           view.current.topDown = !t;

@@ -12,6 +12,8 @@ import { VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import {
   AbilityKind,
   AnimState,
+  EconTx,
+  EconomyStats,
   EntityKind,
   EntitySpawnData,
   Inventory,
@@ -361,6 +363,10 @@ interface UiState {
   vendorOpen: boolean;
   /** Fullscreen city map overlay (M key). */
   mapOpen: boolean;
+  /** Fullscreen economy ledger dashboard (K key). */
+  economyOpen: boolean;
+  /** Live ledger snapshot: aggregate stats + tx feed (newest first). */
+  economy: { stats: EconomyStats; feed: EconTx[] } | null;
   /** Pause/game menu overlay (Escape). */
   menuOpen: boolean;
   /** Active visual style preset (persisted to localStorage). */
@@ -375,6 +381,7 @@ interface UiState {
   showPickup: (text: string) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
+  toggleEconomy: () => void;
   toggleMenu: () => void;
   /** Close every overlay/panel (used when leaving the game screen). */
   closeOverlays: () => void;
@@ -441,6 +448,8 @@ export const useGame: import("zustand").UseBoundStore<
   nearVendor: null,
   vendorOpen: false,
   mapOpen: false,
+  economyOpen: false,
+  economy: null,
   menuOpen: false,
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
@@ -453,11 +462,13 @@ export const useGame: import("zustand").UseBoundStore<
     set((s) => ({ pickupToast: { text, id: (s.pickupToast?.id ?? 0) + 1 } })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
+  toggleEconomy: () => set((s) => ({ economyOpen: !s.economyOpen })),
   toggleMenu: () => set((s) => ({ menuOpen: !s.menuOpen })),
   closeOverlays: () =>
     set({
       menuOpen: false,
       mapOpen: false,
+      economyOpen: false,
       chatOpen: false,
       inventoryOpen: false,
       craftOpen: false,

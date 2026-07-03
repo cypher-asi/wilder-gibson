@@ -19,6 +19,7 @@ wilder-economy = { workspace = true }
 wilder-crafting = { workspace = true }
 wilder-market = { workspace = true }
 tokio = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }

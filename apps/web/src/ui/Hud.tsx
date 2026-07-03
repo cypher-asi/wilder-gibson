@@ -1294,19 +1294,20 @@ function PositionReadout() {
   useEffect(() => {
     const timer = setInterval(() => {
       setPos({ x: game.predicted.x, z: game.predicted.z });
-      // Track stash/station/market proximity for context UIs.
+      // Track stash/station/market proximity for context UIs. The 5 m range
+      // matches the server's interact range for service storefronts.
       let near = false;
       let nearMarket = false;
       let station: { kind: (typeof STATION_KINDS)[number]; id: number } | null = null;
-      let stationDist = 3.5;
+      let stationDist = 5.0;
       let vendor: { kind: import("../net/protocol").EntityKind; id: number } | null = null;
-      let vendorDist = 3.5;
+      let vendorDist = 5.0;
       for (const entity of game.entities.values()) {
         const d = Math.hypot(entity.x - game.predicted.x, entity.z - game.predicted.z);
-        if (entity.kind === "Building" && d < 3.5) {
+        if (entity.kind === "Building" && d < 5.0) {
           near = true;
         }
-        if (entity.kind === "MarketTerminal" && d < 3.5) {
+        if (entity.kind === "MarketTerminal" && d < 5.0) {
           nearMarket = true;
         }
         const kind = entity.kind as (typeof STATION_KINDS)[number];

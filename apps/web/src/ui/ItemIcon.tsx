@@ -58,9 +58,9 @@ export function itemLabel(kind: ItemKind): string {
   return ITEM_INFO[kind]?.label ?? kind;
 }
 
-// Shared silhouette colors.
-const FILL = "#c7ccd2";
-const DIM = "#8a9099";
+// Shared silhouette colors (cool steel, matching the HUD palette).
+const FILL = "#c9d8e6";
+const DIM = "#8aa0b4";
 
 /** Inner SVG content per item kind (48x48 viewBox). */
 const GLYPHS: Record<ItemKind, JSX.Element> = {
@@ -68,8 +68,8 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
     <>
       <rect x="7" y="14" width="34" height="24" rx="3" fill={FILL} />
       <rect x="19" y="10" width="10" height="5" rx="2" fill={DIM} />
-      <rect x="21" y="20" width="6" height="12" fill="#3a3f46" />
-      <rect x="18" y="23" width="12" height="6" fill="#3a3f46" />
+      <rect x="21" y="20" width="6" height="12" fill="#22303c" />
+      <rect x="18" y="23" width="12" height="6" fill="#22303c" />
     </>
   ),
   Flashlight: (
@@ -113,7 +113,7 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
   PlateArmor: (
     <>
       <path d="M14 9 h20 l6 7 v14 l-16 10 -16 -10 v-14 z" fill={FILL} />
-      <rect x="19" y="16" width="10" height="12" rx="2" fill="#3a3f46" />
+      <rect x="19" y="16" width="10" height="12" rx="2" fill="#22303c" />
     </>
   ),
   Ammo9mm: (
@@ -143,7 +143,7 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
   Electronics: (
     <>
       <rect x="14" y="14" width="20" height="20" rx="2" fill={FILL} />
-      <rect x="20" y="20" width="8" height="8" fill="#3a3f46" />
+      <rect x="20" y="20" width="8" height="8" fill="#22303c" />
       {[18, 24, 30].map((p) => (
         <g key={p} fill={DIM}>
           <rect x={p} y="9" width="3" height="5" />
@@ -163,10 +163,10 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
   SteelPlate: (
     <>
       <rect x="8" y="16" width="32" height="16" rx="2" fill={FILL} />
-      <circle cx="13" cy="21" r="1.6" fill="#3a3f46" />
-      <circle cx="35" cy="21" r="1.6" fill="#3a3f46" />
-      <circle cx="13" cy="27" r="1.6" fill="#3a3f46" />
-      <circle cx="35" cy="27" r="1.6" fill="#3a3f46" />
+      <circle cx="13" cy="21" r="1.6" fill="#22303c" />
+      <circle cx="35" cy="21" r="1.6" fill="#22303c" />
+      <circle cx="13" cy="27" r="1.6" fill="#22303c" />
+      <circle cx="35" cy="27" r="1.6" fill="#22303c" />
     </>
   ),
   CopperWire: (
@@ -187,9 +187,9 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
   CircuitBoard: (
     <>
       <rect x="9" y="11" width="30" height="26" rx="2" fill={FILL} />
-      <path d="M14 18 h8 v6 h10 M14 30 h12 M32 18 v14" stroke="#3a3f46" strokeWidth="2" fill="none" />
-      <circle cx="14" cy="18" r="2" fill="#3a3f46" />
-      <circle cx="32" cy="32" r="2" fill="#3a3f46" />
+      <path d="M14 18 h8 v6 h10 M14 30 h12 M32 18 v14" stroke="#22303c" strokeWidth="2" fill="none" />
+      <circle cx="14" cy="18" r="2" fill="#22303c" />
+      <circle cx="32" cy="32" r="2" fill="#22303c" />
     </>
   ),
   BioGel: (
@@ -202,21 +202,21 @@ const GLYPHS: Record<ItemKind, JSX.Element> = {
     <>
       <path d="M12 8 h18 l6 6 v26 h-24 z" fill={FILL} />
       <path d="M30 8 v6 h6 z" fill={DIM} />
-      <path d="M17 20 h14 M17 25 h14 M17 30 h9" stroke="#3a3f46" strokeWidth="2" fill="none" />
+      <path d="M17 20 h14 M17 25 h14 M17 30 h9" stroke="#22303c" strokeWidth="2" fill="none" />
     </>
   ),
   PowerCell: (
     <>
       <rect x="15" y="12" width="18" height="28" rx="3" fill={FILL} />
       <rect x="20" y="8" width="8" height="4" rx="1" fill={DIM} />
-      <path d="M26 17 l-7 10 h5 l-2 8 7 -10 h-5 z" fill="#3a3f46" />
+      <path d="M26 17 l-7 10 h5 l-2 8 7 -10 h-5 z" fill="#22303c" />
     </>
   ),
   Cash: (
     <>
       <rect x="8" y="14" width="30" height="17" rx="2" fill={DIM} />
       <rect x="11" y="18" width="30" height="17" rx="2" fill={FILL} />
-      <circle cx="26" cy="26.5" r="5.5" fill="#3a3f46" />
+      <circle cx="26" cy="26.5" r="5.5" fill="#22303c" />
     </>
   ),
 };
