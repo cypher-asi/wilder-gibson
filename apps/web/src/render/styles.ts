@@ -376,11 +376,13 @@ export const styleUniforms = {
   /** Shared clock driving the tron code-rain scroll (set by tickFacades). */
   uTronTime: { value: 0 },
   /** Camera-distance band (world m) over which tron rain buildings fade to
-   * black, so mid/far towers dim into the dark skyline and blend with the
-   * distant CityProxy massing. Full brightness at uTronFadeNear, full black
-   * by uTronFadeFar. */
-  uTronFadeNear: { value: 110 },
-  uTronFadeFar: { value: 260 },
+   * black. On a receding side-wall the iso-distance line reads as a vertical
+   * seam sweeping horizontally, so the rain melts to solid black across the
+   * building's own depth (front = rain, back = black) before the massing
+   * hands off to the distant CityProxy skyline. Full rain at uTronFadeNear,
+   * full black by uTronFadeFar. */
+  uTronFadeNear: { value: 65 },
+  uTronFadeFar: { value: 175 },
   /** Player world XZ, updated per-frame; fades the tron floor grid to black
    * away from the character (blue lines only; enemy-red lines stay full). */
   uPlayerPos: { value: new THREE.Vector2() },
