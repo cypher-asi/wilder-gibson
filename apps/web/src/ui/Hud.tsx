@@ -5,7 +5,7 @@ import { GameConnection } from "../net/connection";
 import { AbilityKind, ItemKind } from "../net/protocol";
 import { consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
-import { MapOverlay } from "./MapOverlay";
+import { HoloMap } from "./HoloMap";
 import { Minimap } from "./Minimap";
 
 export function Hud({ connection }: { connection: GameConnection }) {
@@ -26,7 +26,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ExtractionBar />
           <ExtractHint />
           <div className="hud-hint">
-            WASD move · SHIFT run · MOUSE aim · LMB shoot · SPACE roll · Q/E/R abilities ·
+            WASD move · SHIFT toggle run · MOUSE aim · LMB shoot · SPACE roll · Q/E/R abilities ·
             1-4 items · CTRL crouch · Z/X rotate · M map · I inventory · ENTER chat
           </div>
           <ActionBar connection={connection} />
@@ -36,7 +36,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           {inventoryOpen && <InventoryPanel connection={connection} />}
           <CraftingPanel connection={connection} />
           <MarketPanel connection={connection} />
-          <MapOverlay />
+          <HoloMap />
         </>
       )}
     </div>

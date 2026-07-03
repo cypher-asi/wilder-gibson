@@ -856,17 +856,37 @@ body {
   pointer-events: auto;
 }
 
-.map-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+.holo-map {
+  background: #010409;
   cursor: grab;
   touch-action: none;
 }
 
-.map-canvas:active {
+.holo-map:active {
   cursor: grabbing;
+}
+
+.map-view-toggle {
+  position: absolute;
+  top: 16px;
+  left: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 700 11px/1 system-ui, sans-serif;
+  letter-spacing: 0.18em;
+  color: var(--accent, #40e8ff);
+  background: rgba(6, 14, 22, 0.8);
+  border: 1px solid rgba(64, 232, 255, 0.4);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  text-shadow: 0 0 10px rgba(64, 232, 255, 0.5);
+}
+
+.map-view-toggle:hover {
+  border-color: var(--accent, #40e8ff);
+  background: rgba(10, 22, 34, 0.9);
 }
 
 .map-overlay-title {

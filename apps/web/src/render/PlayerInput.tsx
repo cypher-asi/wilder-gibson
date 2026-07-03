@@ -69,6 +69,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const down = (event: KeyboardEvent) => {
       // Ignore game keys while typing in chat/UI inputs.
       if ((event.target as HTMLElement)?.tagName === "INPUT") return;
+      // While the fullscreen map is open only map keys work (HoloMap handles
+      // Escape/T itself); everything else must not reach the paused game.
+      if (useGame.getState().mapOpen && event.code !== "KeyM") return;
       keys.current[event.code] = true;
       if (event.code === "KeyI" || event.code === "Tab") {
         event.preventDefault();
@@ -214,7 +217,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     connection.send({ t: "UseItem", d: { slot: entry.slot } });
   }
 
-  useFrame((_, dt) => {
+  useFrame((_, rawDt) => {
+    // Clamp dt: resuming from the paused map frameloop reports one huge delta,
+    // which would otherwise burst-fire dozens of catch-up move ticks.
+    const dt = Math.min(rawDt, 0.1);
     updateAim();
     updateFire();
     updateHolster();

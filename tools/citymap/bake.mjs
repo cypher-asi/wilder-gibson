@@ -494,6 +494,114 @@ console.log(`  ${buildings.length} building rects after chunk split`);
 }
 
 // ---------------------------------------------------------------------------
+// Client city geometry (whole city) for the holographic 3D map: the actual
+// building blockout meshes (indexed, with per-vertex relative height + glow)
+// and the actual street polygons, both transformed into world space.
+//
+// glb -> world (see the district-label mapping): worldX = glbX + XOFF,
+// worldZ = ZOFF - glbY (z flip), worldY = glbZ (source is Z-up).
+// ---------------------------------------------------------------------------
+
+{
+  const XOFF = (tileMinX - gminX) * TILE;
+  const ZOFF = (H + gminY + tileMinZ) * TILE;
+
+  // Buildings: merge every blockout mesh, keeping source indexing.
+  const bPos = [];
+  const bRelH = [];
+  const bGlow = [];
+  const bIdx = [];
+  let vertBase = 0;
+  for (const node of bldDoc.getRoot().listNodes()) {
+    const mesh = node.getMesh();
+    if (!mesh) continue;
+    const m = node.getWorldMatrix();
+    for (const prim of mesh.listPrimitives()) {
+      const posAttr = prim.getAttribute("POSITION");
+      if (!posAttr) continue;
+      const arr = posAttr.getArray();
+      const count = posAttr.getCount();
+      // World-space (glb axes) verts + height range for this primitive.
+      const verts = new Float64Array(count * 3);
+      let z0 = Infinity, z1 = -Infinity;
+      for (let i = 0; i < count; i++) {
+        const x = arr[i * 3], y = arr[i * 3 + 1], z = arr[i * 3 + 2];
+        const gx = m[0] * x + m[4] * y + m[8] * z + m[12];
+        const gy = m[1] * x + m[5] * y + m[9] * z + m[13];
+        const gz = m[2] * x + m[6] * y + m[10] * z + m[14];
+        verts[i * 3] = gx;
+        verts[i * 3 + 1] = gy;
+        verts[i * 3 + 2] = gz;
+        if (gz < z0) z0 = gz;
+        if (gz > z1) z1 = gz;
+      }
+      const base = Math.max(z0, 0); // ignore basements below the sea plane
+      const span = Math.max(z1 - base, 0.01);
+      const stories = Math.max(1, Math.min(40, Math.round((z1 - base - 4.5) / 3) + 1));
+      const nameHash = fnv32((node.getName() || "GAME") + "#g");
+      const jitter = (nameHash % 100) / 1000;
+      const glow = 0.35 + Math.min(stories / 40, 1) * 0.75 + jitter;
+      const glowByte = Math.max(0, Math.min(255, Math.round((glow / 1.6) * 255)));
+      for (let i = 0; i < count; i++) {
+        bPos.push(
+          verts[i * 3] + XOFF,
+          verts[i * 3 + 2],
+          ZOFF - verts[i * 3 + 1],
+        );
+        const rel = Math.max(0, Math.min(1, (verts[i * 3 + 2] - base) / span));
+        bRelH.push(Math.round(rel * 255));
+        bGlow.push(glowByte);
+      }
+      // (glbX, glbY, glbZ) -> (x, glbZ, -glbY) is a rotation (det +1), so the
+      // original triangle winding is preserved.
+      const idx = prim.getIndices()?.getArray();
+      if (idx) {
+        for (let i = 0; i < idx.length; i++) bIdx.push(vertBase + idx[i]);
+      } else {
+        for (let i = 0; i < count; i++) bIdx.push(vertBase + i);
+      }
+      vertBase += count;
+    }
+  }
+
+  // Streets: triangle soup from the Map.glb Street layer.
+  const sPos = new Float32Array(layers.Street.length * 9);
+  for (let t = 0; t < layers.Street.length; t++) {
+    const tri = layers.Street[t];
+    for (let k = 0; k < 3; k++) {
+      sPos[t * 9 + k * 3] = tri[k * 3] + XOFF;
+      sPos[t * 9 + k * 3 + 1] = tri[k * 3 + 2];
+      sPos[t * 9 + k * 3 + 2] = ZOFF - tri[k * 3 + 1];
+    }
+  }
+
+  const pad4 = (n) => (n + 3) & ~3;
+  const bVerts = bPos.length / 3;
+  const sVerts = sPos.length / 3;
+  const size =
+    16 + bVerts * 12 + pad4(bVerts) + pad4(bVerts) + bIdx.length * 4 + sPos.length * 4;
+  const buf = Buffer.alloc(size);
+  let o = 0;
+  buf.write("WCG1", o); o += 4;
+  buf.writeUInt32LE(bVerts, o); o += 4;
+  buf.writeUInt32LE(bIdx.length, o); o += 4;
+  buf.writeUInt32LE(sVerts, o); o += 4;
+  for (const v of bPos) { buf.writeFloatLE(v, o); o += 4; }
+  for (const v of bRelH) buf.writeUInt8(v, o++);
+  o = pad4(o);
+  for (const v of bGlow) buf.writeUInt8(v, o++);
+  o = pad4(o);
+  for (const v of bIdx) { buf.writeUInt32LE(v, o); o += 4; }
+  for (const v of sPos) { buf.writeFloatLE(v, o); o += 4; }
+  const outDir = path.join(REPO, "apps", "web", "public", "citymap");
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(path.join(outDir, "geo.bin"), buf);
+  console.log(
+    `geo.bin: ${(buf.length / 1e6).toFixed(2)} MB (buildings ${bVerts} verts / ${bIdx.length / 3} tris, streets ${sVerts / 3} tris)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Client minimap + manifest
 // ---------------------------------------------------------------------------
 
