@@ -415,7 +415,7 @@ body {
   position: absolute;
   top: 12px;
   right: 12px;
-  width: 194px;
+  width: 233px;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1107,7 +1107,7 @@ body {
   height: 32px;
   pointer-events: none;
   z-index: 15;
-  filter: drop-shadow(0 0 3px rgba(255, 48, 64, 0.7));
+  filter: drop-shadow(0 0 3px currentColor) drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
   transition: opacity 0.12s ease-out;
   will-change: transform, opacity;
 }
@@ -1329,4 +1329,160 @@ body {
   color: var(--white);
   text-shadow: var(--rgb-split);
   pointer-events: none;
+}
+
+/* Performance panel (F3): live fps + per-system frame cost readout. */
+.perf-chip {
+  position: absolute;
+  top: 120px;
+  left: 16px;
+  pointer-events: auto;
+  font: 700 9px/1 var(--font-display);
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  background: rgba(6, 14, 22, 0.55);
+  border: 1px solid var(--steel-border);
+  padding: 4px 7px;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.15s;
+}
+
+.perf-chip:hover {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.perf-panel {
+  position: absolute;
+  top: 120px;
+  left: 16px;
+  width: 244px;
+  pointer-events: auto;
+  padding: 8px 10px 6px;
+  background: rgba(4, 10, 16, 0.85);
+  border: 1px solid var(--steel-border);
+  color: #cfeef5;
+  font-family: var(--font-body);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  backdrop-filter: blur(4px);
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+  z-index: 8;
+}
+
+.perf-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.perf-title {
+  font: 700 10px/1 var(--font-display);
+  letter-spacing: 0.22em;
+  color: var(--accent);
+}
+
+.perf-key {
+  font-size: 8px;
+  color: var(--text-dim);
+  border: 1px solid var(--steel-border);
+  padding: 1px 4px;
+}
+
+.perf-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.perf-close:hover {
+  color: var(--accent);
+}
+
+.perf-fps-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.perf-fps {
+  font: 800 22px/1 var(--font-display);
+  color: var(--white);
+  text-shadow: var(--hud-glow);
+}
+
+.perf-fps-unit {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+.perf-ms {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.perf-spark {
+  display: block;
+  margin: 4px 0;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.perf-spark-line {
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+.perf-spark-budget {
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-dasharray: 3 3;
+}
+
+.perf-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 1px solid var(--steel-border);
+}
+
+.perf-table td {
+  padding: 1px 0;
+}
+
+.perf-sec-name {
+  color: #9fc7d2;
+}
+
+.perf-sec-ms {
+  text-align: right;
+  color: var(--white);
+  width: 44px;
+}
+
+.perf-sec-max {
+  text-align: right;
+  color: var(--text-dim);
+  width: 44px;
+}
+
+.perf-foot {
+  margin-top: 4px;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  text-align: right;
 }

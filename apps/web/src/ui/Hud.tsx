@@ -99,8 +99,16 @@ function Crosshair() {
       if (node) {
         const show = drawn && inside.current && !overMinimap();
         node.style.opacity = show ? "1" : "0";
-        if (show)
+        if (show) {
           node.style.transform = `translate(${pos.x - 16}px, ${pos.y - 16}px)`;
+          // Red only when locked onto a live enemy, white otherwise.
+          const t =
+            game.hoverTargetId != null
+              ? game.entities.get(game.hoverTargetId)
+              : undefined;
+          const onEnemy = !!t && t.healthPct > 0 && t.anim !== "Death";
+          node.style.color = onEnemy ? "#ff3040" : "#ffffff";
+        }
       }
       // Aiming hides the OS cursor (crosshair stands in); otherwise a themed
       // pointer replaces the default arrow.
@@ -121,15 +129,15 @@ function Crosshair() {
   }, []);
 
   return (
-    <div ref={el} className="crosshair" style={{ opacity: 0 }}>
+    <div ref={el} className="crosshair" style={{ opacity: 0, color: "#ffffff" }}>
       <svg viewBox="-16 -16 32 32" width={32} height={32}>
-        <g fill="none" stroke="#ff3040" strokeWidth={1.5} strokeLinecap="round">
+        <g fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
           <line x1={0} y1={-14} x2={0} y2={-5} />
           <line x1={0} y1={5} x2={0} y2={14} />
           <line x1={-14} y1={0} x2={-5} y2={0} />
           <line x1={5} y1={0} x2={14} y2={0} />
         </g>
-        <circle cx={0} cy={0} r={1.4} fill="#ff3040" />
+        <circle cx={0} cy={0} r={1.4} fill="currentColor" />
       </svg>
     </div>
   );
