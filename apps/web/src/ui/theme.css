@@ -512,7 +512,9 @@ body {
 
 /* Bottom-right comms column: style picker + chat. Anchored by its bottom edge
    so it grows upward, clearing the backpack quick-grid below it. Shares the
-   backpack's right padding (12px) so the right edges line up. */
+   backpack's right padding (12px) so the right edges line up, and sits on the
+   same angled holo plane as the inventory grid + currency for one consistent
+   bottom-right stack. */
 .comms-panel {
   position: absolute;
   right: 24px;
@@ -523,7 +525,7 @@ body {
   align-items: stretch;
   gap: 6px;
   pointer-events: auto;
-  transform: perspective(900px) rotateY(-8deg);
+  transform: perspective(1100px) rotateX(-9deg) rotateY(-9deg) rotateZ(2deg);
   transform-origin: right center;
 }
 
