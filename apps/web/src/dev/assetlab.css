@@ -102,6 +102,18 @@
   cursor: default;
 }
 
+.lab-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  padding: 4px 0;
+}
+
+.lab-icon-btn svg {
+  display: block;
+}
+
 .lab-asset-list {
   flex: 1;
   overflow-y: auto;

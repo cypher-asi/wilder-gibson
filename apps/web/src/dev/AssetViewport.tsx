@@ -62,12 +62,40 @@ function WireframeToggle({ root, wireframe }: { root: THREE.Group; wireframe: bo
   return <primitive object={root} />;
 }
 
+/**
+ * Shared light rig for the dev viewports. Bright mode (the default) lifts
+ * ambient/fill so dark cyberpunk assets are actually inspectable; moody mode
+ * approximates the in-game dusk levels.
+ */
+export function ViewportLights({ bright }: { bright: boolean }) {
+  if (bright) {
+    return (
+      <>
+        <ambientLight intensity={0.6} />
+        <hemisphereLight args={["#eaf3ff", "#4a5261", 1.5]} />
+        <directionalLight position={[8, 12, 6]} intensity={3.2} />
+        <directionalLight position={[-6, 4, -8]} intensity={1.4} color="#bfd8ff" />
+        <directionalLight position={[0, 6, 10]} intensity={0.8} color="#ffe9c9" />
+      </>
+    );
+  }
+  return (
+    <>
+      <hemisphereLight args={["#cfe8ff", "#20242e", 0.9]} />
+      <directionalLight position={[8, 12, 6]} intensity={2.2} />
+      <directionalLight position={[-6, 4, -8]} intensity={0.6} color="#7fb8ff" />
+    </>
+  );
+}
+
 export function AssetViewport({
   url,
   wireframe,
+  bright,
 }: {
   url: string | null;
   wireframe: boolean;
+  bright: boolean;
 }) {
   const { loaded, error } = useGlbScene(url);
 
@@ -100,9 +128,7 @@ export function AssetViewport({
       ) : (
         <Canvas key={url} camera={camera} gl={{ antialias: true }}>
           <color attach="background" args={["#0a0d14"]} />
-          <hemisphereLight args={["#cfe8ff", "#20242e", 0.9]} />
-          <directionalLight position={[8, 12, 6]} intensity={2.2} />
-          <directionalLight position={[-6, 4, -8]} intensity={0.6} color="#7fb8ff" />
+          <ViewportLights bright={bright} />
           <gridHelper args={[gridSize, gridSize, "#2b3a4a", "#151c26"]} />
           <axesHelper args={[1]} />
           <WireframeToggle root={loaded.scene} wireframe={wireframe} />

@@ -109,7 +109,34 @@ function StagedBuilding({ prefab, model }: { prefab: BuildingPrefab; model: Buil
   );
 }
 
-export function BuildingStageViewport({ prefab }: { prefab: BuildingPrefab | null }) {
+function StageLights({ bright }: { bright: boolean }) {
+  if (bright) {
+    return (
+      <>
+        <ambientLight intensity={0.55} />
+        <hemisphereLight args={["#eaf3ff", "#4a5261", 1.4]} />
+        <directionalLight position={[40, 60, 30]} intensity={3.0} castShadow />
+        <directionalLight position={[-30, 20, -40]} intensity={1.2} color="#bfd8ff" />
+        <directionalLight position={[0, 25, 60]} intensity={0.7} color="#ffe9c9" />
+      </>
+    );
+  }
+  return (
+    <>
+      <hemisphereLight args={["#cfe8ff", "#20242e", 0.9]} />
+      <directionalLight position={[40, 60, 30]} intensity={2.0} castShadow />
+      <directionalLight position={[-30, 20, -40]} intensity={0.5} color="#7fb8ff" />
+    </>
+  );
+}
+
+export function BuildingStageViewport({
+  prefab,
+  bright,
+}: {
+  prefab: BuildingPrefab | null;
+  bright: boolean;
+}) {
   const model = useMemo(() => (prefab ? buildBuildingModel(prefabInstance(prefab), prefab.kit) : null), [prefab]);
 
   const camera = useMemo(() => {
@@ -143,9 +170,7 @@ export function BuildingStageViewport({ prefab }: { prefab: BuildingPrefab | nul
     <div className="lab-viewport">
       <Canvas key={prefab.id} camera={camera} gl={{ antialias: true }} shadows>
         <color attach="background" args={["#0a0d14"]} />
-        <hemisphereLight args={["#cfe8ff", "#20242e", 0.9]} />
-        <directionalLight position={[40, 60, 30]} intensity={2.0} castShadow />
-        <directionalLight position={[-30, 20, -40]} intensity={0.5} color="#7fb8ff" />
+        <StageLights bright={bright} />
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, GROUND_Y - 0.01, 0]} receiveShadow>
           <planeGeometry args={[gridTiles * TILE_SIZE, gridTiles * TILE_SIZE]} />
           <meshStandardMaterial color="#141920" roughness={0.95} />

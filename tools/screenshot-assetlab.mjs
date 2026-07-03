@@ -42,9 +42,9 @@ await page.waitForSelector(".lab-viewport canvas", { timeout: 20000 });
 await new Promise((r) => setTimeout(r, 3500));
 await page.screenshot({ path: "tools/screens/assetlab-2-inspect.png" });
 
-// Wireframe toggle.
+// Wireframe toggle (icon button, identified by title).
 await page.evaluate(() => {
-  [...document.querySelectorAll("button")].find((b) => b.textContent === "wireframe").click();
+  document.querySelector('button[title="wireframe"]').click();
 });
 await new Promise((r) => setTimeout(r, 800));
 await page.screenshot({ path: "tools/screens/assetlab-3-wireframe.png" });

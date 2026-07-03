@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSession } from "../state/session";
 import { AssetViewport } from "./AssetViewport";
 import { BuildingStage } from "./BuildingStage";
+import { SunIcon, WireframeIcon } from "./icons";
 import { Sidekick } from "./Sidekick";
 import {
   AssetStatus,
@@ -37,6 +38,7 @@ export function AssetLab() {
   // What's in the viewport: the imported original, or one derivative by id.
   const [view, setView] = useState<string>("original");
   const [wireframe, setWireframe] = useState(false);
+  const [bright, setBright] = useState(true);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const pollBusy = useRef(false);
@@ -214,10 +216,18 @@ export function AssetLab() {
                 </button>
               ))}
               <button
-                className={`lab-filter ${wireframe ? "active" : ""}`}
+                className={`lab-filter lab-icon-btn ${wireframe ? "active" : ""}`}
+                title="wireframe"
                 onClick={() => setWireframe((w) => !w)}
               >
-                wireframe
+                <WireframeIcon />
+              </button>
+              <button
+                className={`lab-filter lab-icon-btn ${bright ? "active" : ""}`}
+                title="bright lighting"
+                onClick={() => setBright((b) => !b)}
+              >
+                <SunIcon />
               </button>
             </div>
             {selected && (
@@ -227,7 +237,7 @@ export function AssetLab() {
               </span>
             )}
           </div>
-          <AssetViewport url={viewportUrl} wireframe={wireframe} />
+          <AssetViewport url={viewportUrl} wireframe={wireframe} bright={bright} />
         </main>
 
         <Sidekick

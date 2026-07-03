@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { BuildingPrefab, Registry, labApi } from "./labApi";
 import { BuildingStageViewport } from "./BuildingStageViewport";
+import { SunIcon } from "./icons";
 import {
   findStageModules,
   makeDefaultPrefabs,
@@ -28,6 +29,7 @@ export function BuildingStage({
   const [prefabs, setPrefabs] = useState<BuildingPrefab[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [bright, setBright] = useState(true);
 
   const modules = useMemo(() => findStageModules(registry), [registry]);
 
@@ -168,11 +170,20 @@ export function BuildingStage({
 
       <main className="lab-center">
         <div className="lab-viewport-bar">
+          <div className="lab-viewport-toggles">
+            <button
+              className={`lab-filter lab-icon-btn ${bright ? "active" : ""}`}
+              title="bright lighting"
+              onClick={() => setBright((b) => !b)}
+            >
+              <SunIcon />
+            </button>
+          </div>
           <span className="lab-viewport-label">
             {selected ? `${selected.name} — staged through the game building pipeline` : "no prefab selected"}
           </span>
         </div>
-        <BuildingStageViewport prefab={selected} />
+        <BuildingStageViewport prefab={selected} bright={bright} />
       </main>
 
       <aside className="lab-sidekick">
