@@ -2717,16 +2717,20 @@ body {
   color: var(--white);
 }
 
+/* Match .econ-kind weight/spacing so the MINT / BURN party labels render at the
+   same brightness as the TYPE column (same hex otherwise reads dimmer when thin). */
 .econ-party-mint {
   color: #9fdcff;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   font-size: 10px;
+  font-weight: 700;
 }
 
 .econ-party-burn {
   color: var(--red);
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   font-size: 10px;
+  font-weight: 700;
 }
 
 .econ-amount {
