@@ -447,6 +447,92 @@ function buildServiceFace(
 }
 
 // ---------------------------------------------------------------------------
+// Fire escapes (street faces of brick walk-ups)
+// ---------------------------------------------------------------------------
+
+/**
+ * Zig-zag fire escape: a landing with railings at every floor, connected by
+ * angled stair runs, with a drop ladder below the lowest landing. Coarse
+ * merged boxes — the silhouette is what reads at the game camera.
+ */
+function buildFireEscape(
+  p: Parts,
+  f: Face,
+  rng: () => number,
+  height: number,
+  stories: number,
+): void {
+  const FW = 2.5; // landing width along the face
+  const PD = 0.72; // landing depth off the wall
+  const along = (rng() - 0.5) * Math.max(0, f.len - FW - 2.4);
+
+  // Box on the face frame with an optional tilt about the outward axis
+  // (stair runs rise along the face).
+  const fbox = (
+    alongSize: number,
+    ySize: number,
+    outSize: number,
+    a: number,
+    y: number,
+    out: number,
+    tilt = 0,
+  ) => {
+    if (f.axis === "z") {
+      p.box("metalDark", alongSize, ySize, outSize, f.center + a, y, f.wall + f.sign * out, 0, 0, tilt);
+    } else {
+      p.box("metalDark", outSize, ySize, alongSize, f.wall + f.sign * out, y, f.center + a, -tilt, 0, 0);
+    }
+  };
+
+  let lowestY = 0;
+  for (let i = 1; i < stories; i++) {
+    const y = 4.5 + (i - 1) * 3;
+    if (y > height - 1.2) break;
+    lowestY = lowestY || y;
+    // Landing platform + open-grate lip.
+    fbox(FW, 0.07, PD, along, y, 0.2 + PD / 2);
+    // Railings: top rail, mid rail, corner + mid posts, and side rails.
+    const railY = y + 0.95;
+    fbox(FW, 0.05, 0.05, along, railY, 0.2 + PD - 0.04);
+    fbox(FW, 0.04, 0.04, along, y + 0.5, 0.2 + PD - 0.04);
+    for (const pa of [-FW / 2 + 0.04, 0, FW / 2 - 0.04]) {
+      fbox(0.05, 1.0, 0.05, along + pa, y + 0.5, 0.2 + PD - 0.04);
+    }
+    fbox(0.05, 0.05, PD, along - FW / 2 + 0.04, railY, 0.2 + PD / 2);
+    fbox(0.05, 0.05, PD, along + FW / 2 - 0.04, railY, 0.2 + PD / 2);
+    // Stair run up to the next landing (alternating direction), while a
+    // floor above exists.
+    const yn = y + 3;
+    if (yn <= height - 1.2 && i + 1 < stories) {
+      const dir = i % 2 === 0 ? 1 : -1;
+      const run = FW - 0.7;
+      const tilt = Math.atan2(run, 3) * dir;
+      const len = Math.hypot(run, 3);
+      fbox(0.6, len, 0.06, along + (dir * run) / 2 - (dir * 0.35) / 2, (y + yn) / 2 + 0.04, 0.44, tilt);
+      // Stair rail following the run.
+      fbox(0.05, len, 0.05, along + (dir * run) / 2 - (dir * 0.35) / 2, (y + yn) / 2 + 0.95, 0.66, tilt);
+    }
+    // Wall brackets under the landing.
+    fbox(0.07, 0.07, PD, along - FW / 2 + 0.2, y - 0.05, 0.2 + PD / 2);
+    fbox(0.07, 0.07, PD, along + FW / 2 - 0.2, y - 0.05, 0.2 + PD / 2);
+  }
+
+  // Drop ladder hanging from the lowest landing (stops ~2.2 m above ground).
+  if (lowestY > 0) {
+    const ladderLen = Math.min(2.2, lowestY - 2.2);
+    if (ladderLen > 0.6) {
+      const ly = lowestY - ladderLen / 2 - 0.05;
+      fbox(0.05, ladderLen, 0.05, along - 0.25, ly, 0.5);
+      fbox(0.05, ladderLen, 0.05, along + 0.25, ly, 0.5);
+      const rungs = Math.floor(ladderLen / 0.33);
+      for (let r = 0; r < rungs; r++) {
+        fbox(0.5, 0.035, 0.035, along, lowestY - 0.25 - r * 0.33, 0.5);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Roof dressing
 // ---------------------------------------------------------------------------
 
@@ -813,6 +899,31 @@ export function buildBuildingModel(
   buildServiceFace(p, kit, right, mulberry(b.style ^ 0x33355691), wallTop);
   buildServiceFace(p, kit, back, mulberry(b.style ^ 0x45d9f3b1), wallTop);
   if (kitTower) buildKitTowerFacade(b, kit, w, d, baseY, height, cfg);
+
+  // --- Fire escape + window AC units on the front face ----------------------
+  if (!kitTower && b.stories >= 3 && (b.archetype & 3) < 2) {
+    const rng = mulberry(b.style ^ 0x6b43a9b5);
+    if (rng() < 0.65) buildFireEscape(p, front, rng, height, b.stories);
+    // Window AC units poking from a hashed subset of upper window cells.
+    // The facade shader grids windows in world space (1.4 m / 3.0 m cells),
+    // so placements snap to the same world grid to land inside a window.
+    const worldOff = front.axis === "z" ? x + front.center : z + front.center;
+    const u0 = worldOff - front.len / 2 + 0.9;
+    const u1 = worldOff + front.len / 2 - 0.9;
+    let placed = 0;
+    for (let k = Math.ceil(u0 / 1.4); (k + 0.5) * 1.4 < u1 && placed < 4; k++) {
+      for (let s = 1; s < b.stories - 1 && placed < 4; s++) {
+        if (rng() >= 0.06) continue;
+        const uc = (k + 0.5) * 1.4;
+        const yc = 4.5 + (s - 1) * 3 + 0.25 * 3 + 0.28; // window sill + half unit
+        if (yc > height - 1.5) continue;
+        const a = uc - worldOff;
+        kit.push(facePlacement(front, KIT_AC[(k + s) % KIT_AC.length], a, yc, 0.16, 0.5));
+        faceBox(p, front, "metalDark", 0.55, 0.05, 0.42, a, yc - 0.26, 0.2);
+        placed++;
+      }
+    }
+  }
 
   // --- Hanging neon signs on the front face --------------------------------
   // Kit-tower panels own the upper front face, so signs would clip them.

@@ -83,6 +83,15 @@ uniform float uFTime;
 float fhash(vec2 p) {
   return fract(sin(dot(p + uSeed, vec2(127.1, 311.7))) * 43758.5453);
 }
+float fnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(fhash(i), fhash(i + vec2(1.0, 0.0)), u.x),
+    mix(fhash(i + vec2(0.0, 1.0)), fhash(i + vec2(1.0, 1.0)), u.x),
+    u.y);
+}
 `;
 
 // Tint + grime after albedo sampling, and the upper-story window grid:
@@ -96,11 +105,19 @@ vec3 fGlow = vec3(0.0);
   vec3 fWn = normalize(vFWorldNormal);
   float fy = vFWorldPos.y - 0.14; // buildings sit on raised tiles (GROUND_Y)
   diffuseColor.rgb *= uTint;
-  float fGrime = mix(0.6, 1.0, smoothstep(0.1, 5.5, fy));
+  // Splash-back band at street level + parapet weathering up top.
+  float fGrime = mix(0.48, 1.0, smoothstep(0.05, 6.0, fy));
   fGrime *= 1.0 - 0.28 * smoothstep(uTopY - 2.2, uTopY - 0.3, fy);
   if (abs(fWn.y) < 0.5) {
     float fu = (abs(fWn.x) > abs(fWn.z)) ? vFWorldPos.z : vFWorldPos.x;
     fGrime *= 0.86 + 0.14 * fhash(vec2(floor(fu * 1.7), 3.7));
+    // Patchy weathering blotches (water staining, repaired mortar) plus
+    // pale efflorescence bloom on the lower stories.
+    float fBlotch = smoothstep(0.55, 0.82, fnoise(vec2(fu * 0.33, fy * 0.33) + 17.0));
+    fGrime *= 1.0 - 0.2 * fBlotch;
+    float fEff = smoothstep(0.6, 0.85, fnoise(vec2(fu * 0.5, fy * 0.5) + 43.0))
+      * (1.0 - smoothstep(2.5, 8.0, fy));
+    diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * 1.25 + 0.025, 0.55 * fEff);
     float fFace = (abs(fWn.x) > abs(fWn.z)) ? (2.0 + step(0.0, fWn.x)) : (7.0 + step(0.0, fWn.z));
     float fv = fy - 4.5;
     if (fv > 0.12 && fy < uTopY - 0.5) {
@@ -115,6 +132,13 @@ vec3 fGlow = vec3(0.0);
       if (fFl > 0.93) fFlick = 0.72 + 0.28 * sin(uFTime * (2.0 + 6.0 * fFl) + fFl * 40.0);
       fGlow = fCol * (fIn * fLit * fBr * fFlick * 1.35);
       diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.012, 0.015, 0.02), fIn);
+      // Rain streaks running down from window sills (~45% of windows):
+      // strongest right under the sill, fading toward the cell bottom.
+      float fSel = step(0.55, fhash(fCell + fFace + 31.0));
+      float fInX = step(0.28, fFr.x) * step(fFr.x, 0.72);
+      float fColN = 0.5 + 0.5 * fhash(vec2(floor(fFr.x * 9.0), fCell.x * 13.0 + fCell.y));
+      float fBelow = step(fFr.y, 0.25) * (fFr.y / 0.25);
+      fGrime *= 1.0 - 0.4 * fSel * fInX * fColN * fBelow;
     }
   }
   diffuseColor.rgb *= fGrime;
@@ -148,10 +172,16 @@ function makeFacadeMaterial(tex: string, topY: number, variant: number): THREE.M
     mat.roughnessMap = set.roughnessMap;
     mat.needsUpdate = true;
   });
+  // Per-variant value jitter widens the brick/concrete tone spread so
+  // neighbouring buildings with the same texture don't match.
+  const jitter = 0.82 + 0.36 * ((variant * 2.6179) % 1);
   const uniforms = {
-    uTint: { value: FACADE_TINTS[variant % FACADE_TINTS.length] },
+    uTint: {
+      value: FACADE_TINTS[variant % FACADE_TINTS.length].clone().multiplyScalar(jitter),
+    },
     uWinColor: { value: WINDOW_COLORS[variant % WINDOW_COLORS.length] },
-    uLitRatio: { value: 0.16 + 0.08 * (variant % 3) },
+    // Dusk: a modest scatter of early-evening windows are lit.
+    uLitRatio: { value: 0.08 + 0.05 * (variant % 3) },
     uTopY: { value: topY },
     uSeed: { value: (variant * 7.31) % 10 },
     uFTime: timeUniform,
