@@ -133,12 +133,12 @@ if (uTron > 0.5) {
     float fFace = (abs(fWn.x) > abs(fWn.z)) ? (2.0 + step(0.0, fWn.x)) : (7.0 + step(0.0, fWn.z));
     if (fy > 0.3 && fy < uTopY - 0.25) {
       // Shared code-rain field (see TRON_CODE_GLSL): 0.22 m glyph columns x
-      // 0.16 m rows, whole columns scrolling down at per-column speeds,
+      // 0.12 m rows, whole columns scrolling down at per-column speeds,
       // paragraph-gated, with an fwidth LOD to a dim wash on far towers.
       float tU = fu;
       float tFc = fFace + uSeed;
       float tSpd = 1.5 + 3.5 * thash(vec2(floor(tU / 0.22), tFc));
-      float tVw = (uTopY - fy) / 0.16 - uFTime * tSpd;
+      float tVw = (uTopY - fy) / 0.12 - uFTime * tSpd;
       ${TRON_CODE_GLSL}
       fGlow += tCodeGlow * 1.5 * uFGlowGain;
     }

@@ -439,12 +439,18 @@ float tRow = floor(tVw);
 float tBlk = floor(tU / 2.0);
 float tOn = step(0.3, thash(vec2(tBlk * 3.1 + tFc, floor(tVw / 14.0))));
 tOn *= step(fract(tU / 2.0), 0.15 + 0.85 * thash(vec2(tBlk + tFc, tRow * 0.37)));
-float tGl = step(0.42, thash(vec2(tCol * 1.31 + tFc, tRow)));
+// More off-glyphs (was 0.42) → more dark gaps punched down each column.
+float tGl = step(0.55, thash(vec2(tCol * 1.31 + tFc, tRow)));
 vec2 tFr = vec2(fract(tU / 0.22), fract(tVw));
 float tCellIn = step(0.14, tFr.x) * step(tFr.x, 0.86) * step(0.22, tFr.y) * step(tFr.y, 0.86);
 float tLod = 1.0 - smoothstep(0.35, 1.0, fwidth(tU) / 0.22);
 float tCode = mix(0.2 * tOn, tOn * tGl * tCellIn, tLod);
-float tBr = 0.6 + 0.9 * thash(vec2(tCol, tRow) + tFc);
+// Per-column base brightness: a wide, dark-skewed spread so whole columns
+// read dim or bright rather than a uniform sheet.
+float tColBr = 0.08 + 1.05 * pow(thash(vec2(tCol * 0.73 + tFc, 5.3)), 1.7);
+// Per-cell brightness with a low floor for more dark speckle, scaled by the
+// column so lit glyphs range from near-dark to hot.
+float tBr = tColBr * (0.15 + 1.1 * thash(vec2(tCol, tRow) + tFc));
 vec3 tCodeGlow = mix(TRON_BLUE, TRON_WHITE,
   step(0.94, thash(vec2(tCol * 2.17 + tFc, tRow * 0.91)))) * (tCode * tBr);
 `;
@@ -544,7 +550,7 @@ ${TRON_HASH_GLSL}`,
     float tU = (abs(tWn.x) > abs(tWn.z)) ? vTronW.z : vTronW.x;
     float tFc = (abs(tWn.x) > abs(tWn.z)) ? (2.0 + step(0.0, tWn.x)) : (7.0 + step(0.0, tWn.z));
     float tSpd = 1.5 + 3.5 * thash(vec2(floor(tU / 0.22), tFc));
-    float tVw = -vTronW.y / 0.16 - uTronTime * tSpd;
+    float tVw = -vTronW.y / 0.12 - uTronTime * tSpd;
     ${TRON_CODE_GLSL}
     totalEmissiveRadiance += (tCodeGlow * 1.5 + TRON_BLUE * 0.04) * ${codeGain.toFixed(3)};
   }
