@@ -727,6 +727,8 @@ export function SceneSetup() {
   useFrame(({ clock }) => {
     perf.begin("facades");
     tickFacades(clock.elapsedTime);
+    // Player XZ drives the tron floor-grid proximity fade (see groundShader).
+    styleUniforms.uPlayerPos.value.set(game.rendered.x, game.rendered.z);
     perf.end("facades");
   });
   return null;

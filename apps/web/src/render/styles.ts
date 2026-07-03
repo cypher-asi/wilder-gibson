@@ -375,6 +375,9 @@ export const styleUniforms = {
   uTron: { value: 0 },
   /** Shared clock driving the tron code-rain scroll (set by tickFacades). */
   uTronTime: { value: 0 },
+  /** Player world XZ, updated per-frame; fades the tron floor grid to black
+   * away from the character (blue lines only; enemy-red lines stay full). */
+  uPlayerPos: { value: new THREE.Vector2() },
   uGDetail: { value: 1 },
   uGPuddle: { value: 0 },
   uGWet: { value: 1 },

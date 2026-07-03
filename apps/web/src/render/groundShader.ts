@@ -84,6 +84,8 @@ uniform float uGPuddle;
 uniform float uGWet;
 uniform float uGSat;
 uniform vec3 uGTint;
+// Player world XZ: fades the tron floor grid to black away from the character.
+uniform vec2 uPlayerPos;
 ${STYLE_TOON_DECLS}
 // Territory: enemy-held regions tint the tron grid red.
 const vec3 TRON_RED = vec3(${TRON_RED.r.toFixed(5)}, ${TRON_RED.g.toFixed(5)}, ${TRON_RED.b.toFixed(5)});
@@ -258,7 +260,11 @@ if (uTron > 0.5) {
       // neon look, but narrow so the brightness comes from bloom, not girth.
       float tHalo = (1.0 - smoothstep(0.0, 0.45, tMajor)) * 0.06
                   + (1.0 - smoothstep(0.0, 0.16, tMinor)) * 0.03;
-      gEmissive += tGrid * (tLine * 1.4 + tHalo) * (gW.y * tFade);
+      // Tight spotlight around the character: blue lines are full within ~10 m
+      // and fade to black by ~30 m. Enemy-held (red) lines ignore the fade.
+      float tNearPlayer = 1.0 - smoothstep(10.0, 30.0, distance(wp.xz, uPlayerPos));
+      float tGridFade = mix(tNearPlayer, 1.0, tEnemy);
+      gEmissive += tGrid * (tLine * 1.4 + tHalo) * (gW.y * tFade * tGridFade);
     }
   }
   // Curb circuit: a hot hairline tracing every road edge, with its own bleed.
