@@ -10,6 +10,7 @@ import * as THREE from "three";
 import { perf } from "../perf/perf";
 import { CombatFxEvent, game } from "../state/game";
 import { RED_HEX } from "../ui/colors";
+import { cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
 
 /** Projectile travel speed (m/s); the bolt's lifetime scales with distance. */
@@ -33,16 +34,245 @@ interface ActiveFx {
 
 let nextFxId = 1;
 
+// ---------------------------------------------------------------------------
+// Shared GPU resources. Effect components mount/unmount constantly during
+// combat; keeping geometries (and immutable materials) at module scope avoids
+// re-creating and re-uploading buffers per shot. Meshes that use them carry
+// dispose={null} so R3F leaves the shared objects alone on unmount; materials
+// whose opacity is animated per instance are cloned from a base (cheap: the
+// shader program is shared) and disposed in an effect cleanup.
+// ---------------------------------------------------------------------------
+
+const TRACER_CORE_GEO = new THREE.CylinderGeometry(0.05, 0.05, 1, 6);
+const TRACER_HALO_GEO = new THREE.CylinderGeometry(0.1, 0.1, 1, 6);
+const TRACER_TRAIL_GEO = new THREE.CylinderGeometry(0.035, 0.035, 1, 5);
+const FLASH_TONGUE_GEO = new THREE.PlaneGeometry(0.62, 0.16);
+const FLASH_SPIKE_GEO = new THREE.PlaneGeometry(0.34, 0.12);
+const FLASH_FIN_GEO = new THREE.PlaneGeometry(0.5, 0.14);
+const IMPACT_PART_GEO = new THREE.SphereGeometry(1, 4, 4);
+const SHELL_GEO = new THREE.CylinderGeometry(0.014, 0.014, 0.05, 6);
+const HIT_SPARK_GEO = new THREE.SphereGeometry(0.22, 8, 8);
+const SHOCKWAVE_GEO = new THREE.RingGeometry(0.82, 1.0, 48);
+const DEATH_RING_GEO = new THREE.RingGeometry(0.7, 0.85, 32);
+
+const TRACER_CORE_MAT = new THREE.MeshBasicMaterial({
+  color: "#fffbe8",
+  toneMapped: false,
+});
+const TRACER_HALO_MAT = new THREE.MeshBasicMaterial({
+  color: "#ffca6a",
+  transparent: true,
+  opacity: 0.55,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const TRACER_TRAIL_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#ffd27a",
+  transparent: true,
+  opacity: 0.5,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const FLASH_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#ffe3a0",
+  transparent: true,
+  opacity: 1,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  side: THREE.DoubleSide,
+});
+const SHELL_MAT_BASE = new THREE.MeshStandardMaterial({
+  color: "#d9a63c",
+  metalness: 0.8,
+  roughness: 0.35,
+  transparent: true,
+  opacity: 1,
+});
+const HIT_SPARK_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#ffe9b0",
+  transparent: true,
+  opacity: 0.55,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const SHOCKWAVE_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: "#40e8ff",
+  transparent: true,
+  opacity: 0.85,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+const DEATH_RING_MAT_BASE = new THREE.MeshBasicMaterial({
+  color: RED_HEX,
+  transparent: true,
+  opacity: 0.7,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+});
+
+/** Per-instance clone of a base material, disposed when the effect unmounts. */
+function useClonedMaterial<T extends THREE.Material>(base: T): T {
+  const mat = useMemo(() => base.clone() as T, [base]);
+  useEffect(() => () => mat.dispose(), [mat]);
+  return mat;
+}
+
+// ---------------------------------------------------------------------------
+// Pooled damage numbers. The previous drei <Html> floats created/destroyed
+// DOM nodes per hit and forced layout work every frame; these are plain
+// sprites with small canvas textures, driven by one imperative update loop
+// with zero React/DOM involvement.
+// ---------------------------------------------------------------------------
+
+const DMG_POOL_SIZE = 24;
+const DMG_CANVAS_W = 96;
+const DMG_CANVAS_H = 40;
+const DMG_BASE_W = 1.15;
+const DMG_BASE_H = DMG_BASE_W * (DMG_CANVAS_H / DMG_CANVAS_W);
+
+interface DmgEntry {
+  sprite: THREE.Sprite;
+  material: THREE.SpriteMaterial;
+  texture: THREE.CanvasTexture;
+  ctx: CanvasRenderingContext2D;
+  bornAt: number;
+  x: number;
+  y: number;
+  z: number;
+  driftX: number;
+  driftZ: number;
+  active: boolean;
+}
+
+class DamageNumberPool {
+  readonly group = new THREE.Group();
+  private entries: DmgEntry[] = [];
+  private cursor = 0;
+
+  constructor() {
+    for (let i = 0; i < DMG_POOL_SIZE; i++) {
+      const canvas = document.createElement("canvas");
+      canvas.width = DMG_CANVAS_W;
+      canvas.height = DMG_CANVAS_H;
+      const ctx = canvas.getContext("2d")!;
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthWrite: false,
+        depthTest: false, // always readable, like the old DOM overlay
+        toneMapped: false,
+      });
+      const sprite = new THREE.Sprite(material);
+      sprite.visible = false;
+      sprite.renderOrder = 100;
+      this.group.add(sprite);
+      this.entries.push({
+        sprite,
+        material,
+        texture,
+        ctx,
+        bornAt: 0,
+        x: 0,
+        y: 0,
+        z: 0,
+        driftX: 0,
+        driftZ: 0,
+        active: false,
+      });
+    }
+  }
+
+  spawn(x: number, y: number, z: number, damage: number) {
+    const e = this.entries[this.cursor];
+    this.cursor = (this.cursor + 1) % this.entries.length;
+    this.draw(e, damage);
+    e.bornAt = performance.now();
+    e.x = x;
+    e.y = y;
+    e.z = z;
+    e.driftX = (Math.random() - 0.5) * 1.1;
+    e.driftZ = (Math.random() - 0.5) * 1.1;
+    e.active = true;
+    e.sprite.visible = true;
+  }
+
+  /** Mirrors the old CSS dmg-rise keyframes: pop in, drift up, fade out. */
+  update(now: number) {
+    // The old DOM floats were constant screen-size; scale with camera
+    // distance so the sprites read the same at any zoom.
+    const zoom = cameraState.distance / 48;
+    for (const e of this.entries) {
+      if (!e.active) continue;
+      const t = (now - e.bornAt) / LIFETIME_MS.hit;
+      if (t >= 1) {
+        e.active = false;
+        e.sprite.visible = false;
+        continue;
+      }
+      const ease = 1 - (1 - t) * (1 - t);
+      e.sprite.position.set(
+        e.x + e.driftX * ease,
+        e.y + ease * 1.3,
+        e.z + e.driftZ * ease,
+      );
+      const pop =
+        (t < 0.15 ? 0.7 + (t / 0.15) * 0.5 : 1.2 - ((t - 0.15) / 0.85) * 0.25) *
+        zoom;
+      e.sprite.scale.set(DMG_BASE_W * pop, DMG_BASE_H * pop, 1);
+      e.material.opacity = t < 0.15 ? t / 0.15 : 1 - (t - 0.15) / 0.85;
+    }
+  }
+
+  private draw(e: DmgEntry, damage: number) {
+    const { ctx } = e;
+    const text = String(Math.round(damage));
+    ctx.clearRect(0, 0, DMG_CANVAS_W, DMG_CANVAS_H);
+    ctx.font = "800 26px Orbitron, 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    // Two passes to match the CSS text-shadow: dark drop + red glow.
+    ctx.shadowColor = "#000";
+    ctx.shadowBlur = 2;
+    ctx.shadowOffsetY = 1;
+    ctx.fillStyle = RED_HEX;
+    ctx.fillText(text, DMG_CANVAS_W / 2, DMG_CANVAS_H / 2);
+    ctx.shadowColor = "rgba(255, 106, 124, 0.7)";
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 0;
+    ctx.fillText(text, DMG_CANVAS_W / 2, DMG_CANVAS_H / 2);
+    e.texture.needsUpdate = true;
+  }
+
+  dispose() {
+    for (const e of this.entries) {
+      e.texture.dispose();
+      e.material.dispose();
+    }
+  }
+}
+
 export function CombatFx() {
   const [effects, setEffects] = useState<ActiveFx[]>([]);
+  const dmgPool = useMemo(() => new DamageNumberPool(), []);
+  useEffect(() => () => dmgPool.dispose(), [dmgPool]);
+  if (import.meta.env.DEV) {
+    (window as unknown as { __dmgPool?: DamageNumberPool }).__dmgPool = dmgPool;
+  }
 
   useFrame(() => {
-    if (game.fx.length === 0) return;
     perf.begin("combatFx");
-    const drained = game.fx.splice(0, game.fx.length);
-    setEffects((prev) =>
-      [...prev, ...drained.map((ev) => ({ id: nextFxId++, ev }))].slice(-48),
-    );
+    if (game.fx.length > 0) {
+      const drained = game.fx.splice(0, game.fx.length);
+      for (const ev of drained) {
+        if (ev.type === "hit") dmgPool.spawn(ev.x, ev.y, ev.z, ev.damage);
+      }
+      setEffects((prev) =>
+        [...prev, ...drained.map((ev) => ({ id: nextFxId++, ev }))].slice(-48),
+      );
+    }
+    dmgPool.update(performance.now());
     perf.end("combatFx");
   });
 
@@ -60,6 +290,7 @@ export function CombatFx() {
 
   return (
     <>
+      <primitive object={dmgPool.group} />
       {effects.map(({ id, ev }) =>
         ev.type === "tracer" ? (
           <Tracer key={id} ev={ev} />
@@ -91,6 +322,7 @@ const UP = new THREE.Vector3(0, 1, 0);
 function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
   const group = useRef<THREE.Group>(null);
   const trail = useRef<THREE.Mesh>(null);
+  const trailMat = useClonedMaterial(TRACER_TRAIL_MAT_BASE);
 
   const { from, dir, dist, quat, travelMs } = useMemo(() => {
     const from = new THREE.Vector3(ev.fx, ev.fy, ev.fz);
@@ -118,8 +350,7 @@ function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
       const len = Math.min(head, 0.9);
       trail.current.scale.set(1, Math.max(len, 0.05), 1);
       trail.current.position.set(0, -len / 2 - 0.06, 0);
-      (trail.current.material as THREE.MeshBasicMaterial).opacity =
-        THREE.MathUtils.clamp(1 - t * 0.5, 0, 1) * 0.5;
+      trailMat.opacity = THREE.MathUtils.clamp(1 - t * 0.5, 0, 1) * 0.5;
     }
   });
 
@@ -127,32 +358,26 @@ function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
     <group ref={group} quaternion={quat} visible={false}>
       {/* Bolt head: hot elongated slug. Opaque core so it stays visible on
           bright daylight backgrounds where additive glow washes out. */}
-      <mesh scale={[1, 0.45, 1]}>
-        <cylinderGeometry args={[0.05, 0.05, 1, 6]} />
-        <meshBasicMaterial color="#fffbe8" toneMapped={false} />
-      </mesh>
+      <mesh
+        scale={[1, 0.45, 1]}
+        geometry={TRACER_CORE_GEO}
+        material={TRACER_CORE_MAT}
+        dispose={null}
+      />
       {/* Additive halo around the core. */}
-      <mesh scale={[1, 0.55, 1]}>
-        <cylinderGeometry args={[0.1, 0.1, 1, 6]} />
-        <meshBasicMaterial
-          color="#ffca6a"
-          transparent
-          opacity={0.55}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </mesh>
+      <mesh
+        scale={[1, 0.55, 1]}
+        geometry={TRACER_HALO_GEO}
+        material={TRACER_HALO_MAT}
+        dispose={null}
+      />
       {/* Fading streak trail behind the bolt. */}
-      <mesh ref={trail}>
-        <cylinderGeometry args={[0.035, 0.035, 1, 5]} />
-        <meshBasicMaterial
-          color="#ffd27a"
-          transparent
-          opacity={0.5}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </mesh>
+      <mesh
+        ref={trail}
+        geometry={TRACER_TRAIL_GEO}
+        material={trailMat}
+        dispose={null}
+      />
     </group>
   );
 }
@@ -161,18 +386,7 @@ function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
 function MuzzleFlashFx({ ev }: { ev: Extract<CombatFxEvent, { type: "flash" }> }) {
   const group = useRef<THREE.Group>(null);
   const light = useRef<THREE.PointLight>(null);
-  const material = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        color: "#ffe3a0",
-        transparent: true,
-        opacity: 1,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-      }),
-    [],
-  );
+  const material = useClonedMaterial(FLASH_MAT_BASE);
   const baseScale = useMemo(() => 0.85 + Math.random() * 0.35, []);
 
   useFrame(() => {
@@ -194,17 +408,28 @@ function MuzzleFlashFx({ ev }: { ev: Extract<CombatFxEvent, { type: "flash" }> }
       visible={false}
     >
       {/* long tongue along the barrel (flat, reads from the top-down camera) */}
-      <mesh material={material} rotation={[-Math.PI / 2, 0, 0]} position={[0.28, 0, 0]}>
-        <planeGeometry args={[0.62, 0.16]} />
-      </mesh>
+      <mesh
+        geometry={FLASH_TONGUE_GEO}
+        material={material}
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[0.28, 0, 0]}
+        dispose={null}
+      />
       {/* side spikes */}
-      <mesh material={material} rotation={[-Math.PI / 2, 0, Math.PI / 2]} position={[0.1, 0, 0]}>
-        <planeGeometry args={[0.34, 0.12]} />
-      </mesh>
+      <mesh
+        geometry={FLASH_SPIKE_GEO}
+        material={material}
+        rotation={[-Math.PI / 2, 0, Math.PI / 2]}
+        position={[0.1, 0, 0]}
+        dispose={null}
+      />
       {/* vertical fin so the flash also reads at low camera angles */}
-      <mesh material={material} position={[0.28, 0, 0]}>
-        <planeGeometry args={[0.5, 0.14]} />
-      </mesh>
+      <mesh
+        geometry={FLASH_FIN_GEO}
+        material={material}
+        position={[0.28, 0, 0]}
+        dispose={null}
+      />
       <pointLight ref={light} color="#ffbf60" intensity={22} distance={8} />
     </group>
   );
@@ -216,17 +441,11 @@ const IMPACT_GRAVITY = 7;
 /** Directional spark burst where a shot lands (flesh) or whiffs (dust). */
 function ImpactBurst({ ev }: { ev: Extract<CombatFxEvent, { type: "impact" }> }) {
   const group = useRef<THREE.Group>(null);
-  const material = useMemo(
-    () =>
-      new THREE.MeshBasicMaterial({
-        color: IMPACT_COLORS[ev.kind],
-        transparent: true,
-        opacity: 0.95,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    [ev.kind],
-  );
+  const material = useClonedMaterial(HIT_SPARK_MAT_BASE);
+  useMemo(() => {
+    material.color.set(IMPACT_COLORS[ev.kind]);
+    material.opacity = 0.95;
+  }, [material, ev.kind]);
   // Sparks fly back along the incoming shot with random spread + lift.
   const parts = useMemo(
     () =>
@@ -259,9 +478,13 @@ function ImpactBurst({ ev }: { ev: Extract<CombatFxEvent, { type: "impact" }> })
   return (
     <group ref={group} position={[ev.x, ev.y, ev.z]}>
       {parts.map((p, i) => (
-        <mesh key={i} material={material}>
-          <sphereGeometry args={[p.size, 4, 4]} />
-        </mesh>
+        <mesh
+          key={i}
+          geometry={IMPACT_PART_GEO}
+          material={material}
+          scale={p.size}
+          dispose={null}
+        />
       ))}
     </group>
   );
@@ -270,6 +493,7 @@ function ImpactBurst({ ev }: { ev: Extract<CombatFxEvent, { type: "impact" }> })
 /** Spent casing ejected sideways with spin and gravity. */
 function ShellCasing({ ev }: { ev: Extract<CombatFxEvent, { type: "shell" }> }) {
   const mesh = useRef<THREE.Mesh>(null);
+  const material = useClonedMaterial(SHELL_MAT_BASE);
   const v = useMemo(
     () => ({
       x: ev.dirX * (1.0 + Math.random() * 0.9) + (Math.random() - 0.5) * 0.5,
@@ -296,29 +520,24 @@ function ShellCasing({ ev }: { ev: Extract<CombatFxEvent, { type: "shell" }> }) 
       mesh.current.rotation.x = v.spinX * t;
       mesh.current.rotation.z = v.spinZ * t;
     }
-    (mesh.current.material as THREE.MeshStandardMaterial).opacity =
-      THREE.MathUtils.clamp((1 - life) * 4, 0, 1);
+    material.opacity = THREE.MathUtils.clamp((1 - life) * 4, 0, 1);
   });
 
   return (
-    <mesh ref={mesh} visible={false}>
-      <cylinderGeometry args={[0.014, 0.014, 0.05, 6]} />
-      <meshStandardMaterial
-        color="#d9a63c"
-        metalness={0.8}
-        roughness={0.35}
-        transparent
-        opacity={1}
-      />
-    </mesh>
+    <mesh
+      ref={mesh}
+      visible={false}
+      geometry={SHELL_GEO}
+      material={material}
+      dispose={null}
+    />
   );
 }
 
-/** Impact spark + floating damage number. */
+/** Impact spark (the floating damage number comes from DamageNumberPool). */
 function HitFx({ ev }: { ev: Extract<CombatFxEvent, { type: "hit" }> }) {
   const spark = useRef<THREE.Mesh>(null);
-  // Random horizontal drift so rapid hits scatter up and around.
-  const drift = useMemo(() => `${(Math.random() - 0.5) * 64}px`, []);
+  const material = useClonedMaterial(HIT_SPARK_MAT_BASE);
 
   useFrame(() => {
     if (!spark.current) return;
@@ -326,38 +545,25 @@ function HitFx({ ev }: { ev: Extract<CombatFxEvent, { type: "hit" }> }) {
     spark.current.visible = t < 1;
     if (t < 1) {
       spark.current.scale.setScalar(0.35 + t * 0.65);
-      (spark.current.material as THREE.MeshBasicMaterial).opacity =
-        THREE.MathUtils.clamp(1 - t, 0, 1) * 0.55;
+      material.opacity = THREE.MathUtils.clamp(1 - t, 0, 1) * 0.55;
     }
   });
 
   return (
-    <group position={[ev.x, ev.y, ev.z]}>
-      <mesh ref={spark}>
-        <sphereGeometry args={[0.22, 8, 8]} />
-        <meshBasicMaterial
-          color="#ffe9b0"
-          transparent
-          opacity={0.55}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </mesh>
-      <Html center zIndexRange={[4, 0]} style={{ pointerEvents: "none" }}>
-        <div
-          className="dmg-float"
-          style={{ "--dx": drift } as CSSProperties}
-        >
-          {Math.round(ev.damage)}
-        </div>
-      </Html>
-    </group>
+    <mesh
+      ref={spark}
+      position={[ev.x, ev.y, ev.z]}
+      geometry={HIT_SPARK_GEO}
+      material={material}
+      dispose={null}
+    />
   );
 }
 
 /** Shockwave ability: cyan ring expanding to the damage radius. */
 function ShockwaveRing({ ev }: { ev: Extract<CombatFxEvent, { type: "shockwave" }> }) {
   const ring = useRef<THREE.Mesh>(null);
+  const material = useClonedMaterial(SHOCKWAVE_MAT_BASE);
   const RADIUS = 4; // mirrors wilder-combat SHOCKWAVE_RADIUS
 
   useFrame(() => {
@@ -367,28 +573,26 @@ function ShockwaveRing({ ev }: { ev: Extract<CombatFxEvent, { type: "shockwave" 
     if (t < 1) {
       const ease = 1 - (1 - t) * (1 - t);
       ring.current.scale.setScalar(0.3 + ease * RADIUS);
-      (ring.current.material as THREE.MeshBasicMaterial).opacity =
-        THREE.MathUtils.clamp(1 - t, 0, 1) * 0.85;
+      material.opacity = THREE.MathUtils.clamp(1 - t, 0, 1) * 0.85;
     }
   });
 
   return (
-    <mesh ref={ring} position={[ev.x, 0.08, ev.z]} rotation={[-Math.PI / 2, 0, 0]}>
-      <ringGeometry args={[0.82, 1.0, 48]} />
-      <meshBasicMaterial
-        color="#40e8ff"
-        transparent
-        opacity={0.85}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-      />
-    </mesh>
+    <mesh
+      ref={ring}
+      position={[ev.x, 0.08, ev.z]}
+      rotation={[-Math.PI / 2, 0, 0]}
+      geometry={SHOCKWAVE_GEO}
+      material={material}
+      dispose={null}
+    />
   );
 }
 
 /** Expanding ground ring when something dies. */
 function DeathPulse({ ev }: { ev: Extract<CombatFxEvent, { type: "death" }> }) {
   const ring = useRef<THREE.Mesh>(null);
+  const material = useClonedMaterial(DEATH_RING_MAT_BASE);
 
   useFrame(() => {
     if (!ring.current) return;
@@ -396,23 +600,20 @@ function DeathPulse({ ev }: { ev: Extract<CombatFxEvent, { type: "death" }> }) {
     ring.current.visible = t < 1;
     if (t < 1) {
       ring.current.scale.setScalar(0.3 + t * 2.2);
-      (ring.current.material as THREE.MeshBasicMaterial).opacity =
-        THREE.MathUtils.clamp(1 - t, 0, 1) * 0.7;
+      material.opacity = THREE.MathUtils.clamp(1 - t, 0, 1) * 0.7;
     }
   });
 
   return (
     <group>
-      <mesh ref={ring} position={[ev.x, 0.06, ev.z]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.7, 0.85, 32]} />
-        <meshBasicMaterial
-          color={RED_HEX}
-          transparent
-          opacity={0.7}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </mesh>
+      <mesh
+        ref={ring}
+        position={[ev.x, 0.06, ev.z]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        geometry={DEATH_RING_GEO}
+        material={material}
+        dispose={null}
+      />
       {/* Red skull that floats up over the corpse. */}
       <group position={[ev.x, ev.y + 1.2, ev.z]}>
         <Html center zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>

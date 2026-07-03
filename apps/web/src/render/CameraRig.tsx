@@ -50,6 +50,9 @@ export function cameraKick(strength: number, yaw: number) {
  * (styleRuntime.fogBaseDensity) and thins as the camera pulls back. */
 const FOG_BASE_DISTANCE = 48;
 
+/** Scratch vector for the follow target, reused across frames. */
+const nextTargetScratch = new THREE.Vector3();
+
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
 const PITCH_FAR = THREE.MathUtils.degToRad(62);
 /** Total pitch band while RMB-dragging; the low end is near-horizontal. */
@@ -163,7 +166,7 @@ export function CameraRig() {
     const tz = player ? player.z : game.predicted.z;
 
     // Smooth follow; snap on long-range teleports (death/extraction respawn).
-    const next = new THREE.Vector3(tx, 0, tz);
+    const next = nextTargetScratch.set(tx, 0, tz);
     if (target.current.distanceTo(next) > 40) {
       target.current.copy(next);
     } else {

@@ -24,6 +24,11 @@ import { groundHeightAt } from "./Ground";
 
 const TICK_DT = 1 / 20;
 
+// Scratch objects reused across frames to avoid per-frame allocations.
+const aimNdcScratch = new THREE.Vector2();
+const aimHitScratch = new THREE.Vector3();
+const muzzleScratch = new THREE.Vector3();
+
 /** Client mirror of server weapon cooldowns (seconds) for fire pacing. */
 const WEAPON_COOLDOWN: Record<string, number> = {
   Pistol: 0.3,
@@ -391,11 +396,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     const px = game.rendered.x;
     const pz = game.rendered.z;
     groundPlane.current.constant = -groundHeightAt(px, pz);
-    raycaster.current.setFromCamera(
-      new THREE.Vector2(pointer.current.x, pointer.current.y),
-      camera,
-    );
-    const hit = new THREE.Vector3();
+    aimNdcScratch.set(pointer.current.x, pointer.current.y);
+    raycaster.current.setFromCamera(aimNdcScratch, camera);
+    const hit = aimHitScratch;
     if (!raycaster.current.ray.intersectPlane(groundPlane.current, hit)) return;
     game.aim.x = hit.x;
     game.aim.z = hit.z;
@@ -469,7 +472,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       );
       const mount = game.gunMounts.get(game.localEntityId);
       const muzzle = mount
-        ? mount.muzzle.getWorldPosition(new THREE.Vector3())
+        ? mount.muzzle.getWorldPosition(muzzleScratch)
         : null;
       const mx = muzzle?.x ?? game.rendered.x + Math.cos(yaw) * 0.5;
       const my = muzzle?.y ?? 1.35;
