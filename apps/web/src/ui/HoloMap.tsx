@@ -307,14 +307,44 @@ function chamfer(set: Uint8Array, w: number, h: number, feat?: Uint8Array): Int3
   return d;
 }
 
+/** Separable box blur, `passes` iterations (2+ approximates a Gaussian).
+ * Edge texels are clamped. Radius is in texels. */
+function boxBlur(f: Float32Array, w: number, h: number, r: number, passes: number) {
+  const tmp = new Float32Array(f.length);
+  const inv = 1 / (2 * r + 1);
+  for (let p = 0; p < passes; p++) {
+    // Horizontal, f -> tmp.
+    for (let y = 0; y < h; y++) {
+      const row = y * w;
+      let acc = 0;
+      for (let x = -r; x <= r; x++) acc += f[row + Math.min(Math.max(x, 0), w - 1)];
+      for (let x = 0; x < w; x++) {
+        tmp[row + x] = acc * inv;
+        acc += f[row + Math.min(x + r + 1, w - 1)] - f[row + Math.max(x - r, 0)];
+      }
+    }
+    // Vertical, tmp -> f.
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let y = -r; y <= r; y++) acc += tmp[Math.min(Math.max(y, 0), h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        f[y * w + x] = acc * inv;
+        acc += tmp[Math.min(y + r + 1, h - 1) * w + x] - tmp[Math.max(y - r, 0) * w + x];
+      }
+    }
+  }
+}
+
 /** Faint land-fabric plane (sidewalks, plazas, parks, island silhouette).
  * Roads come from the real street mesh, so they stay dim here.
  *
  * The island silhouette is cut with a signed distance field baked from the
- * tile grid: distance values interpolate bilinearly into smooth curves, so
- * the coastline stays a crisp, rounded, 1px anti-aliased edge at any zoom —
- * unlike the raw tile mask, whose bilinear iso-contour is stair-stepped at
- * texel granularity no matter how it's filtered. */
+ * tile grid. The SDF alone is not enough: a diagonal coastline is stored as
+ * literal 1-tile stair-steps, and an exact SDF faithfully reproduces those
+ * steps with crisp edges. So the field is low-passed (small Gaussian-ish
+ * blur) before baking — the blurred zero contour is the smooth line the
+ * staircase approximates — and the shader then cuts it with a screen-space
+ * fwidth smoothstep for a ~1px anti-aliased edge at any zoom. */
 function buildGround(): { ground: THREE.Mesh } {
   const g = getCityGrid()!;
   const lut = new Uint8Array(8);
@@ -343,12 +373,28 @@ function buildGround(): { ground: THREE.Mesh } {
   const distToLand = chamfer(land, w, h, intensity);
   const distToWater = chamfer(water, w, h);
 
+  // Signed distance in tiles (positive inside land), clamped to ±8 tiles,
+  // then blurred so the zero contour rounds off the tile staircase instead
+  // of tracing it exactly.
+  const sdf = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const sd = (distToWater[i] - distToLand[i]) / 3;
+    sdf[i] = Math.max(-8, Math.min(8, sd));
+  }
+  boxBlur(sdf, w, h, 2, 2);
+
+  // The interior fabric regions (sidewalk vs building vs park) are stepped
+  // tile shapes too; a light blur softens their boundaries the same way.
+  const fab = new Float32Array(n);
+  for (let i = 0; i < n; i++) fab[i] = intensity[i];
+  boxBlur(fab, w, h, 1, 2);
+
   // RG texture: R = intensity, G = signed distance to the coastline
-  // (128 = coast, 16 per tile, positive inside land, clamped to ±8 tiles).
+  // (128 = coast, 16 per tile, positive inside land).
   const data = new Uint8Array(n * 2);
   for (let i = 0; i < n; i++) {
-    data[i * 2] = intensity[i];
-    const sd = ((distToWater[i] - distToLand[i]) / 3) * 16 + 128;
+    data[i * 2] = fab[i];
+    const sd = sdf[i] * 16 + 128;
     data[i * 2 + 1] = sd < 0 ? 0 : sd > 255 ? 255 : sd;
   }
   const tex = new THREE.DataTexture(data, w, h, THREE.RGFormat, THREE.UnsignedByteType);
