@@ -37,6 +37,7 @@ import {
   useGame,
 } from "../state/game";
 import { RED_NUM } from "../ui/colors";
+import { CATEGORY_TICK, ITEM_INFO, ItemCategory } from "../ui/ItemIcon";
 import { groundHeightAt } from "./Ground";
 import { itemSpriteMaterialTinted } from "./itemSprite";
 import { isTronStyle } from "./styles";
@@ -1030,11 +1031,46 @@ const crateIconHaloMat = new THREE.SpriteMaterial({
 });
 let cratePulseFrame = -1;
 
+// Small, category-distinct shapes for scattered death-drop pickups (variant 0):
+// each resource/material/currency/etc. reads as its own little object rather
+// than an identical crate. Shared geometry + one material per category (dozens
+// can litter the ground after a firefight).
+const DROP_GEO: Record<ItemCategory, THREE.BufferGeometry> = {
+  weapon: new THREE.BoxGeometry(0.1, 0.1, 0.44),
+  armor: new THREE.BoxGeometry(0.32, 0.09, 0.32),
+  consumable: new THREE.CapsuleGeometry(0.09, 0.16, 4, 10),
+  ammo: new THREE.BoxGeometry(0.24, 0.16, 0.3),
+  resource: new THREE.DodecahedronGeometry(0.2, 0),
+  material: new THREE.BoxGeometry(0.26, 0.22, 0.26),
+  currency: new THREE.CylinderGeometry(0.18, 0.18, 0.04, 16),
+  gadget: new THREE.IcosahedronGeometry(0.19, 0),
+};
+const dropMatCache = new Map<ItemCategory, THREE.MeshStandardMaterial>();
+function dropMaterial(cat: ItemCategory): THREE.MeshStandardMaterial {
+  const cached = dropMatCache.get(cat);
+  if (cached) return cached;
+  const color = CATEGORY_TICK[cat];
+  const mat = new THREE.MeshStandardMaterial({
+    color,
+    emissive: color,
+    emissiveIntensity: 0.55,
+    metalness: 0.45,
+    roughness: 0.4,
+  });
+  dropMatCache.set(cat, mat);
+  return mat;
+}
+
 function LootCrate({ entity }: { entity: GameEntity }) {
-  // Ammo caches (variant 1) get a brighter cap + ground glow so ammo is easy
-  // to spot without a tall beacon beam cluttering the scene.
+  // Ammo caches (variant 1) stay as a highlighted stockpile crate; death drops
+  // (variant 0) render as a small, spinning, category-shaped pickup.
   const isAmmo = entity.variant === 1;
+  const cat: ItemCategory | null = entity.item
+    ? (ITEM_INFO[entity.item]?.category ?? null)
+    : null;
   const icon = useRef<THREE.Group>(null);
+  const spinner = useRef<THREE.Group>(null);
+  const iconBaseY = isAmmo ? 1.02 : 0.66;
   useFrame(({ clock }) => {
     // Shared materials only need one update per frame, not one per crate.
     if (cratePulseFrame !== clock.elapsedTime) {
@@ -1045,9 +1081,17 @@ function LootCrate({ entity }: { entity: GameEntity }) {
     }
     // Gentle per-crate bob for the floating icon (phase from the entity id).
     if (icon.current) {
-      icon.current.position.y = 1.02 + Math.sin(clock.elapsedTime * 1.8 + entity.id) * 0.05;
+      icon.current.position.y = iconBaseY + Math.sin(clock.elapsedTime * 1.8 + entity.id) * 0.05;
+    }
+    // Death-drop objects spin + bob so a scattered pile reads as loose items.
+    if (spinner.current) {
+      spinner.current.rotation.y = clock.elapsedTime * 1.8 + entity.id;
+      spinner.current.position.y = 0.32 + Math.sin(clock.elapsedTime * 2 + entity.id) * 0.06;
     }
   });
+
+  const glow = cat ? CATEGORY_TICK[cat] : "#ffffff";
+
   return (
     <group
       onClick={(e) => {
@@ -1057,31 +1101,45 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       onPointerOver={() => (document.body.style.cursor = "pointer")}
       onPointerOut={() => (document.body.style.cursor = "default")}
     >
-      <mesh
-        position={[0, 0.28, 0]}
-        castShadow
-        geometry={crateBoxGeo}
-        material={isAmmo ? ammoBodyMat : crateBodyMat}
-      />
-      <mesh
-        position={[0, 0.58, 0]}
-        geometry={crateCapGeo}
-        material={isAmmo ? ammoCapMat : crateCapMat}
-      />
-      {/* White glowing icon of the contents, floating above the crate: a soft
-          additive halo behind the item's inventory glyph. Subtle at range but
-          instantly tells you what the drop is. */}
+      {isAmmo ? (
+        <>
+          <mesh position={[0, 0.28, 0]} castShadow geometry={crateBoxGeo} material={ammoBodyMat} />
+          <mesh position={[0, 0.58, 0]} geometry={crateCapGeo} material={ammoCapMat} />
+        </>
+      ) : cat ? (
+        <group ref={spinner}>
+          <mesh
+            geometry={DROP_GEO[cat]}
+            material={dropMaterial(cat)}
+            rotation={cat === "currency" ? [Math.PI / 2, 0, 0] : [0, 0, 0]}
+            castShadow
+          />
+        </group>
+      ) : (
+        // Unknown/iconless drop: fall back to a small generic crate.
+        <mesh position={[0, 0.18, 0]} castShadow geometry={crateBoxGeo} scale={0.55} material={crateBodyMat} />
+      )}
+      {/* Glowing icon of the contents, floating above the pickup: a soft halo
+          behind the item's category-tinted glyph so its type reads at a glance. */}
       {entity.item && (
-        <group ref={icon} position={[0, 1.02, 0]}>
-          <sprite material={crateIconHaloMat} scale={[0.95, 0.95, 1]} raycast={noRaycast} />
-          <sprite material={itemSpriteMaterialTinted(entity.item)} scale={[0.5, 0.5, 1]} raycast={noRaycast} />
+        <group ref={icon} position={[0, iconBaseY, 0]}>
+          <sprite material={crateIconHaloMat} scale={[0.8, 0.8, 1]} raycast={noRaycast} />
+          <sprite
+            material={itemSpriteMaterialTinted(entity.item)}
+            scale={isAmmo ? [0.5, 0.5, 1] : [0.42, 0.42, 1]}
+            raycast={noRaycast}
+          />
         </group>
       )}
       {/* No real pointLight here: with ~150 ammo caches replicated, per-crate
           lights multiply every material's shading cost (each forward-rendered
           fragment loops over all scene lights) and force shader recompiles.
-          A flat ground glow marks the cache instead of a tall beacon beam. */}
-      {isAmmo && <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />}
+          A flat ground glow marks the pickup instead of a tall beacon beam. */}
+      {isAmmo ? (
+        <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />
+      ) : (
+        <GroundGlow color={glow} radius={0.85} opacity={0.45} />
+      )}
     </group>
   );
 }
