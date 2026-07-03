@@ -39,6 +39,17 @@ await new Promise((r) => setTimeout(r, 3000));
 await page.screenshot({ path: `tools/screens/${outPrefix}-3d.png` });
 console.log(`saved tools/screens/${outPrefix}-3d.png`);
 
+// WASD pan: hold W for a second, then D.
+await page.keyboard.down("KeyW");
+await new Promise((r) => setTimeout(r, 1000));
+await page.keyboard.up("KeyW");
+await page.keyboard.down("KeyD");
+await new Promise((r) => setTimeout(r, 1000));
+await page.keyboard.up("KeyD");
+await new Promise((r) => setTimeout(r, 800));
+await page.screenshot({ path: `tools/screens/${outPrefix}-wasd.png` });
+console.log(`saved tools/screens/${outPrefix}-wasd.png`);
+
 // Zoom out to city scale.
 await page.mouse.move(800, 450);
 for (let i = 0; i < 14; i++) {

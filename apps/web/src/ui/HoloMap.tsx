@@ -29,6 +29,8 @@ import { game, useGame } from "../state/game";
 const FOV = 40;
 const MIN_DIST = 60;
 const MAX_DIST = 40000;
+/** Opening zoom: most of the island in frame. */
+const OPEN_DIST = 9000;
 const PITCH_3D = 0.6; // ~34 deg, matches the tilted hologram look
 const PITCH_TOP = 1.5; // ~86 deg: visually top-down, camera up stays stable
 
@@ -44,6 +46,8 @@ interface HoloView {
   sTz: number;
   sDist: number;
   sPitch: number;
+  /** Held WASD/arrow pan keys. */
+  keys: Record<string, boolean>;
 }
 
 export function HoloMap() {
@@ -56,20 +60,22 @@ function HoloMapView() {
   const view = useRef<HoloView>({
     tx: game.predicted.x,
     tz: game.predicted.z,
-    dist: 1200,
+    dist: OPEN_DIST,
     yaw: Math.PI / 2, // camera south of target -> north (-Z) is up on screen
     topDown: false,
     follow: true,
     sTx: game.predicted.x,
     sTz: game.predicted.z,
-    sDist: 1200,
+    sDist: OPEN_DIST,
     sPitch: PITCH_3D,
+    keys: {},
   });
   const [topDown, setTopDown] = useState(false);
   const drag = useRef<{ x: number; y: number; button: number } | null>(null);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       if (e.code === "Escape") useGame.getState().set({ mapOpen: false });
       if (e.code === "KeyT") {
         setTopDown((t) => {
@@ -77,9 +83,20 @@ function HoloMapView() {
           return !t;
         });
       }
+      view.current.keys[e.code] = true;
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKeyUp = (e: KeyboardEvent) => {
+      view.current.keys[e.code] = false;
+    };
+    const onBlur = () => (view.current.keys = {});
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, []);
 
   return (
@@ -144,8 +161,8 @@ function HoloMapView() {
         {topDown ? "VIEW: TOP-DOWN" : "VIEW: 3D"} <span className="action-key">T</span>
       </button>
       <div className="map-overlay-hint">
-        DRAG pan · RIGHT-DRAG rotate · WHEEL zoom · T view · DOUBLE-CLICK center on
-        player · M / ESC close
+        WASD / DRAG pan · RIGHT-DRAG rotate · WHEEL zoom · T view · DOUBLE-CLICK
+        center on player · M / ESC close
       </div>
       <PositionBadge />
     </div>
@@ -178,13 +195,34 @@ function HoloScene({ view }: { view: RefObject<HoloView> }) {
 /** Smoothed pan/zoom/pitch camera around a ground look-at target. */
 function HoloCamera({ view }: { view: RefObject<HoloView> }) {
   const camera = useThree((s) => s.camera);
-  useFrame((_, dt) => {
+  useFrame((_, rawDt) => {
     const v = view.current;
+    const dt = Math.min(rawDt, 0.1);
+    // WASD/arrow pan across the ground plane, screen-relative, zoom-scaled:
+    // W is screen-up (away from the camera), A/D strafe.
+    const k = v.keys;
+    let mx = 0;
+    let mz = 0;
+    if (k.KeyW || k.ArrowUp) mz -= 1;
+    if (k.KeyS || k.ArrowDown) mz += 1;
+    if (k.KeyA || k.ArrowLeft) mx -= 1;
+    if (k.KeyD || k.ArrowRight) mx += 1;
+    if (mx !== 0 || mz !== 0) {
+      v.follow = false;
+      const len = Math.hypot(mx, mz);
+      const speed = (v.sDist * 0.9 * dt) / len;
+      const rx = Math.sin(v.yaw);
+      const rz = -Math.cos(v.yaw);
+      const fx = -Math.cos(v.yaw);
+      const fz = -Math.sin(v.yaw);
+      v.tx += (rx * mx - fx * mz) * speed;
+      v.tz += (rz * mx - fz * mz) * speed;
+    }
     if (v.follow) {
       v.tx = game.predicted.x;
       v.tz = game.predicted.z;
     }
-    const t = 1 - Math.exp(-Math.min(dt, 0.1) * 10);
+    const t = 1 - Math.exp(-dt * 10);
     v.sTx += (v.tx - v.sTx) * t;
     v.sTz += (v.tz - v.sTz) * t;
     v.sDist += (v.dist - v.sDist) * t;
