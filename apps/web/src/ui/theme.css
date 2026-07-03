@@ -292,7 +292,10 @@ body {
   left: 44px;
   width: 400px;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(620px) rotateY(20deg) skewX(-5deg);
+  /* Sit on an angled 3D plane like the INTEL map: tilted back/down (rotateX)
+     and sideways (rotateY), with a slight roll so it runs top-left to
+     bottom-right. */
+  transform: perspective(720px) rotateX(19deg) rotateY(15deg) rotateZ(3deg);
   transform-origin: left center;
 }
 
@@ -887,7 +890,8 @@ body {
   min-width: 320px;
   pointer-events: auto;
   filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
-  transform: perspective(620px) rotateY(20deg) skewX(-5deg);
+  /* Same angled 3D plane as the vitals cluster. */
+  transform: perspective(720px) rotateX(19deg) rotateY(15deg) rotateZ(3deg);
   transform-origin: left center;
 }
 
