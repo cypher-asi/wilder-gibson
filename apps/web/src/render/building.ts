@@ -682,15 +682,21 @@ function buildRoof(
 // ---------------------------------------------------------------------------
 
 /**
- * Facade wall panels: 12 m wide x ~12 m tall x ~4.2 m deep modules. In model
- * space (bottom-center pivot, front +Z) the flat wall slab spans
- * z -2.10..-1.81 and the balcony/AC greebles reach out to z +2.10, i.e.
- * ~3.9 m proud of the authored wall surface.
+ * Facade wall tile from the skyscraper kit: 12 m wide x ~12 m tall modules
+ * meant to tile on a 12 m grid at authored scale. The kit authors every
+ * module with its pivot on the wall plane (front +Z), so each module carries
+ * its own wall offset: flat window panels sit ~0.3 m deep while balcony
+ * modules reach several meters past the wall — that overhang is authored.
  */
 export interface KitTowerPanel {
   assetId: string;
   /** Authored module height in meters (from Asset Lab meta dimensions). */
   h: number;
+  /**
+   * Model-space distance from the pivot back to the authored wall plane
+   * (from Asset Lab meta bbox). Falls back to KitTowerConfig.wallZ.
+   */
+  wallZ?: number;
 }
 
 /**
@@ -703,14 +709,8 @@ export interface KitTowerConfig {
   panels: KitTowerPanel[];
   /** Authored module width in meters (grid pitch along each face). */
   moduleWidth: number;
-  /** Model-space distance from the pivot back to the wall surface. */
+  /** Fallback wall-plane offset for panels without their own wallZ. */
   wallZ: number;
-  /**
-   * Depth (model z) compression. The authored greebles reach ~3.9 m past the
-   * wall surface, which loomed over the street; compressed they protrude
-   * ~1.4 m while the wall relief stays visible.
-   */
-  depthScale: number;
   /** Height of the storefront base the panels stack on top of. */
   baseHeight: number;
   /** Render facade panels only (no procedural geometry). */
@@ -719,15 +719,20 @@ export interface KitTowerConfig {
   forceKitTower?: boolean;
 }
 
+// The full 12 m x 12 m wall-tile class of the skyscraper kit: balcony
+// modules (01-04) and flat window panels (16, 18). h/wallZ come from the
+// Asset Lab authored metadata (see stagePrefabs.ts for the derivation).
 export const DEFAULT_KIT_TOWER_CONFIG: KitTowerConfig = {
   panels: [
-    { assetId: "lab_sm_skyscraper_module01", h: 12.14 },
-    { assetId: "lab_sm_skyscraper_module02", h: 12.08 },
-    { assetId: "lab_sm_skyscraper_module03", h: 12.36 },
+    { assetId: "lab_sm_skyscraper_module01", h: 12.145, wallZ: 1.813 },
+    { assetId: "lab_sm_skyscraper_module02", h: 12.081, wallZ: 1.843 },
+    { assetId: "lab_sm_skyscraper_module03", h: 12.358, wallZ: 1.8 },
+    { assetId: "lab_sm_skyscraper_module04", h: 12.103, wallZ: 3.012 },
+    { assetId: "lab_sm_skyscraper_module16", h: 12.179, wallZ: 0.743 },
+    { assetId: "lab_sm_skyscraper_module18", h: 12, wallZ: 0.294 },
   ],
   moduleWidth: 12,
   wallZ: 1.81,
-  depthScale: 0.35,
   baseHeight: 4.8,
   panelsOnly: false,
 };
@@ -742,11 +747,12 @@ export function isKitTower(b: BuildingInstance): boolean {
 }
 
 /**
- * Wrap the upper mass (above the storefront base) with facade panels at their
- * authored 12 m scale: whole modules only, centered per face (leftover face
- * ends stay bare and read as the core box), stacked per 12 m level. The back
- * wall slab embeds just behind the building wall plane; depth is compressed
- * (cfg.depthScale) so the authored deep greebles protrude modestly.
+ * Wrap the upper mass (above the storefront base) with facade panels exactly
+ * as the kit authored them: whole modules only, at 1:1 scale, tiled on the
+ * kit's grid pitch and stacked by each module's own authored height. Leftover
+ * face ends and the band below the parapet stay bare and read as the dark
+ * mechanical core. Each module's authored wall plane embeds 0.1 m behind the
+ * building wall; balcony greebles overhang by their authored depth.
  */
 function buildKitTowerFacade(
   b: BuildingInstance,
@@ -758,35 +764,22 @@ function buildKitTowerFacade(
   cfg: KitTowerConfig,
 ): void {
   if (cfg.panels.length === 0) return;
-  const refH = cfg.panels[0].h;
-  const sz = cfg.depthScale;
-  // Pivot offset outward from the wall plane that puts the (depth-scaled)
-  // wall slab surface 0.1 m behind the wall plane.
-  const out = cfg.wallZ * sz - 0.1;
-
-  // Whole rows only; row count picked to keep the vertical stretch closest
-  // to 1 within tolerable distortion. When even the stretched stack cannot
-  // fill the upper mass, the leftover band below the parapet stays bare and
-  // reads as the dark mechanical core.
-  const upper = height - baseY;
-  const nLow = Math.max(1, Math.floor(upper / refH));
-  let rows = nLow;
-  let sy = upper / (nLow * refH);
-  const syHigh = upper / ((nLow + 1) * refH);
-  if (syHigh >= 0.85 && (sy > 1.25 || Math.abs(Math.log(syHigh)) < Math.abs(Math.log(sy)))) {
-    rows = nLow + 1;
-    sy = syHigh;
-  }
-  sy = Math.min(sy, 1.25);
-  const rowH = refH * sy;
 
   // One module variant per row (not per column), so each level reads as a
   // deliberate band; seeded per building for variety across the block.
+  // Rows stack at each module's authored height — no vertical stretch.
   const rng = mulberry(b.style ^ 0x8c17f2ad);
-  const rowMods = Array.from(
-    { length: rows },
-    () => cfg.panels[Math.floor(rng() * cfg.panels.length)],
-  );
+  const rowMods: KitTowerPanel[] = [];
+  const rowYs: number[] = [];
+  // Allow a small tolerance so a ~12.3 m module still fits a 12 m band.
+  for (let y = baseY; height - y >= cfg.panels[0].h * 0.95; ) {
+    const candidates = cfg.panels.filter((p) => y + p.h <= height + 0.6);
+    if (candidates.length === 0) break;
+    const mod = candidates[Math.floor(rng() * candidates.length)];
+    rowMods.push(mod);
+    rowYs.push(y);
+    y += mod.h;
+  }
 
   const faces: Face[] = [
     { axis: "z", wall: -d / 2, sign: -1, len: w, center: 0 },
@@ -798,14 +791,14 @@ function buildKitTowerFacade(
     const n = Math.floor(f.len / cfg.moduleWidth);
     if (n < 1) continue;
     const rowW = n * cfg.moduleWidth;
-    for (let r = 0; r < rows; r++) {
+    for (let r = 0; r < rowMods.length; r++) {
       const mod = rowMods[r];
-      const y = baseY + r * rowH;
+      // Pivot offset that puts this module's authored wall plane 0.1 m
+      // behind the building wall.
+      const out = (mod.wallZ ?? cfg.wallZ) - 0.1;
       for (let k = 0; k < n; k++) {
         const along = -rowW / 2 + (k + 0.5) * cfg.moduleWidth;
-        const pl = facePlacement(f, mod.assetId, along, y, out);
-        pl.scale = [1, rowH / mod.h, sz];
-        kit.push(pl);
+        kit.push(facePlacement(f, mod.assetId, along, rowYs[r], out));
       }
     }
   }

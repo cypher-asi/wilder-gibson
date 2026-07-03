@@ -123,6 +123,10 @@ if (isMain) {
         `  ok: ${asset.meta.triangles} tris, ${asset.meta.material_count} materials, ` +
           `${asset.meta.dimensions_m.join(" x ")} m`,
       );
+      const untextured = asset.meta.untextured_materials ?? [];
+      if (untextured.length > 0) {
+        console.warn(`  WARN: untextured materials: ${untextured.join(", ")}`);
+      }
     } catch (err) {
       failed++;
       console.error(`  FAILED: ${String(err.message ?? err).split("\n")[0]}`);

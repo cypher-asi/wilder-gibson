@@ -81,8 +81,8 @@ if bpy.data.objects:
 # ---------------------------------------------------------------------------
 
 SUFFIX_ROLES = {
-    "b": "base", "base": "base", "basecolor": "base", "d": "base", "alb": "base", "a": "base",
-    "a01": "base", "a02": "base",
+    "b": "base", "bc": "base", "base": "base", "basecolor": "base", "d": "base", "alb": "base",
+    "a": "base", "a01": "base", "a02": "base",
     "n": "normal", "normal": "normal", "nrm": "normal",
     "orm": "orm",
     "r": "roughness", "roughness": "roughness",
@@ -95,6 +95,16 @@ SUFFIX_ROLES = {
 KIT_ALIASES = {
     "3dbillboard": "3dsigns01",
     "roadsides": "roads_sides",
+}
+
+# Digit-preserving prefix rewrites for kits whose material names abbreviate
+# differently than their textures (MI_Skyscraper_Wall01 -> skys_wall01
+# matches T_Skys_Wall01_*). KIT_ALIASES can't express these because it
+# strips trailing digits, collapsing Wall01/Wall02/... into one key.
+PREFIX_ALIASES = {
+    "skyscraper": "skys",
+    # MI_RstSFWall01 -> sm_restaurantsfwall01 matches T_SM_RestaurantSFWall01_*.
+    "rstsf": "sm_restaurantsf",
 }
 
 
@@ -126,6 +136,9 @@ def texture_key_candidates(mat_name, asset_name):
         n = re.sub(r"^(m|mi|mm|mat|sm)_", "", n)  # material/mesh prefixes
         out.append(n)
         out.append(re.sub(r"_?(inst|mat|material)$", "", n))
+        for prefix, replacement in PREFIX_ALIASES.items():
+            if n.startswith(prefix):
+                out.append(replacement + n[len(prefix):])
     for c in list(out):
         alias = KIT_ALIASES.get(c) or KIT_ALIASES.get(re.sub(r"\d+$", "", c.replace("_", "")))
         if alias:
@@ -307,6 +320,37 @@ def wire_material(mat, key_hints=(), skip_roles=frozenset()):
     return used
 
 
+# FBX exports from Unreal kits lose plain-tint material instances (e.g.
+# MI_Skyscraper_Color): no texture nodes and the exporter-default ~0.216
+# gray base color. That gray reads as glowing pale beige next to the kits'
+# dark textured walls, so replace it with a dark neutral sampled from the
+# kits' wall palettes. Authored (non-default) colors are left alone.
+FBX_DEFAULT_GRAY = 0.2157
+UNTEXTURED_FALLBACK_COLOR = (0.045, 0.050, 0.062, 1.0)
+
+
+def clamp_untextured_pbr(mat):
+    """FBX materials often carry Unreal's metallic=1 default even when no
+    ORM texture exists; untextured metal-1 renders near-black in the game.
+    Clamp untextured materials to plausible dielectric values, and swap the
+    exporter-default gray base color for a plausible dark authored color."""
+    if not mat.use_nodes:
+        return
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        return
+    metallic = bsdf.inputs.get("Metallic")
+    roughness = bsdf.inputs.get("Roughness")
+    if metallic is not None and not metallic.is_linked and metallic.default_value > 0.5:
+        metallic.default_value = 0.1
+        if roughness is not None and not roughness.is_linked:
+            roughness.default_value = max(roughness.default_value, 0.55)
+    base = bsdf.inputs.get("Base Color")
+    if base is not None and not base.is_linked:
+        if all(abs(base.default_value[i] - FBX_DEFAULT_GRAY) < 0.01 for i in range(3)):
+            base.default_value = UNTEXTURED_FALLBACK_COLOR
+
+
 materials = []
 texture_files = set()
 for mat in bpy.data.materials:
@@ -317,11 +361,20 @@ for mat in bpy.data.materials:
     # 3. Fill remaining roles by naming convention (hinted by the FBX refs).
     wired = wire_material(mat, key_hints=key_hints, skip_roles=set(rescued))
     combined = {**rescued, **(wired or {})}
+    if not any(k != "key" for k in combined):
+        clamp_untextured_pbr(mat)
     entry = {"name": mat.name, "textures": combined}
     for role, val in combined.items():
         if role != "key":
             texture_files.add(val)
     materials.append(entry)
+
+# Untextured materials are almost always a name-matching failure (the kit
+# ships textures we couldn't associate). Flag them so the pipeline can warn
+# instead of silently promoting flat gray assets.
+untextured = [e["name"] for e in materials if not any(k != "key" for k in e["textures"])]
+if untextured and TEX_INDEX:
+    print("ASSETLAB_WARN: no textures wired for material(s): " + ", ".join(untextured))
 
 # ---------------------------------------------------------------------------
 # Metadata
@@ -392,6 +445,7 @@ meta = {
     "has_transparency": bool(has_transparency),
     "has_emissive": bool(has_emissive),
     "has_animation": bool(has_animation),
+    "untextured_materials": untextured,
 }
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,9 @@ export const CATEGORY_PRESETS = {
   },
   building_hero: {
     category: "building_hero",
-    decimate_ratio: 0.9,
+    // Hero buildings keep authored geometry: kit meshes are already game-res
+    // and decimation crushes balcony/bracing detail.
+    decimate_ratio: 1.0,
     weld_distance: 0.0005,
     texture_max_size: 2048,
     normalize_pivot: "bottom_center",

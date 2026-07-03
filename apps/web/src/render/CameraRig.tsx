@@ -123,6 +123,18 @@ export function CameraRig() {
   }, [gl]);
 
   useFrame((_, dt) => {
+    // Dev/screenshot override: window.__freecam = { pos: [x,y,z], look: [x,y,z] }
+    // pins the camera for validation captures (set to null to release).
+    if (import.meta.env.DEV) {
+      const fc = (
+        window as unknown as { __freecam?: { pos: number[]; look: number[] } | null }
+      ).__freecam;
+      if (fc) {
+        camera.position.set(fc.pos[0], fc.pos[1], fc.pos[2]);
+        camera.lookAt(fc.look[0], fc.look[1], fc.look[2]);
+        return;
+      }
+    }
     if (keys.current.q) cameraState.yaw += dt * 1.8;
     if (keys.current.e) cameraState.yaw -= dt * 1.8;
 
