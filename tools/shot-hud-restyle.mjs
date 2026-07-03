@@ -39,7 +39,16 @@ await page.screenshot({ path: "tools/screens/restyle-charselect.png" });
 console.log("saved restyle-charselect.png");
 
 await page.click(".char-card");
-await page.waitForFunction(() => window.__ui?.getState?.().joined === true, { timeout: 20000 });
+try {
+  await page.waitForFunction(() => window.__ui?.getState?.().joined === true, { timeout: 60000 });
+} catch (e) {
+  const state = await page.evaluate(() => {
+    const s = window.__ui?.getState?.();
+    return s ? { connected: s.connected, joined: s.joined } : null;
+  });
+  console.error("join wait failed; ui state:", JSON.stringify(state));
+  throw e;
+}
 await new Promise((r) => setTimeout(r, 8000));
 await page.screenshot({ path: "tools/screens/restyle-hud.png" });
 console.log("saved restyle-hud.png");

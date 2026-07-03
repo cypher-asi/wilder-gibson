@@ -7,7 +7,7 @@ import { CityMapManifest, getCityMapManifest } from "../game/citymap";
 import { CHUNK_SIZE } from "../net/protocol";
 import { game, useGame } from "../state/game";
 
-/** Canvas size in CSS px (the panel is square, clipped to a circle). */
+/** Canvas size in CSS px (square panel with notched corners). */
 const SIZE = 192;
 /** Screen px per world meter. */
 const SCALE = 1.35;
@@ -40,7 +40,7 @@ export function Minimap() {
         canvas.height = SIZE * dpr;
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#070a10";
+      ctx.fillStyle = "#010409";
       ctx.fillRect(0, 0, SIZE, SIZE);
 
       const px = game.predicted.x;
@@ -61,6 +61,16 @@ export function Minimap() {
         const s = SCALE * metersPerPx;
         ctx.imageSmoothingEnabled = true;
         ctx.drawImage(img, sx, sy, img.width * s, img.height * s);
+        // Holographic recolor to match the fullscreen map: keep the baked
+        // luminance but force everything to the hologram blue hue.
+        ctx.globalCompositeOperation = "color";
+        ctx.fillStyle = "#4fc3ff";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        // Lift bright areas (roads) into a glow like the M map's emissive net.
+        ctx.globalCompositeOperation = "overlay";
+        ctx.fillStyle = "rgba(79, 195, 255, 0.35)";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.globalCompositeOperation = "source-over";
       }
 
       // Safe-zone outline (chunks |x|,|z| <= 1).
@@ -89,7 +99,7 @@ export function Minimap() {
           ctx.closePath();
           ctx.fill();
         } else if (entity.kind === "Npc") {
-          ctx.fillStyle = "#ff5d7a";
+          ctx.fillStyle = "#ff4d5e";
           ctx.beginPath();
           ctx.arc(sx, sy, 3, 0, Math.PI * 2);
           ctx.fill();
@@ -100,7 +110,7 @@ export function Minimap() {
           ctx.fill();
         } else if (entity.kind !== "LootContainer" && entity.kind !== "ResourceNode") {
           // Hub stations / stash / market terminals.
-          ctx.fillStyle = "rgba(64, 232, 255, 0.9)";
+          ctx.fillStyle = "rgba(79, 195, 255, 0.9)";
           ctx.fillRect(sx - 2.5, sy - 2.5, 5, 5);
         }
       }
@@ -110,14 +120,14 @@ export function Minimap() {
         const sx = SIZE / 2;
         const sy = SIZE / 2;
         const pulse = 5 + Math.sin(now / 260) * 1.2;
-        ctx.fillStyle = "rgba(64, 232, 255, 0.25)";
+        ctx.fillStyle = "rgba(234, 247, 255, 0.25)";
         ctx.beginPath();
         ctx.arc(sx, sy, pulse + 5, 0, Math.PI * 2);
         ctx.fill();
         ctx.save();
         ctx.translate(sx, sy);
         ctx.rotate(game.predicted.yaw);
-        ctx.fillStyle = "#40e8ff";
+        ctx.fillStyle = "#eaf7ff";
         ctx.beginPath();
         ctx.moveTo(pulse + 2, 0);
         ctx.lineTo(-pulse * 0.6, pulse * 0.62);
@@ -129,8 +139,8 @@ export function Minimap() {
       }
 
       // North marker.
-      ctx.fillStyle = "rgba(219, 228, 240, 0.85)";
-      ctx.font = "700 10px system-ui, sans-serif";
+      ctx.fillStyle = "rgba(234, 247, 255, 0.85)";
+      ctx.font = "700 10px Rajdhani, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.fillText("N", SIZE / 2, 13);
     };

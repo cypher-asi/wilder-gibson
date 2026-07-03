@@ -405,16 +405,40 @@ body {
   pointer-events: auto;
 }
 
+/* Square holo-map crop: notched frame with corner brackets, like the M map. */
 .minimap-ring {
   position: relative;
-  border-radius: 50%;
   overflow: hidden;
-  border: 2px solid var(--accent-dim);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch);
   box-shadow:
     0 0 24px rgba(79, 195, 255, 0.18),
-    inset 0 0 22px rgba(0, 0, 0, 0.6);
+    inset 0 0 26px rgba(0, 0, 0, 0.65);
   cursor: pointer;
   line-height: 0;
+}
+
+.minimap-ring::before,
+.minimap-ring::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+}
+
+.minimap-ring::before {
+  top: 3px;
+  right: 3px;
+  border-top: 2px solid var(--accent-dim);
+  border-right: 2px solid var(--accent-dim);
+}
+
+.minimap-ring::after {
+  bottom: 3px;
+  left: 3px;
+  border-bottom: 2px solid var(--accent-dim);
+  border-left: 2px solid var(--accent-dim);
 }
 
 .minimap-ring:hover {
