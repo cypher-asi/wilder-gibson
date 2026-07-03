@@ -16,6 +16,7 @@ import {
   CITY_ROAD_LINE,
   CITY_SIDEWALK,
   CITY_BUILDING,
+  CITY_WATER,
   CityGeo,
   CityMapManifest,
   getCityGeo,
@@ -141,14 +142,14 @@ function HoloMapView() {
       onDoubleClick={() => (view.current.follow = true)}
     >
       <Canvas
-        dpr={[1, 1.5]}
-        gl={{ antialias: false, powerPreference: "high-performance" }}
+        dpr={[1, 2]}
+        gl={{ antialias: true, powerPreference: "high-performance" }}
         camera={{ fov: FOV, near: 2, far: 90000 }}
         style={{ position: "absolute", inset: 0 }}
       >
         <HoloScene view={view} />
       </Canvas>
-      <div className="map-overlay-title">WILDER CITY</div>
+      <div className="map-overlay-title">WIAMI</div>
       <button
         className="map-view-toggle"
         onClick={() => {
@@ -160,11 +161,6 @@ function HoloMapView() {
       >
         {topDown ? "VIEW: TOP-DOWN" : "VIEW: 3D"} <span className="action-key">T</span>
       </button>
-      <div className="map-overlay-hint">
-        WASD / DRAG pan · RIGHT-DRAG rotate · WHEEL zoom · T view · DOUBLE-CLICK
-        center on player · M / ESC close
-      </div>
-      <PositionBadge />
     </div>
   );
 }
@@ -179,7 +175,7 @@ function HoloScene({ view }: { view: RefObject<HoloView> }) {
       <PlayerMarker view={view} />
       <ExtractionMarkers view={view} />
       <DistrictLabels />
-      <EffectComposer multisampling={0}>
+      <EffectComposer multisampling={8}>
         <Bloom
           intensity={0.55}
           luminanceThreshold={0.16}
@@ -264,9 +260,61 @@ function loadCityAssets(): Promise<CityAssets> {
   return cityAssetsPromise;
 }
 
-/** Faint land-fabric plane (sidewalks, plazas, parks, island silhouette):
- * half-res intensity texture from the tile grid. Roads come from the real
- * street mesh, so they stay dim here. */
+/** Two-pass 3-4 chamfer distance transform. Returns, per texel, the distance
+ * (in units of 3 per tile) to the nearest set texel. When `feat` is given,
+ * the byte value of that nearest texel is propagated along with the distance
+ * (used to bleed land intensity across water). */
+function chamfer(set: Uint8Array, w: number, h: number, feat?: Uint8Array): Int32Array {
+  const INF = 0x3fffffff;
+  const d = new Int32Array(w * h);
+  for (let i = 0; i < d.length; i++) d[i] = set[i] ? 0 : INF;
+  // Forward sweep: left, up-left, up, up-right.
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      let best = d[i];
+      let from = -1;
+      if (x > 0 && d[i - 1] + 3 < best) { best = d[i - 1] + 3; from = i - 1; }
+      if (y > 0) {
+        if (d[i - w] + 3 < best) { best = d[i - w] + 3; from = i - w; }
+        if (x > 0 && d[i - w - 1] + 4 < best) { best = d[i - w - 1] + 4; from = i - w - 1; }
+        if (x < w - 1 && d[i - w + 1] + 4 < best) { best = d[i - w + 1] + 4; from = i - w + 1; }
+      }
+      if (from >= 0) {
+        d[i] = best;
+        if (feat) feat[i] = feat[from];
+      }
+    }
+  }
+  // Backward sweep: right, down-right, down, down-left.
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const i = y * w + x;
+      let best = d[i];
+      let from = -1;
+      if (x < w - 1 && d[i + 1] + 3 < best) { best = d[i + 1] + 3; from = i + 1; }
+      if (y < h - 1) {
+        if (d[i + w] + 3 < best) { best = d[i + w] + 3; from = i + w; }
+        if (x < w - 1 && d[i + w + 1] + 4 < best) { best = d[i + w + 1] + 4; from = i + w + 1; }
+        if (x > 0 && d[i + w - 1] + 4 < best) { best = d[i + w - 1] + 4; from = i + w - 1; }
+      }
+      if (from >= 0) {
+        d[i] = best;
+        if (feat) feat[i] = feat[from];
+      }
+    }
+  }
+  return d;
+}
+
+/** Faint land-fabric plane (sidewalks, plazas, parks, island silhouette).
+ * Roads come from the real street mesh, so they stay dim here.
+ *
+ * The island silhouette is cut with a signed distance field baked from the
+ * tile grid: distance values interpolate bilinearly into smooth curves, so
+ * the coastline stays a crisp, rounded, 1px anti-aliased edge at any zoom —
+ * unlike the raw tile mask, whose bilinear iso-contour is stair-stepped at
+ * texel granularity no matter how it's filtered. */
 function buildGround(): { ground: THREE.Mesh } {
   const g = getCityGrid()!;
   const lut = new Uint8Array(8);
@@ -276,24 +324,39 @@ function buildGround(): { ground: THREE.Mesh } {
   lut[CITY_PLAZA] = 58;
   lut[CITY_BUILDING] = 30;
   lut[CITY_PARK] = 20;
-  const w2 = g.width >> 1;
-  const h2 = g.height >> 1;
-  const data = new Uint8Array(w2 * h2);
+  const w = g.width;
+  const h = g.height;
   const t = g.tiles;
-  for (let y = 0; y < h2; y++) {
-    const r0 = y * 2 * g.width;
-    const r1 = r0 + g.width;
-    for (let x = 0; x < w2; x++) {
-      const i0 = r0 + x * 2;
-      const i1 = r1 + x * 2;
-      // Max-pool 2x2 so 1-tile roads survive the downsample.
-      data[y * w2 + x] = Math.max(lut[t[i0]], lut[t[i0 + 1]], lut[t[i1]], lut[t[i1 + 1]]);
-    }
+  const n = w * h;
+
+  const land = new Uint8Array(n);
+  const water = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    land[i] = t[i] === CITY_WATER ? 0 : 1;
+    water[i] = land[i] ^ 1;
   }
-  const tex = new THREE.DataTexture(data, w2, h2, THREE.RedFormat, THREE.UnsignedByteType);
+  // Intensity per tile; the chamfer pass bleeds each water texel's value from
+  // its nearest land texel so there's no dark intensity ramp at the coast —
+  // the silhouette cut comes purely from the SDF.
+  const intensity = new Uint8Array(n);
+  for (let i = 0; i < n; i++) intensity[i] = lut[t[i]];
+  const distToLand = chamfer(land, w, h, intensity);
+  const distToWater = chamfer(water, w, h);
+
+  // RG texture: R = intensity, G = signed distance to the coastline
+  // (128 = coast, 16 per tile, positive inside land, clamped to ±8 tiles).
+  const data = new Uint8Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    data[i * 2] = intensity[i];
+    const sd = ((distToWater[i] - distToLand[i]) / 3) * 16 + 128;
+    data[i * 2 + 1] = sd < 0 ? 0 : sd > 255 ? 255 : sd;
+  }
+  const tex = new THREE.DataTexture(data, w, h, THREE.RGFormat, THREE.UnsignedByteType);
   tex.minFilter = THREE.LinearMipmapLinearFilter;
   tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 8; // keep edges crisp at the tilted / grazing map angle
   tex.generateMipmaps = true;
+  tex.unpackAlignment = 1;
   tex.needsUpdate = true;
 
   const sizeX = g.width * TILE_SIZE;
@@ -323,10 +386,19 @@ function buildGround(): { ground: THREE.Mesh } {
       varying vec3 vWorld;
       void main() {
         vec2 uv = (vWorld.xz - uOrigin) / uSize;
-        float k = texture2D(uTex, uv).r;
-        // Squared response keeps the land fabric faint; water stays black so
-        // the island silhouette comes from the tiles, not the plane bounds.
-        vec3 col = uColor * (k * k * 0.8 * uGain);
+        vec2 s = texture2D(uTex, uv).rg;
+        float k = s.r;
+        // Signed distance to the coastline (0.0 at the coast, + inside land).
+        float d = s.g - 128.0 / 255.0;
+        // Screen-space anti-aliased cut: the smoothstep window tracks the
+        // pixel footprint, so the coastline is a smooth curve exactly ~1px
+        // wide at any zoom level.
+        float aa = max(fwidth(d), 1e-5);
+        float edge = smoothstep(-aa, aa, d);
+        // Squared response keeps the land fabric faint; water (edge = 0)
+        // contributes nothing, so the island silhouette comes from the SDF,
+        // not the plane bounds.
+        vec3 col = uColor * (k * k * 0.8 * uGain) * edge;
         gl_FragColor = vec4(col, 1.0);
       }
     `,
@@ -384,10 +456,19 @@ function buildBuildings(city: CityGeo): { mesh: THREE.Mesh; mat: THREE.ShaderMat
       varying float vWorldY;
       void main() {
         // Story bands every 3 m give the stacked-floor hologram texture.
-        float story = 0.65 + 0.35 * step(0.55, fract(vWorldY / 3.0));
+        // Anti-alias them in screen space with a symmetric triangle wave and
+        // fwidth, then fade the pattern to flat where the floors compress below
+        // a pixel (grazing / foreshortened walls) so it can't shimmer into
+        // "brushed metal" streaks.
+        float f = vWorldY / 3.0;
+        float w = fwidth(f);
+        float tri = abs(fract(f) - 0.5) * 2.0;
+        float band = smoothstep(0.5 - w, 0.5 + w, tri);
+        float fade = clamp(1.0 - w * 1.5, 0.0, 1.0);
+        float story = 0.65 + 0.35 * mix(0.5, band, fade);
         float grad = mix(0.12, 0.55, vH * vH);
-        // Slow vertical scan pulse rolling up the skyline.
-        float scan = 1.0 + 0.15 * sin(vWorldY * 0.12 - uTime * 1.6);
+        // Very slow, subtle vertical scan (gentle so it never visibly blinks).
+        float scan = 1.0 + 0.05 * sin(vWorldY * 0.12 - uTime * 1.2);
         float i = vGlow * story * grad * scan * uGain;
         gl_FragColor = vec4(uColor * i, 1.0);
       }
@@ -633,23 +714,5 @@ function DistrictLabels() {
         />
       ))}
     </group>
-  );
-}
-
-/** Small live readout of the player's world position on the map. */
-function PositionBadge() {
-  const [pos, setPos] = useState({ x: 0, z: 0 });
-  useEffect(() => {
-    const timer = setInterval(
-      () => setPos({ x: game.predicted.x, z: game.predicted.z }),
-      250,
-    );
-    return () => clearInterval(timer);
-  }, []);
-  return (
-    <div className="map-overlay-pos">
-      {pos.x.toFixed(0)}, {pos.z.toFixed(0)} · tile {Math.floor(pos.x / TILE_SIZE)},{" "}
-      {Math.floor(pos.z / TILE_SIZE)}
-    </div>
   );
 }
