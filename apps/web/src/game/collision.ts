@@ -2,6 +2,7 @@
 // (crates/wilder-physics). Used for local player prediction.
 
 import {
+  BUILDING_FRONT_PROUD,
   CHUNK_SIZE,
   ChunkData,
   TILE_SIZE,
@@ -62,11 +63,26 @@ interface PropCollider {
   r: number;
 }
 
+/** World-space axis-aligned box: [minx, minz, maxx, maxz]. */
+type Aabb = [number, number, number, number];
+
+/** Whether a disc at (cx, cz) with `radius` overlaps an AABB (closest point). */
+function discAabbOverlap(cx: number, cz: number, radius: number, box: Aabb): boolean {
+  const [minx, minz, maxx, maxz] = box;
+  const nx = Math.min(Math.max(cx, minx), maxx);
+  const nz = Math.min(Math.max(cz, minz), maxz);
+  const dx = cx - nx;
+  const dz = cz - nz;
+  return dx * dx + dz * dz < radius * radius;
+}
+
 export class ChunkStore {
   chunks = new Map<string, ChunkData>();
   walkableCache = new Map<string, boolean[]>();
   /** World-space prop colliders per chunk (excludes walk-through props). */
   propCache = new Map<string, PropCollider[]>();
+  /** World-space building front-face buffers per chunk (mirror of server). */
+  buildingCache = new Map<string, Aabb[]>();
   /** bumped on chunk add/remove so React can resync */
   version = 0;
 
@@ -85,6 +101,15 @@ export class ChunkStore {
       if (r > 0) colliders.push({ x: ox + p.x, z: oz + p.z, r });
     }
     this.propCache.set(key, colliders);
+    // Front-face buffers: the proud storefront band in front of each
+    // building's street (-z) face, matching render/building.ts geometry.
+    const aabbs: Aabb[] = chunk.buildings.map((b) => {
+      const minx = ox + b.tx0 * TILE_SIZE;
+      const maxx = ox + b.tx1 * TILE_SIZE;
+      const lot = oz + b.tz0 * TILE_SIZE;
+      return [minx, lot - BUILDING_FRONT_PROUD, maxx, lot];
+    });
+    this.buildingCache.set(key, aabbs);
     this.version++;
   }
 
@@ -93,6 +118,7 @@ export class ChunkStore {
     this.chunks.delete(key);
     this.walkableCache.delete(key);
     this.propCache.delete(key);
+    this.buildingCache.delete(key);
     this.version++;
   }
 
@@ -100,6 +126,7 @@ export class ChunkStore {
     this.chunks.clear();
     this.walkableCache.clear();
     this.propCache.clear();
+    this.buildingCache.clear();
     this.version++;
   }
 
@@ -138,13 +165,33 @@ export class ChunkStore {
     return false;
   }
 
+  /** Whether the disc overlaps any building's front-face proud buffer. */
+  buildingBlocked(x: number, z: number, radius: number): boolean {
+    const reach = radius + BUILDING_FRONT_PROUD;
+    const cx0 = Math.floor((x - reach) / CHUNK_SIZE);
+    const cx1 = Math.floor((x + reach) / CHUNK_SIZE);
+    const cz0 = Math.floor((z - reach) / CHUNK_SIZE);
+    const cz1 = Math.floor((z + reach) / CHUNK_SIZE);
+    for (let cz = cz0; cz <= cz1; cz++) {
+      for (let cx = cx0; cx <= cx1; cx++) {
+        const boxes = this.buildingCache.get(chunkKey(cx, cz));
+        if (!boxes) continue;
+        for (const box of boxes) {
+          if (discAabbOverlap(x, z, radius, box)) return true;
+        }
+      }
+    }
+    return false;
+  }
+
   positionClear(x: number, z: number): boolean {
     return (
       this.walkable(x + PLAYER_RADIUS, z) &&
       this.walkable(x - PLAYER_RADIUS, z) &&
       this.walkable(x, z + PLAYER_RADIUS) &&
       this.walkable(x, z - PLAYER_RADIUS) &&
-      !this.propBlocked(x, z, PLAYER_RADIUS)
+      !this.propBlocked(x, z, PLAYER_RADIUS) &&
+      !this.buildingBlocked(x, z, PLAYER_RADIUS)
     );
   }
 }

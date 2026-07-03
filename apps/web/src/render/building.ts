@@ -5,7 +5,13 @@
 
 import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { BuildingInstance, CHUNK_SIZE, ChunkData, TILE_SIZE } from "../net/protocol";
+import {
+  BUILDING_FRONT_PROUD,
+  BuildingInstance,
+  CHUNK_SIZE,
+  ChunkData,
+  TILE_SIZE,
+} from "../net/protocol";
 import { mulberry, NEON_COLORS } from "./facade";
 import { getImportedBuilding } from "./importedBuilding";
 import { KitEntry } from "./InstancedKit";
@@ -1253,7 +1259,9 @@ export function buildBuildingModel(
   const styleRng = mulberry(b.style ^ 0xa511e9b3);
   const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
   const sideStorefront = !kitGroundH && styleRng() < 0.5;
-  const proud = 0.3;
+  // Collision blocks this same band on the -z face (see collision.ts /
+  // wilder-physics BUILDING_FRONT_PROUD); keep them in sync.
+  const proud = BUILDING_FRONT_PROUD;
 
   // --- Massing -------------------------------------------------------------
   // Ground-floor block sits proud of the upper mass on street-facing sides

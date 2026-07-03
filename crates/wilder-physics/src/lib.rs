@@ -15,6 +15,13 @@ pub const ROLL_SPEED: f32 = 7.5; // m/s
 pub const ROLL_DURATION: f32 = 0.5; // seconds
 pub const ROLL_COOLDOWN: f32 = 0.9; // seconds (from roll start)
 
+/// How far a building's storefront ground floor is rendered proud of its
+/// footprint lot line, toward the street (-z face). Collision blocks this band
+/// so the player disc stops flush with the visual wall instead of clipping into
+/// it. Must match `proud` in the client's render/building.ts and the
+/// BUILDING_FRONT_PROUD constant in the TS collision mirror.
+pub const BUILDING_FRONT_PROUD: f32 = 0.3; // meters
+
 /// Provides walkability lookups in world space (implemented by the world's
 /// chunk cache on the server and by streamed chunks on the client).
 pub trait CollisionWorld {
@@ -28,6 +35,33 @@ pub trait CollisionWorld {
     fn prop_blocked(&self, _x: f32, _z: f32, _radius: f32) -> bool {
         false
     }
+
+    /// Whether a disc of `radius` centered at (x, z) overlaps a building's
+    /// storefront front-face buffer (the [`BUILDING_FRONT_PROUD`] band in front
+    /// of the footprint lot line). Default: no building buffer, for tile-only
+    /// worlds. Building footprint tiles themselves are already handled by
+    /// [`CollisionWorld::walkable`].
+    fn building_blocked(&self, _x: f32, _z: f32, _radius: f32) -> bool {
+        false
+    }
+}
+
+/// Whether a disc at (cx, cz) with `radius` overlaps the axis-aligned box
+/// [minx, maxx] x [minz, maxz] (closest-point test).
+pub fn disc_aabb_overlap(
+    cx: f32,
+    cz: f32,
+    radius: f32,
+    minx: f32,
+    minz: f32,
+    maxx: f32,
+    maxz: f32,
+) -> bool {
+    let nx = cx.clamp(minx, maxx);
+    let nz = cz.clamp(minz, maxz);
+    let dx = cx - nx;
+    let dz = cz - nz;
+    dx * dx + dz * dz < radius * radius
 }
 
 /// Move with axis-separated collision so players slide along walls.
@@ -81,6 +115,7 @@ pub fn position_clear<W: CollisionWorld>(world: &W, x: f32, z: f32) -> bool {
         && world.walkable(x, z + PLAYER_RADIUS)
         && world.walkable(x, z - PLAYER_RADIUS)
         && !world.prop_blocked(x, z, PLAYER_RADIUS)
+        && !world.building_blocked(x, z, PLAYER_RADIUS)
 }
 
 #[cfg(test)]
@@ -142,5 +177,48 @@ mod tests {
         let p = step_move(&PropWorld, start, 1.0, 0.0, true, 0.2);
         // Player disc (0.4) stops before reaching the prop disc (0.5) at x=4.
         assert!(p.x + PLAYER_RADIUS + 0.5 <= 4.0 + 1e-3, "x went to {}", p.x);
+    }
+
+    /// Open tiles, with a building front-face buffer occupying the band
+    /// z in [4 - PROUD, 4] (lot line at z=4, storefront wall proud toward -z).
+    struct BuildingWorld;
+    impl CollisionWorld for BuildingWorld {
+        fn walkable(&self, _x: f32, z: f32) -> bool {
+            // Footprint tiles start at the lot line (z >= 4).
+            z < 4.0
+        }
+        fn building_blocked(&self, x: f32, z: f32, radius: f32) -> bool {
+            disc_aabb_overlap(
+                x,
+                z,
+                radius,
+                -10.0,
+                4.0 - BUILDING_FRONT_PROUD,
+                10.0,
+                4.0,
+            )
+        }
+    }
+
+    #[test]
+    fn blocked_by_building_front_buffer() {
+        // Walking toward +z into the storefront: the disc must stop flush with
+        // the proud wall, i.e. its leading edge at the wall (4 - PROUD), not at
+        // the lot line (4).
+        let start = Vec3::new(0.0, 0.0, 2.0);
+        let p = step_move(&BuildingWorld, start, 0.0, 1.0, true, 0.5);
+        assert!(
+            p.z + PLAYER_RADIUS <= 4.0 - BUILDING_FRONT_PROUD + 1e-3,
+            "z went to {} (past the proud wall)",
+            p.z
+        );
+    }
+
+    #[test]
+    fn disc_aabb_overlap_basics() {
+        // Disc centered away from the box, not touching.
+        assert!(!disc_aabb_overlap(0.0, 0.0, 0.4, 1.0, 1.0, 2.0, 2.0));
+        // Disc edge crossing into the box.
+        assert!(disc_aabb_overlap(0.7, 0.0, 0.4, 1.0, -1.0, 2.0, 1.0));
     }
 }

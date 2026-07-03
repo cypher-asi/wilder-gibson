@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use wilder_persistence::{RocksStore, WorldStore};
-use wilder_physics::CollisionWorld;
+use wilder_physics::{disc_aabb_overlap, CollisionWorld, BUILDING_FRONT_PROUD};
 use wilder_terrain::TerrainGenerator;
 use wilder_types::*;
 
@@ -20,7 +20,26 @@ pub struct ChunkCache {
 struct LoadedChunk {
     data: ChunkData,
     walkable: Vec<bool>,
+    /// World-space front-face buffers `[minx, minz, maxx, maxz]`, one per
+    /// building: the [`BUILDING_FRONT_PROUD`] band in front of each footprint's
+    /// street (-z) face, matching the client's proud storefront geometry.
+    building_aabbs: Vec<[f32; 4]>,
     dirty: bool,
+}
+
+/// Front-face collision buffers for a chunk's buildings, in world space.
+fn building_front_aabbs(data: &ChunkData) -> Vec<[f32; 4]> {
+    let ox = data.coord.x as f32 * CHUNK_SIZE;
+    let oz = data.coord.z as f32 * CHUNK_SIZE;
+    data.buildings
+        .iter()
+        .map(|b| {
+            let minx = ox + b.tx0 as f32 * TILE_SIZE;
+            let maxx = ox + b.tx1 as f32 * TILE_SIZE;
+            let lot = oz + b.tz0 as f32 * TILE_SIZE;
+            [minx, lot - BUILDING_FRONT_PROUD, maxx, lot]
+        })
+        .collect()
 }
 
 impl ChunkCache {
@@ -47,9 +66,11 @@ impl ChunkCache {
             _ => self.generator.generate(coord),
         };
         let walkable = wilder_terrain::walkable_grid(&data);
-        self.loaded
-            .borrow_mut()
-            .insert(coord, LoadedChunk { data, walkable, dirty: false });
+        let building_aabbs = building_front_aabbs(&data);
+        self.loaded.borrow_mut().insert(
+            coord,
+            LoadedChunk { data, walkable, building_aabbs, dirty: false },
+        );
     }
 
     /// Mark a chunk modified (it will persist on the next save pass).
@@ -126,6 +147,30 @@ impl CollisionWorld for ChunkCache {
                     let dz = oz + p.z - z;
                     let rr = radius + pr;
                     if dx * dx + dz * dz < rr * rr {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn building_blocked(&self, x: f32, z: f32, radius: f32) -> bool {
+        // A front buffer extends at most BUILDING_FRONT_PROUD past its chunk;
+        // scan every chunk whose contents can reach the disc (at most a 2x2).
+        let reach = radius + BUILDING_FRONT_PROUD;
+        let cx0 = ((x - reach) / CHUNK_SIZE).floor() as i32;
+        let cx1 = ((x + reach) / CHUNK_SIZE).floor() as i32;
+        let cz0 = ((z - reach) / CHUNK_SIZE).floor() as i32;
+        let cz1 = ((z + reach) / CHUNK_SIZE).floor() as i32;
+        for cz in cz0..=cz1 {
+            for cx in cx0..=cx1 {
+                let coord = ChunkCoord::new(cx, cz);
+                self.ensure(coord);
+                let loaded = self.loaded.borrow();
+                let chunk = &loaded[&coord];
+                for &[minx, minz, maxx, maxz] in &chunk.building_aabbs {
+                    if disc_aabb_overlap(x, z, radius, minx, minz, maxx, maxz) {
                         return true;
                     }
                 }

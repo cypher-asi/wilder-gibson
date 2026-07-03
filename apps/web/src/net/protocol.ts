@@ -12,6 +12,13 @@ export interface ChunkCoord {
 export const CHUNK_SIZE = 32;
 export const TILE_SIZE = 2;
 export const TILES_PER_CHUNK = 16;
+/**
+ * How far a building's storefront ground floor is rendered proud of its
+ * footprint lot line, toward the street (-z face). Collision blocks this band
+ * so the player disc stops flush with the visual wall. Must match `proud` in
+ * render/building.ts and BUILDING_FRONT_PROUD in crates/wilder-physics.
+ */
+export const BUILDING_FRONT_PROUD = 0.3;
 /** Territory zone = square block of this many chunks (mirror of wilder-protocol). */
 export const REGION_CHUNKS = 2;
 
