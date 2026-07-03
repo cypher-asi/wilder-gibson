@@ -27,6 +27,7 @@ const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   impact: 380,
   shell: 700,
   lootPop: 650,
+  coinBurst: 900,
 };
 
 interface ActiveFx {
@@ -308,6 +309,8 @@ export function CombatFx() {
           <ShellCasing key={id} ev={ev} />
         ) : ev.type === "lootPop" ? (
           <LootPopFx key={id} ev={ev} />
+        ) : ev.type === "coinBurst" ? (
+          <CoinBurstFx key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -701,6 +704,76 @@ function LootPopFx({ ev }: { ev: Extract<CombatFxEvent, { type: "lootPop" }> }) 
           <mesh key={i} geometry={IMPACT_PART_GEO} material={sparkMat} dispose={null} />
         ))}
       </group>
+    </group>
+  );
+}
+
+// Flat gold coin disc (thin cylinder) flung out on kills / big rewards. Shared
+// geometry + base material; each burst clones the material to fade independently.
+const COIN_GEO = new THREE.CylinderGeometry(0.14, 0.14, 0.03, 14);
+const COIN_MAT_BASE = new THREE.MeshStandardMaterial({
+  color: "#ffcc33",
+  emissive: "#ffb300",
+  emissiveIntensity: 0.6,
+  metalness: 0.7,
+  roughness: 0.3,
+  transparent: true,
+  opacity: 1,
+});
+const COIN_GRAVITY = 11;
+
+/**
+ * Gold coins that pop up out of a spot, spin like Mario coins, arc under
+ * gravity, and fade — the reward payoff for a kill or a cashed-in gain.
+ */
+function CoinBurstFx({ ev }: { ev: Extract<CombatFxEvent, { type: "coinBurst" }> }) {
+  const group = useRef<THREE.Group>(null);
+  const material = useClonedMaterial(COIN_MAT_BASE);
+  const coins = useMemo(() => {
+    const n = Math.max(1, Math.min(ev.count, 10));
+    return Array.from({ length: n }, () => {
+      const a = Math.random() * Math.PI * 2;
+      const speed = 1.2 + Math.random() * 1.8;
+      return {
+        vx: Math.cos(a) * speed,
+        vy: 3.4 + Math.random() * 2.2,
+        vz: Math.sin(a) * speed,
+        spin: 12 + Math.random() * 16,
+        phase: Math.random() * Math.PI,
+      };
+    });
+  }, [ev.count]);
+
+  useFrame(() => {
+    if (!group.current) return;
+    const life = (performance.now() - ev.at) / LIFETIME_MS.coinBurst;
+    group.current.visible = life < 1;
+    if (life >= 1) return;
+    const t = (performance.now() - ev.at) / 1000;
+    material.opacity = THREE.MathUtils.clamp((1 - life) * 2.2, 0, 1);
+    group.current.children.forEach((child, i) => {
+      const c = coins[i];
+      child.position.set(
+        c.vx * t,
+        c.vy * t - COIN_GRAVITY * t * t * 0.5,
+        c.vz * t,
+      );
+      // Face-on spin so coins flash their broad side (billboard-ish flip).
+      child.rotation.z = c.phase + c.spin * t;
+    });
+  });
+
+  return (
+    <group ref={group} position={[ev.x, ev.y + 0.4, ev.z]}>
+      {coins.map((_, i) => (
+        <mesh
+          key={i}
+          geometry={COIN_GEO}
+          material={material}
+          rotation={[Math.PI / 2, 0, 0]}
+          dispose={null}
+        />
+      ))}
     </group>
   );
 }

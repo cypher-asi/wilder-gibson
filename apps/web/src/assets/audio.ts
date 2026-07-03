@@ -63,6 +63,82 @@ export function playCoin(volume = 0.22) {
   };
 }
 
+/**
+ * Rising major-arpeggio fanfare for a level-up: the marquee dopamine cue.
+ * Square-wave triad walking up C5-E5-G5-C6 with a bright ring-out on top,
+ * deliberately reading as classic power-up / stage-clear nostalgia.
+ */
+export function playLevelUp(volume = 0.2) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  // C5, E5, G5, C6, E6 — a quick ascending run then a held top note.
+  const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51];
+  const step = 0.09;
+  notes.forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    osc.type = "square";
+    osc.frequency.setValueAtTime(freq, t0 + i * step);
+    const gain = ctx.createGain();
+    const start = t0 + i * step;
+    const last = i === notes.length - 1;
+    const dur = last ? 0.5 : step + 0.04;
+    gain.gain.setValueAtTime(0.0001, start);
+    gain.gain.linearRampToValueAtTime(volume, start + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0008, start + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(start);
+    osc.stop(start + dur + 0.02);
+    osc.onended = () => {
+      osc.disconnect();
+      gain.disconnect();
+    };
+  });
+}
+
+/** Quick ascending sweep for a kill-confirm / power moment. */
+export function playPowerUp(volume = 0.16) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(392, t0); // G4
+  osc.frequency.exponentialRampToValueAtTime(1174.66, t0 + 0.16); // D6
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.24);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.26);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
+/** Short two-note "ka-ching" confirm for a completed purchase. */
+export function playPurchase(volume = 0.18) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const osc = ctx.createOscillator();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(1046.5, t0); // C6
+  osc.frequency.setValueAtTime(1567.98, t0 + 0.07); // G6
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(volume, t0);
+  gain.gain.setValueAtTime(volume, t0 + 0.07);
+  gain.gain.exponentialRampToValueAtTime(0.001, t0 + 0.3);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + 0.32);
+  osc.onended = () => {
+    osc.disconnect();
+    gain.disconnect();
+  };
+}
+
 /** Low double-buzz for refused actions (backpack full). */
 export function playDeny(volume = 0.18) {
   const ctx = getBlipCtx();

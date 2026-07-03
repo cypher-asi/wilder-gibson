@@ -117,6 +117,15 @@ export type CombatFxEvent =
       /** Icon that pops out of the collected crate (null: sparkle only). */
       item: import("../net/protocol").ItemKind | null;
       at: number;
+    }
+  | {
+      type: "coinBurst";
+      x: number;
+      y: number;
+      z: number;
+      /** How many gold coins to fling out (Mario stomp / reward feel). */
+      count: number;
+      at: number;
     };
 
 /** Weapon mount registered per character entity (muzzle FX + recoil kick). */
@@ -273,6 +282,21 @@ export interface PickupFeedEntry {
 
 let nextPickupId = 1;
 
+/** Transient level-up celebration (drives the banner + badge bounce). */
+export interface LevelUpEvent {
+  level: number;
+  /** performance.now() when it fired; used to key/expire the banner. */
+  at: number;
+}
+
+/** Small bouncy currency toast ("+N WILD") shown near the wallet UI. */
+export interface WalletToast {
+  id: number;
+  text: string;
+}
+
+let nextWalletToastId = 1;
+
 /** Per-ability hotbar state (ms timestamps from performance.now()). */
 export interface AbilityUiState {
   /** When the ability comes off cooldown. */
@@ -399,11 +423,18 @@ interface UiState {
   musicOn: boolean;
   /** Left-side pickup feed entries (newest last); expired by the HUD. */
   pickupFeed: PickupFeedEntry[];
+  /** Active level-up celebration; cleared by the banner after it plays. */
+  levelUp: LevelUpEvent | null;
+  /** Bouncy currency toasts ("+N WILD"); self-expire in the HUD. */
+  walletToasts: WalletToast[];
 
   set: (partial: Partial<UiState>) => void;
   pushChat: (line: ChatLine) => void;
   pushPickup: (entry: Omit<PickupFeedEntry, "id">) => void;
   expirePickup: (id: number) => void;
+  celebrateLevelUp: (level: number) => void;
+  pushWalletToast: (text: string) => void;
+  expireWalletToast: (id: number) => void;
   toggleInventory: () => void;
   toggleMap: () => void;
   toggleEconomy: () => void;
@@ -479,6 +510,8 @@ export const useGame: import("zustand").UseBoundStore<
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
   pickupFeed: [],
+  levelUp: null,
+  walletToasts: [],
 
   set: (partial) => set(partial),
   pushChat: (line) =>
@@ -489,6 +522,14 @@ export const useGame: import("zustand").UseBoundStore<
     })),
   expirePickup: (id) =>
     set((s) => ({ pickupFeed: s.pickupFeed.filter((e) => e.id !== id) })),
+  celebrateLevelUp: (level) =>
+    set({ levelUp: { level, at: performance.now() } }),
+  pushWalletToast: (text) =>
+    set((s) => ({
+      walletToasts: [...s.walletToasts.slice(-3), { id: nextWalletToastId++, text }],
+    })),
+  expireWalletToast: (id) =>
+    set((s) => ({ walletToasts: s.walletToasts.filter((t) => t.id !== id) })),
   toggleInventory: () => set((s) => ({ inventoryOpen: !s.inventoryOpen })),
   toggleMap: () => set((s) => ({ mapOpen: !s.mapOpen })),
   toggleEconomy: () => set((s) => ({ economyOpen: !s.economyOpen })),

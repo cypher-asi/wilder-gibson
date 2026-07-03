@@ -55,6 +55,8 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <ExtractionBar />
           <ExtractHint />
           <PickupFeed />
+          <WalletToasts />
+          <LevelUpBanner />
           <ActionBar connection={connection} />
           <WeaponDock connection={connection} />
           <BackpackBar />
@@ -483,9 +485,12 @@ function WeaponDock({ connection }: { connection: GameConnection }) {
         </div>
       </div>
       <div className="weapon-dock-xp">
-        <span className="weapon-dock-level">LVL {level}</span>
+        <span key={level} className="weapon-dock-level badge-pop">
+          LVL {level}
+        </span>
         <div className="xp-bar">
           <div className="xp-fill" style={{ width: `${xpPct}%` }} />
+          <div key={xp} className="xp-flash" />
         </div>
         <span className="weapon-dock-xp-num">
           {xp}/{nextLevelXp}
@@ -1282,6 +1287,56 @@ function PickupFeedLine({
     <div className={`pickup-line${entry.alert ? " alert" : ""}`}>
       {entry.kind && <ItemIcon kind={entry.kind} size={22} />}
       <span>{entry.text}</span>
+    </div>
+  );
+}
+
+/** Bouncy "+N WILD" coin toasts stacked above the bottom-right dock. */
+function WalletToasts() {
+  const toasts = useGame((s) => s.walletToasts);
+  return (
+    <div className="wallet-toasts">
+      {toasts.map((t) => (
+        <WalletToastLine key={t.id} id={t.id} text={t.text} />
+      ))}
+    </div>
+  );
+}
+
+function WalletToastLine({ id, text }: { id: number; text: string }) {
+  useEffect(() => {
+    const timer = setTimeout(() => useGame.getState().expireWalletToast(id), 1600);
+    return () => clearTimeout(timer);
+  }, [id]);
+  return (
+    <div className="wallet-toast">
+      <span className="wallet-toast-coin">●</span>
+      {text}
+    </div>
+  );
+}
+
+/** Full-width level-up celebration banner: fanfare-timed bounce + sparkles. */
+function LevelUpBanner() {
+  const levelUp = useGame((s) => s.levelUp);
+  const [shown, setShown] = useState<import("../state/game").LevelUpEvent | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!levelUp) return;
+    setShown(levelUp);
+    const timer = setTimeout(() => setShown(null), 2400);
+    return () => clearTimeout(timer);
+  }, [levelUp?.at]);
+  if (!shown) return null;
+  return (
+    <div className="levelup-banner" key={shown.at}>
+      <div className="levelup-star levelup-star-l">✦</div>
+      <div className="levelup-text">
+        <span className="levelup-title">LEVEL UP</span>
+        <span className="levelup-sub">LVL {shown.level}</span>
+      </div>
+      <div className="levelup-star levelup-star-r">✦</div>
     </div>
   );
 }

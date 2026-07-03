@@ -1,7 +1,14 @@
 // WebSocket game connection: handshake, message dispatch, input sending.
 
 import * as THREE from "three";
-import { playCoin, playDeny, playSfx } from "../assets/audio";
+import {
+  playCoin,
+  playDeny,
+  playLevelUp,
+  playPowerUp,
+  playPurchase,
+  playSfx,
+} from "../assets/audio";
 import { setTerritory } from "../game/territory";
 import {
   armorShield,
@@ -13,6 +20,14 @@ import {
 } from "../state/game";
 import { itemLabel } from "../ui/ItemIcon";
 import { C2S, decode, encode, S2C } from "./protocol";
+
+/**
+ * Entity ids the local player has damaged recently, with the ms timestamp of
+ * the last hit. Lets a kill be attributed to the player so the reward juice
+ * (coin burst + power-up chime) only fires on kills we earned.
+ */
+const recentLocalHits = new Map<number, number>();
+const KILL_CREDIT_MS = 2500;
 
 /** World position of an entity's gun muzzle, if a mount is registered. */
 function muzzlePosition(entityId: number): THREE.Vector3 | null {
@@ -146,6 +161,7 @@ export class GameConnection {
             });
           }
         }
+        recentLocalHits.delete(msg.d.id);
         game.entities.delete(msg.d.id);
         bumpEntityRoster();
         break;
@@ -204,6 +220,9 @@ export class GameConnection {
           if (target) {
             target.lastHitAt = now;
             target.hitReactAt = now;
+          }
+          if (ev.d.attacker === game.localEntityId) {
+            recentLocalHits.set(ev.d.target, now);
           }
           // Impact point comes from the server (actual ray hit position).
           game.fx.push({
@@ -285,6 +304,21 @@ export class GameConnection {
           if (dead) {
             game.fx.push({ type: "death", x: dead.x, y: dead.y + 1, z: dead.z, at: now });
           }
+          // Player-attributed kill: reward it with a power-up chime and a
+          // spray of gold coins over the corpse.
+          const hitAt = recentLocalHits.get(ev.d.id);
+          if (dead && hitAt !== undefined && now - hitAt < KILL_CREDIT_MS) {
+            playPowerUp();
+            game.fx.push({
+              type: "coinBurst",
+              x: dead.x,
+              y: dead.y + 0.8,
+              z: dead.z,
+              count: 6,
+              at: now,
+            });
+          }
+          recentLocalHits.delete(ev.d.id);
         } else if (ev.t === "Shockwave") {
           void playSfx("sfx_hit", 0.5);
           const source = game.entities.get(ev.d.source);
@@ -296,6 +330,7 @@ export class GameConnection {
         break;
       }
       case "XpUpdate": {
+        const prevLevel = useGame.getState().level;
         ui.set({
           xp: msg.d.xp,
           level: msg.d.level,
@@ -303,6 +338,28 @@ export class GameConnection {
         });
         if (msg.d.gained > 0) {
           ui.pushChat({ from: "system", text: `+${msg.d.gained} XP`, system: true });
+        }
+        // Level-up: the marquee dopamine moment — fanfare, HUD banner, and a
+        // coin burst raining over the local player.
+        if (msg.d.level > prevLevel) {
+          playLevelUp();
+          ui.celebrateLevelUp(msg.d.level);
+          ui.pushChat({
+            from: "system",
+            text: `LEVEL UP! You reached level ${msg.d.level}.`,
+            system: true,
+          });
+          const me = game.entities.get(game.localEntityId);
+          if (me) {
+            game.fx.push({
+              type: "coinBurst",
+              x: me.x,
+              y: me.y + 1.2,
+              z: me.z,
+              count: 10,
+              at: performance.now(),
+            });
+          }
         }
         break;
       }
@@ -395,11 +452,18 @@ export class GameConnection {
         break;
       }
       case "MarketState": {
+        const prevWallet = useGame.getState().market?.wallet;
         ui.set({ market: { listings: msg.d.listings, wallet: msg.d.wallet } });
+        if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
+          playCoin();
+          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} WILD`);
+        }
         break;
       }
       case "MarketResult": {
-        if (!msg.d.ok) {
+        if (msg.d.ok) {
+          playPurchase();
+        } else {
           ui.pushChat({
             from: "system",
             text: `Market: ${msg.d.error ?? "action failed"}`,
@@ -409,6 +473,7 @@ export class GameConnection {
         break;
       }
       case "VendorState": {
+        const prevWallet = useGame.getState().vendor?.wallet;
         ui.set({
           vendor: {
             id: msg.d.vendor,
@@ -417,10 +482,16 @@ export class GameConnection {
             wallet: msg.d.wallet,
           },
         });
+        if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
+          playCoin();
+          ui.pushWalletToast(`+${msg.d.wallet - prevWallet} WILD`);
+        }
         break;
       }
       case "VendorResult": {
-        if (!msg.d.ok) {
+        if (msg.d.ok) {
+          playPurchase();
+        } else {
           ui.pushChat({
             from: "system",
             text: `Vendor: ${msg.d.error ?? "action failed"}`,
