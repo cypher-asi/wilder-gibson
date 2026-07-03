@@ -14,10 +14,11 @@ import {
   stepMoveSpeed,
   WALK_SPEED,
 } from "../game/collision";
+import { playSfx } from "../assets/audio";
 import { GameConnection } from "../net/connection";
 import { AbilityKind } from "../net/protocol";
-import { consumableHotbar, game, useGame } from "../state/game";
-import { cameraState } from "./CameraRig";
+import { consumableHotbar, game, GameEntity, useGame } from "../state/game";
+import { cameraKick, cameraState } from "./CameraRig";
 import { groundHeightAt } from "./Ground";
 
 const TICK_DT = 1 / 20;
@@ -54,6 +55,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   const accumulator = useRef(0);
   const pointer = useRef({ x: 0, y: 0, inside: false });
   const firing = useRef(false);
+  // Sprint is a toggle (tap Shift), not a hold: holding Shift while
+  // right-clicking to move triggers Brave/Firefox's forced context menu,
+  // which the page cannot suppress.
+  const running = useRef(false);
   const lastShotAt = useRef(0);
   const raycaster = useRef(new THREE.Raycaster());
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
@@ -72,6 +77,9 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       if (event.code === "KeyM") {
         event.preventDefault();
         useGame.getState().toggleMap();
+      }
+      if ((event.code === "ShiftLeft" || event.code === "ShiftRight") && !event.repeat) {
+        running.current = !running.current;
       }
       if (event.code === "Enter") {
         // Prevent the same key stroke from submitting the just-focused input.
@@ -175,6 +183,10 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (game.crouching) toggleCrouch();
     game.roll = { until: now + ROLL_DURATION * 1000, dx, dz };
     game.rollReadyAt = now + ROLL_COOLDOWN * 1000;
+    // Snap the visual yaw to the dash direction immediately so the whole
+    // roll plays head-first along it instead of easing around mid-tumble.
+    game.predicted.yaw = Math.atan2(dz, dx);
+    game.rendered.yaw = game.predicted.yaw;
     const seq = game.nextSeq++;
     connection.send({ t: "Roll", d: { seq, dx, dz } });
   }
@@ -212,8 +224,11 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       stepInput();
     }
     // Live input state for the local anim controller (Entities.tsx).
-    game.input.moving = moveDirection() !== null;
-    game.input.run = !!(keys.current.ShiftLeft || keys.current.ShiftRight);
+    const liveDir = moveDirection();
+    game.input.moving = liveDir !== null;
+    game.input.dx = liveDir ? liveDir[0] : 0;
+    game.input.dz = liveDir ? liveDir[1] : 0;
+    game.input.run = running.current;
     updateRendered(dt);
   });
 
@@ -248,6 +263,14 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     }
   }
 
+  /** The hovered enemy, if it's still a valid (alive, known) target. */
+  function hoverTarget(): GameEntity | null {
+    if (game.hoverTargetId == null) return null;
+    const target = game.entities.get(game.hoverTargetId);
+    if (!target || target.healthPct <= 0 || target.anim === "Death") return null;
+    return target;
+  }
+
   /** Project the cursor onto the ground plane at the player's elevation. */
   function updateAim() {
     if (!pointer.current.inside) {
@@ -272,12 +295,25 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (dx * dx + dz * dz > 0.01) {
       game.aim.yaw = Math.atan2(dz, dx);
     }
+    // Soft lock: while hovering an enemy, face (and aim at) it exactly.
+    const target = hoverTarget();
+    if (target) {
+      const tdx = target.x - px;
+      const tdz = target.z - pz;
+      if (tdx * tdx + tdz * tdz > 0.01) {
+        game.aim.x = target.x;
+        game.aim.z = target.z;
+        game.aim.yaw = Math.atan2(tdz, tdx);
+      }
+    }
     game.aim.active = true;
   }
 
   /**
-   * Hold-to-fire at the equipped weapon's rate, aimed at the cursor. Only
-   * shoots once the weapon is drawn (first click) and the draw finished.
+   * Hold-to-fire at the equipped weapon's rate, aimed at the cursor (or
+   * snapped to the hovered enemy). Only shoots once the weapon is drawn
+   * (first click) and the draw finished. Works from every movement state
+   * except mid-roll.
    */
   function updateFire() {
     if (!firing.current || !game.aim.active) return;
@@ -287,8 +323,35 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
     lastShotAt.current = now;
     game.gun.lastShotAt = now;
+    game.gun.shotSeq++;
     const seq = game.nextSeq++;
     connection.send({ t: "Attack", d: { seq, tx: game.aim.x, tz: game.aim.z } });
+
+    // Instant local feedback: muzzle flash, shell, recoil, sfx. The server's
+    // MuzzleFlash event only adds the tracer for our own shots.
+    if (hasRangedWeapon()) {
+      void playSfx("sfx_shoot", 0.3);
+      const yaw = game.aim.yaw;
+      const mount = game.gunMounts.get(game.localEntityId);
+      const muzzle = mount
+        ? mount.muzzle.getWorldPosition(new THREE.Vector3())
+        : null;
+      const mx = muzzle?.x ?? game.rendered.x + Math.cos(yaw) * 0.5;
+      const my = muzzle?.y ?? 1.35;
+      const mz = muzzle?.z ?? game.rendered.z + Math.sin(yaw) * 0.5;
+      game.fx.push({ type: "flash", x: mx, y: my, z: mz, yaw, at: now });
+      game.fx.push({
+        type: "shell",
+        x: mx,
+        y: my,
+        z: mz,
+        dirX: -Math.sin(yaw),
+        dirZ: Math.cos(yaw),
+        at: now,
+      });
+      const weapon = useGame.getState().inventory?.equipped_weapon;
+      cameraKick(weapon === "Smg" ? 0.1 : 0.22, yaw);
+    }
   }
 
   function stepInput() {
@@ -319,16 +382,17 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
       }
     }
 
-    const k = keys.current;
     const dir = moveDirection();
     if (!dir) return;
     const [dx, dz] = dir;
 
-    const run = !!(k.ShiftLeft || k.ShiftRight); // walk by default, shift sprints
+    const run = running.current; // walk by default; tap Shift toggles sprint
     const speed = game.crouching ? CROUCH_SPEED : run ? RUN_SPEED : WALK_SPEED;
 
+    // Facing follows the aim (twin-stick); fall back to move direction.
+    const yaw = game.aim.active ? game.aim.yaw : Math.atan2(dz, dx);
     const seq = game.nextSeq++;
-    connection.send({ t: "MoveInput", d: { seq, dx, dz, run } });
+    connection.send({ t: "MoveInput", d: { seq, dx, dz, yaw, run } });
     game.pendingInputs.push({ seq, dx, dz, speed, dt: TICK_DT });
     if (game.pendingInputs.length > 120) game.pendingInputs.shift();
 
@@ -344,8 +408,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
     );
     game.predicted.x = nx;
     game.predicted.z = nz;
-    // Facing follows the aim (twin-stick); fall back to move direction.
-    game.predicted.yaw = game.aim.active ? game.aim.yaw : Math.atan2(dz, dx);
+    game.predicted.yaw = yaw;
     game.lastDirectInputAt = now;
     game.moveMarker = null;
   }

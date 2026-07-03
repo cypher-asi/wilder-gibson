@@ -183,7 +183,10 @@ export type MarketActionMsg =
 export type C2S =
   | Tagged<"Authenticate", { token: string }>
   | Tagged<"JoinWorld", { character_id: string }>
-  | Tagged<"MoveInput", { seq: number; dx: number; dz: number; run: boolean }>
+  | Tagged<
+      "MoveInput",
+      { seq: number; dx: number; dz: number; yaw: number; run: boolean }
+    >
   | Tagged<"MoveTo", { seq: number; x: number; z: number }>
   | Tagged<"StopMove", { seq: number }>
   | Tagged<"Roll", { seq: number; dx: number; dz: number }>
@@ -218,8 +221,11 @@ export interface MarketListing {
 }
 
 export type CombatEvent =
-  | Tagged<"Hit", { attacker: number; target: number; damage: number }>
-  | Tagged<"Miss", { attacker: number }>
+  | Tagged<
+      "Hit",
+      { attacker: number; target: number; damage: number; x: number; y: number; z: number }
+    >
+  | Tagged<"Miss", { attacker: number; x: number; z: number }>
   | Tagged<"MuzzleFlash", { attacker: number; tx: number; tz: number }>
   | Tagged<"EntityDied", { id: number }>
   | Tagged<"Shockwave", { source: number }>;

@@ -159,7 +159,7 @@ struct Player {
     inventory: Inventory,
     stash: Stash,
     tx: mpsc::UnboundedSender<S2C>,
-    pending_inputs: Vec<(u32, f32, f32, bool, f32)>, // seq, dx, dz, run, dt
+    pending_inputs: Vec<(u32, f32, f32, f32, bool, f32)>, // seq, dx, dz, yaw, run, dt
     last_input_seq: u32,
     path: Vec<Vec3>,
     view: HashSet<ChunkCoord>,
@@ -220,9 +220,9 @@ impl Player {
     fn anim(&self) -> AnimState {
         if self.roll_time > 0.0 {
             AnimState::Roll
-        } else if self.attacked_this_tick {
-            AnimState::Attack
         } else if self.moved_this_tick {
+            // Movement wins: clients layer the shot on the upper body, so a
+            // running shooter keeps running instead of freezing mid-stride.
             if self.crouching {
                 AnimState::CrouchWalk
             } else if self.ran_this_tick {
@@ -230,6 +230,8 @@ impl Player {
             } else {
                 AnimState::Walk
             }
+        } else if self.attacked_this_tick {
+            AnimState::Attack
         } else if self.crouching {
             AnimState::Crouch
         } else {
@@ -542,11 +544,11 @@ impl World {
 
     fn handle_msg(&mut self, entity: EntityId, msg: C2S) {
         match msg {
-            C2S::MoveInput { seq, dx, dz, run } => {
+            C2S::MoveInput { seq, dx, dz, yaw, run } => {
                 if let Some(player) = self.players.get_mut(&entity) {
                     player.path.clear();
                     player.extracting = None;
-                    player.pending_inputs.push((seq, dx, dz, run, TICK_DT));
+                    player.pending_inputs.push((seq, dx, dz, yaw, run, TICK_DT));
                 }
             }
             C2S::MoveTo { seq, x, z } => {
@@ -725,8 +727,10 @@ impl World {
 
         let broadcast_flash = stats.ranged;
 
-        // Find the NPC hit.
+        // Find the NPC hit, tracking where the attack terminated (impact,
+        // blocking wall, or max range) for client VFX.
         let mut hit: Option<(EntityId, f32)> = None;
+        let mut end = origin + dir * stats.range;
         if stats.ranged {
             // Hitscan: march the ray; buildings block. Targets are checked
             // before the wall test so enemies hugging a wall are still hittable.
@@ -736,11 +740,13 @@ impl World {
                 for npc in self.npcs.values() {
                     if npc.alive() && (npc.position - p).length() < 0.9 {
                         hit = Some((npc.entity, attack_damage));
+                        end = npc.position;
                         break 'ray;
                     }
                 }
                 if !self.chunks.walkable(p.x, p.z) {
-                    break; // wall
+                    end = p; // wall
+                    break;
                 }
                 t += 0.5;
             }
@@ -757,6 +763,7 @@ impl World {
                     let facing = to.normalize().dot(dir);
                     if facing > 0.2 && best.map(|(_, d)| dist < d).unwrap_or(true) {
                         best = Some((npc.entity, dist));
+                        end = npc.position;
                     }
                 }
             }
@@ -765,14 +772,15 @@ impl World {
 
         let attacker = entity;
         if broadcast_flash {
-            self.broadcast_combat(CombatEvent::MuzzleFlash { attacker, tx, tz });
+            self.broadcast_combat(CombatEvent::MuzzleFlash { attacker, tx: end.x, tz: end.z });
         }
         match hit {
             Some((target, damage)) => {
-                self.damage_npc(attacker, target, damage);
+                let impact = Vec3::new(end.x, 1.25, end.z);
+                self.damage_npc(attacker, target, damage, impact);
             }
             None => {
-                self.broadcast_combat(CombatEvent::Miss { attacker });
+                self.broadcast_combat(CombatEvent::Miss { attacker, x: end.x, z: end.z });
             }
         }
     }
@@ -820,7 +828,12 @@ impl World {
                     targets.push(npc.entity);
                 }
                 for target in targets {
-                    self.damage_npc(entity, target, SHOCKWAVE_DAMAGE);
+                    let impact = self
+                        .npcs
+                        .get(&target)
+                        .map(|n| Vec3::new(n.position.x, 1.0, n.position.z))
+                        .unwrap_or(origin);
+                    self.damage_npc(entity, target, SHOCKWAVE_DAMAGE, impact);
                 }
             }
             AbilityKind::Stim => {
@@ -841,7 +854,7 @@ impl World {
         }
     }
 
-    fn damage_npc(&mut self, attacker: EntityId, target: EntityId, damage: f32) {
+    fn damage_npc(&mut self, attacker: EntityId, target: EntityId, damage: f32, impact: Vec3) {
         let died_info = {
             let Some(npc) = self.npcs.get_mut(&target) else { return };
             npc.health -= damage;
@@ -851,10 +864,22 @@ impl World {
                 npc.anim = AnimState::Death;
                 Some((npc.position, npc.archetype.variant == 2))
             } else {
+                // Getting shot provokes the NPC even from beyond its passive
+                // aggro radius, so sniping draws retaliation.
+                if self.players.contains_key(&attacker) {
+                    npc.provoke(attacker);
+                }
                 None
             }
         };
-        self.broadcast_combat(CombatEvent::Hit { attacker, target, damage });
+        self.broadcast_combat(CombatEvent::Hit {
+            attacker,
+            target,
+            damage,
+            x: impact.x,
+            y: impact.y,
+            z: impact.z,
+        });
         if let Some((drop_pos, is_raider)) = died_info {
             self.broadcast_combat(CombatEvent::EntityDied { id: target });
             self.grant_xp(attacker, if is_raider { XP_RAIDER_KILL } else { XP_SCAV_KILL });
@@ -1543,6 +1568,13 @@ impl World {
         self.update_interest();
         self.replicate();
 
+        // Clear per-tick attack flags only after replicate so the Attack anim
+        // state actually reaches other clients (attacks are processed on
+        // message receipt, before this tick's movement pass).
+        for player in self.players.values_mut() {
+            player.attacked_this_tick = false;
+        }
+
         if self.tick % SAVE_INTERVAL_TICKS == 0 {
             self.save_all();
         }
@@ -1552,7 +1584,6 @@ impl World {
         for player in self.players.values_mut() {
             player.moved_this_tick = false;
             player.ran_this_tick = false;
-            player.attacked_this_tick = false;
             player.attack_cooldown = (player.attack_cooldown - TICK_DT).max(0.0);
             if player.character.health <= 0.0 {
                 continue;
@@ -1586,7 +1617,7 @@ impl World {
 
             let speed_mult = if player.stim_speed_time > 0.0 { STIM_SPEED_MULT } else { 1.0 };
             let inputs = std::mem::take(&mut player.pending_inputs);
-            for (seq, dx, dz, run, dt) in inputs {
+            for (seq, dx, dz, yaw, run, dt) in inputs {
                 player.last_input_seq = player.last_input_seq.max(seq);
                 let speed = speed_mult
                     * if player.crouching {
@@ -1600,7 +1631,9 @@ impl World {
                     step_move_speed(&self.chunks, player.character.position, dx, dz, speed, dt);
                 player.character.position = next;
                 if dx != 0.0 || dz != 0.0 {
-                    player.character.yaw = dz.atan2(dx);
+                    // Twin-stick: facing follows the client's aim, not the move
+                    // direction, so remote viewers see strafing/backpedaling.
+                    player.character.yaw = if yaw.is_finite() { yaw } else { dz.atan2(dx) };
                     player.ran_this_tick = run && !player.crouching;
                 }
             }
@@ -1730,7 +1763,15 @@ impl World {
         player.character.shield -= absorbed;
         player.character.health -= dealt - absorbed;
         player.shield_delay = SHIELD_REGEN_DELAY;
-        self.broadcast_combat(CombatEvent::Hit { attacker, target, damage: dealt });
+        let impact = player.character.position;
+        self.broadcast_combat(CombatEvent::Hit {
+            attacker,
+            target,
+            damage: dealt,
+            x: impact.x,
+            y: 1.25,
+            z: impact.z,
+        });
 
         if self.players[&target].character.health <= 0.0 {
             self.kill_player(attacker, target);

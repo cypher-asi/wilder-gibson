@@ -24,7 +24,15 @@ pub struct Npc {
     pub respawn_in: f32,
     pub anim: AnimState,
     pub chunk: ChunkCoord,
+    /// Seconds of forced aggro on `target` after taking damage; lets the NPC
+    /// retaliate against attackers beyond its passive aggro radius.
+    pub provoked: f32,
 }
+
+/// How long a damaged NPC stays locked onto its attacker.
+const PROVOKE_SECONDS: f32 = 8.0;
+/// Provoked NPCs give up beyond this distance from the attacker.
+const PROVOKE_LEASH: f32 = 40.0;
 
 impl Npc {
     pub fn new(entity: EntityId, archetype: &'static NpcArchetype, home: Vec3) -> Self {
@@ -43,6 +51,19 @@ impl Npc {
             respawn_in: 0.0,
             anim: AnimState::Idle,
             chunk: ChunkCoord::from_world(home),
+            provoked: 0.0,
+        }
+    }
+
+    /// Force aggro on an attacker (called when this NPC takes damage).
+    pub fn provoke(&mut self, attacker: EntityId) {
+        if !self.alive() {
+            return;
+        }
+        self.target = Some(attacker);
+        self.provoked = PROVOKE_SECONDS;
+        if self.state == NpcState::Patrol {
+            self.state = NpcState::Aggro;
         }
     }
 
@@ -87,9 +108,12 @@ impl Npc {
             return None;
         }
         self.attack_cooldown = (self.attack_cooldown - TICK_DT).max(0.0);
+        self.provoked = (self.provoked - TICK_DT).max(0.0);
         self.anim = AnimState::Idle;
 
-        // Acquire / validate target.
+        // Acquire / validate target: nearest player in passive aggro range,
+        // or the provoking attacker (pursued beyond that radius, up to a
+        // generous leash) when this NPC was recently damaged.
         let mut nearest: Option<(EntityId, Vec3, f32)> = None;
         for (id, pos) in players {
             let d = (*pos - self.position).length();
@@ -97,9 +121,19 @@ impl Npc {
                 nearest = Some((*id, *pos, d));
             }
         }
+        let mut chosen = nearest.filter(|(_, _, d)| *d < self.archetype.aggro_range);
+        if chosen.is_none() && self.provoked > 0.0 {
+            if let Some(tid) = self.target {
+                chosen = players
+                    .iter()
+                    .find(|(id, _)| *id == tid)
+                    .map(|(id, pos)| (*id, *pos, (*pos - self.position).length()))
+                    .filter(|(_, _, d)| *d < PROVOKE_LEASH);
+            }
+        }
 
-        match nearest {
-            Some((id, pos, dist)) if dist < self.archetype.aggro_range => {
+        match chosen {
+            Some((id, pos, dist)) => {
                 self.state = NpcState::Aggro;
                 self.target = Some(id);
                 let to = pos - self.position;

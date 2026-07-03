@@ -15,8 +15,9 @@ import {
 } from "../game/collision";
 import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState } from "../net/protocol";
-import { game, GameEntity, useGame } from "../state/game";
+import { game, GameEntity, GunMount, useGame } from "../state/game";
 import { groundHeightAt } from "./Ground";
+import { TargetReticle } from "./TargetReticle";
 
 /** Render remote entities this many ms in the past for smooth interpolation. */
 const INTERP_DELAY = 120;
@@ -65,6 +66,37 @@ const ONE_SHOTS = new Set([
 ]);
 
 /**
+ * Bones above the hips (post-GLTF name sanitization, so `DEF-spine.001`
+ * appears as `DEF-spine001` in track names). Tracks matching this drive the
+ * upper-body animation layer; legs/hips stay with locomotion.
+ */
+const UPPER_BODY_BONES =
+  /spine00[1-3]|neck|head|shoulder|upper_arm|forearm|hand|thumb|index|middle|ring|pinky/i;
+
+/**
+ * Mixer weight for the upper-body layer. Actions blend by weighted average,
+ * so a high weight lets the shoot/flinch pose dominate locomotion arm swing
+ * on shared bones (12 -> ~92%).
+ */
+const UPPER_WEIGHT = 12;
+const UPPER_SUFFIX = "@upper";
+
+/** Copy of a clip keeping only upper-body tracks, for layered playback. */
+function upperBodyClip(clip: THREE.AnimationClip): THREE.AnimationClip {
+  const tracks = clip.tracks.filter((t) => UPPER_BODY_BONES.test(t.name));
+  return new THREE.AnimationClip(clip.name + UPPER_SUFFIX, clip.duration, tracks);
+}
+
+/** Clips available on the upper-body layer. */
+const UPPER_CLIPS = ["Pistol_Shoot", "Hit_Chest"];
+
+/** How long the gun mesh bucks after a shot, ms. */
+const GUN_KICK_MS = 130;
+/** Duration of the red damage flash, ms. */
+const HIT_FLASH_MS = 200;
+const HIT_FLASH_COLOR = new THREE.Color(0xff2822);
+
+/**
  * World speed (m/s) each locomotion clip was authored around; playback rate
  * is scaled by actual movement speed so feet don't slide.
  */
@@ -75,17 +107,59 @@ const CLIP_REF_SPEED: Record<string, number> = {
   Crouch_Fwd_Loop: 1.2,
 };
 
+// ---------------------------------------------------------------------------
+// Directional locomotion blender
+// ---------------------------------------------------------------------------
+//
+// The UAL Standard pack ships forward gaits only, so directional movement is
+// synthesized: the whole model turns so the legs lead into the actual
+// movement direction, the spine counter-twists so the torso keeps facing the
+// aim, and backpedaling plays the gait in reverse (legs face away from the
+// travel direction). All locomotion actions stay on the mixer with
+// exponentially damped weights and a shared normalized gait phase, so
+// idle/walk/run/crouch and every direction change blend continuously instead
+// of snapping between clips.
+
+const GAIT_CLIPS = [
+  "Walk_Loop",
+  "Jog_Fwd_Loop",
+  "Sprint_Loop",
+  "Crouch_Fwd_Loop",
+] as const;
+const IDLE_CLIPS = ["Idle_Loop", "Pistol_Idle_Loop", "Crouch_Idle_Loop"] as const;
+const LOCO_CLIPS: readonly string[] = [...GAIT_CLIPS, ...IDLE_CLIPS];
+const GAIT_SET = new Set<string>(GAIT_CLIPS);
+
+/** How fast locomotion blend weights chase their targets (1/s). */
+const WEIGHT_DAMP = 10;
+/** How fast the legs turn toward the movement direction (1/s). */
+const LEG_DAMP = 12;
+/** How fast the gait flips between forward and reversed playback (1/s). */
+const DIR_DAMP = 8;
+/** Speed (m/s) at which the gait fully replaces idle. */
+const FULL_GAIT_SPEED = 1.2;
+/** Minimum speed that counts as moving for animation purposes. */
+const MOVE_EPSILON = 0.15;
+/** Legs never turn further than this away from the torso (rad). */
+const MAX_LEG_YAW = (75 * Math.PI) / 180;
+/** Above this speed the sprint clip takes over from the jog (m/s). */
+const SPRINT_MIN = (WALK_SPEED + RUN_SPEED) / 2;
+/** Below this speed the slow walk clip is used instead of the jog (m/s). */
+const WALK_MAX = 2.2;
+/** Spine bones sharing the torso counter-twist (GLTF-sanitized names). */
+const SPINE_BONES = ["DEF-spine001", "DEF-spine002", "DEF-spine003"];
+
 interface ClipChoice {
   name: string;
   timeScale: number;
 }
 
-/** Map a replicated anim state to a clip for this entity. */
-function chooseClip(
-  anim: AnimState,
-  isNpc: boolean,
-  gunIdle: boolean,
-): ClipChoice {
+/**
+ * Full-body override states (death, roll, gather, NPC melee). Everything else
+ * renders through the locomotion blender; player shooting rides the
+ * upper-body layer.
+ */
+function chooseOverride(anim: AnimState, isNpc: boolean): ClipChoice | null {
   switch (anim) {
     case "Death":
       return { name: "Death01", timeScale: 1 };
@@ -93,11 +167,34 @@ function chooseClip(
       // Sync the roll animation to the dash duration exactly.
       return { name: "Roll", timeScale: 1 };
     case "Attack":
-      return isNpc
-        ? { name: "Punch_Cross", timeScale: 1.15 }
-        : { name: "Pistol_Shoot", timeScale: 1.4 };
+      // Players shoot via the upper-body layer on top of locomotion, so the
+      // base layer keeps its idle/moving pose; NPCs swing full-body.
+      return isNpc ? { name: "Punch_Cross", timeScale: 1.15 } : null;
     case "Gather":
       return { name: "Interact", timeScale: 1 };
+    default:
+      return null;
+  }
+}
+
+function wrapAngle(a: number): number {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+const Y_AXIS = new THREE.Vector3(0, 1, 0);
+const spineTwistQ = new THREE.Quaternion();
+
+/**
+ * Map a replicated anim state to a single base-layer clip: full-body
+ * overrides first, then locomotion loops (players shoot via the upper-body
+ * layer, so Attack falls through to idle/locomotion here).
+ */
+function chooseClip(anim: AnimState, isNpc: boolean, gunIdle: boolean): ClipChoice {
+  const override = chooseOverride(anim, isNpc);
+  if (override) return override;
+  switch (anim) {
     case "Crouch":
       return { name: "Crouch_Idle_Loop", timeScale: 1 };
     case "CrouchWalk":
@@ -111,10 +208,12 @@ function chooseClip(
         timeScale: RUN_SPEED / CLIP_REF_SPEED.Sprint_Loop,
       };
     case "Walk":
-      // NPCs patrol slowly; players "walk" at a brisk 3 m/s (jog cadence).
+      // A real walk cycle for everyone; players pace it up to their 3 m/s
+      // move speed (brisk march) instead of playing the jog clip slowed
+      // down, which read as slow motion.
       return isNpc
         ? { name: "Walk_Loop", timeScale: 1 }
-        : { name: "Jog_Fwd_Loop", timeScale: WALK_SPEED / CLIP_REF_SPEED.Jog_Fwd_Loop };
+        : { name: "Walk_Loop", timeScale: WALK_SPEED / CLIP_REF_SPEED.Walk_Loop };
     default:
       return gunIdle
         ? { name: "Pistol_Idle_Loop", timeScale: 1 }
@@ -122,9 +221,21 @@ function chooseClip(
   }
 }
 
+/** Cloned material + its resting emissive, for the red damage flash. */
+interface FlashMaterial {
+  mat: THREE.MeshStandardMaterial;
+  baseEmissive: THREE.Color;
+  baseIntensity: number;
+}
+
 /** Apply the cyberpunk restyle: gunmetal body, emissive neon joints. */
-function restyleMannequin(scene: THREE.Group, tint: number, hostile: boolean) {
+function restyleMannequin(
+  scene: THREE.Group,
+  tint: number,
+  hostile: boolean,
+): FlashMaterial[] {
   const joints = new THREE.Color(hostile ? 0xff3040 : tint || 0x40e8ff);
+  const flashables: FlashMaterial[] = [];
   const restyle = (mat: THREE.Material): THREE.Material => {
     const m = (mat as THREE.MeshStandardMaterial).clone();
     if (m.name === "M_Joints") {
@@ -139,6 +250,11 @@ function restyleMannequin(scene: THREE.Group, tint: number, hostile: boolean) {
       m.roughness = 0.5;
       m.metalness = 0.65;
     }
+    flashables.push({
+      mat: m,
+      baseEmissive: m.emissive.clone(),
+      baseIntensity: m.emissiveIntensity,
+    });
     return m;
   };
   scene.traverse((obj) => {
@@ -150,10 +266,11 @@ function restyleMannequin(scene: THREE.Group, tint: number, hostile: boolean) {
       ? mesh.material.map(restyle)
       : restyle(mesh.material);
   });
+  return flashables;
 }
 
-/** Sidearm mesh parented to the right hand bone. */
-function attachPistol(rig: THREE.Group, pistol: THREE.Group): THREE.Group | null {
+/** Sidearm mesh parented to the right hand bone, with a muzzle empty. */
+function attachPistol(rig: THREE.Group, pistol: THREE.Group): GunMount | null {
   const hand = rig.getObjectByName("DEF-handR") ?? rig.getObjectByName("DEF-hand.R");
   if (!hand) return null;
   const holder = new THREE.Group();
@@ -163,8 +280,12 @@ function attachPistol(rig: THREE.Group, pistol: THREE.Group): THREE.Group | null
   pistol.scale.setScalar(0.35);
   pistol.position.set(0, 0.06, 0.02);
   pistol.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
+  // Muzzle empty just past the barrel; world position anchors flash/tracer FX.
+  const muzzle = new THREE.Object3D();
+  muzzle.position.set(0, 0.34, 0.06);
+  holder.add(muzzle);
   hand.add(holder);
-  return holder;
+  return { holder, muzzle };
 }
 
 function CharacterModel({ entity }: { entity: GameEntity }) {
@@ -173,13 +294,36 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
   const pistolModel = useAssetModel(isNpc ? undefined : PISTOL_MODEL);
   const mixer = useRef<THREE.AnimationMixer | null>(null);
   const actions = useRef<Record<string, THREE.AnimationAction>>({});
+  /** Upper-body layer actions (shoot / hit flinch over locomotion). */
+  const upperActions = useRef<Record<string, THREE.AnimationAction>>({});
+  /** Active full-body override clip name ("" = locomotion blend). */
   const current = useRef<string>("");
   /** Name of the one-shot currently holding the pose (cleared on finish). */
   const oneShot = useRef<string>("");
+  /** Damped blend weight per locomotion clip. */
+  const locoWeights = useRef<Record<string, number>>({});
+  /** Damped master fade of the locomotion group (0 while an override plays). */
+  const locoScale = useRef(1);
+  /** Damped leg turn relative to the torso facing (rad). */
+  const legYaw = useRef(0);
+  /** Damped gait playback direction: +1 forward, -1 backpedal. */
+  const gaitDir = useRef(1);
+  /** Hysteresis flag: currently moving backward relative to facing. */
+  const backpedal = useRef(false);
+  /** Shared normalized gait phase, keeps directional blends foot-synced. */
+  const gaitPhase = useRef(0);
+  const spineBones = useRef<THREE.Object3D[]>([]);
+  const flashMats = useRef<FlashMaterial[]>([]);
+  const flashActive = useRef(false);
+  /** Last seen shot counter / timestamps, so triggers fire exactly once. */
+  const seenShot = useRef(0);
+  const seenHit = useRef(0);
+  /** ms timestamp of the last shot, for the gun mesh recoil kick. */
+  const gunKickAt = useRef(0);
 
   useEffect(() => {
     if (!model || model.animations.length === 0) return;
-    restyleMannequin(model.scene, entity.tint, isNpc);
+    flashMats.current = restyleMannequin(model.scene, entity.tint, isNpc);
     const m = new THREE.AnimationMixer(model.scene);
     mixer.current = m;
     actions.current = {};
@@ -191,31 +335,115 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       }
       actions.current[clip.name] = action;
     }
+    // Locomotion clips all stay active on the mixer; per-frame damped weights
+    // do the blending. Gait clips advance via the shared phase, not the clock.
+    locoWeights.current = {};
+    for (const name of LOCO_CLIPS) {
+      const action = actions.current[name];
+      if (!action) continue;
+      action.play();
+      action.setEffectiveWeight(0);
+      if (GAIT_SET.has(name)) action.timeScale = 0;
+      locoWeights.current[name] = 0;
+    }
+    spineBones.current = SPINE_BONES.flatMap((name) => {
+      const bone = model.scene.getObjectByName(name);
+      return bone ? [bone] : [];
+    });
+    locoScale.current = 1;
+    legYaw.current = 0;
+    gaitDir.current = 1;
+    backpedal.current = false;
+    gaitPhase.current = 0;
+    upperActions.current = {};
+    for (const name of UPPER_CLIPS) {
+      const clip = model.animations.find((c) => c.name === name);
+      if (!clip) continue;
+      const action = m.clipAction(upperBodyClip(clip));
+      action.setLoop(THREE.LoopOnce, 1);
+      action.clampWhenFinished = true;
+      upperActions.current[name] = action;
+    }
     const onFinished = (e: { action: THREE.AnimationAction }) => {
-      if (e.action.getClip().name === oneShot.current) oneShot.current = "";
+      const name = e.action.getClip().name;
+      if (name === oneShot.current) oneShot.current = "";
+      // Blend the upper-body layer back out instead of popping.
+      if (name.endsWith(UPPER_SUFFIX)) e.action.fadeOut(0.15);
     };
     m.addEventListener("finished", onFinished);
     current.current = "";
     oneShot.current = "";
+    // Baseline the triggers so a fresh mount doesn't replay old events.
+    seenShot.current =
+      entity.id === game.localEntityId ? game.gun.shotSeq : entity.lastShotAt;
+    seenHit.current = entity.hitReactAt;
     return () => {
       m.removeEventListener("finished", onFinished);
       m.stopAllAction();
     };
-  }, [model, entity.tint, isNpc]);
+  }, [model, entity.tint, entity.id, isNpc]);
 
   useEffect(() => {
     if (!model || !pistolModel) return;
-    const holder = attachPistol(model.scene, pistolModel.scene);
+    const mount = attachPistol(model.scene, pistolModel.scene);
+    if (mount) game.gunMounts.set(entity.id, mount);
     return () => {
-      holder?.removeFromParent();
+      if (mount) {
+        if (game.gunMounts.get(entity.id) === mount) game.gunMounts.delete(entity.id);
+        mount.holder.removeFromParent();
+      }
     };
-  }, [model, pistolModel]);
+  }, [model, pistolModel, entity.id]);
+
+  /** Fire a clip on the upper-body layer without touching locomotion. */
+  function playUpper(name: string, timeScale: number) {
+    const action = upperActions.current[name];
+    if (!action) return;
+    action.reset();
+    action.setEffectiveWeight(UPPER_WEIGHT);
+    action.setEffectiveTimeScale(timeScale);
+    action.play();
+  }
 
   useFrame((_, dt) => {
     if (!mixer.current) return;
     mixer.current.update(dt);
 
     const isLocal = entity.id === game.localEntityId;
+    const now = performance.now();
+    const dying = entity.anim === "Death" || entity.healthPct <= 0;
+
+    // Upper-body shoot layer: local shots via the fire counter, remote shots
+    // via their MuzzleFlash event timestamp. Works in every locomotion state.
+    const shotMark = isLocal ? game.gun.shotSeq : entity.lastShotAt;
+    if (shotMark > seenShot.current) {
+      seenShot.current = shotMark;
+      if (!isNpc && !dying) {
+        playUpper("Pistol_Shoot", 1.6);
+        gunKickAt.current = now;
+      }
+    }
+    // Hit flinch layer + red damage flash.
+    if (entity.hitReactAt > seenHit.current) {
+      seenHit.current = entity.hitReactAt;
+      if (!dying) playUpper("Hit_Chest", 1.3);
+    }
+    const flash =
+      Math.max(0, 1 - (now - entity.hitReactAt) / HIT_FLASH_MS) * 0.55;
+    if (flash > 0 || flashActive.current) {
+      for (const f of flashMats.current) {
+        f.mat.emissive.copy(f.baseEmissive).lerp(HIT_FLASH_COLOR, flash);
+        f.mat.emissiveIntensity = f.baseIntensity + flash * 1.6;
+      }
+      flashActive.current = flash > 0;
+    }
+    // Gun mesh recoil: quick barrel buck after each shot.
+    const mount = game.gunMounts.get(entity.id);
+    if (mount) {
+      const t = (now - gunKickAt.current) / GUN_KICK_MS;
+      mount.holder.rotation.x = t < 1 ? -0.45 * (1 - t) : 0;
+    }
+
     let anim = entity.anim;
     if (isLocal) {
       // Instant local feedback; the server confirms a tick later.
@@ -226,36 +454,120 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       }
     }
     const gunIdle = isLocal ? game.gun.drawn : false;
-    const want = chooseClip(anim, isNpc, gunIdle);
-    const action = actions.current[want.name];
-    if (!action) return;
 
+    // ---- Full-body override layer (death / roll / gather / NPC melee) ----
+    const want = chooseOverride(anim, isNpc);
     // Death latches at the last frame.
-    if (current.current === "Death01" && want.name === "Death01") return;
-
+    const deathLatched = current.current === "Death01" && want?.name === "Death01";
     // A running one-shot holds the pose until it finishes; only death or a
     // roll preempts it.
-    if (oneShot.current && want.name !== "Death01" && want.name !== "Roll") {
-      return;
+    const oneShotHolds =
+      oneShot.current && want?.name !== "Death01" && want?.name !== "Roll";
+
+    if (!deathLatched && !oneShotHolds) {
+      if (want && current.current !== want.name) {
+        const action = actions.current[want.name];
+        if (action) {
+          actions.current[current.current]?.fadeOut(CROSSFADE);
+          action.reset().fadeIn(CROSSFADE).play();
+          action.timeScale =
+            want.name === "Roll"
+              ? // Finish the roll clip exactly when the dash ends.
+                action.getClip().duration / ROLL_DURATION
+              : want.timeScale;
+          current.current = want.name;
+          oneShot.current = ONE_SHOTS.has(want.name) ? want.name : "";
+        }
+      } else if (want && ONE_SHOTS.has(want.name) && !oneShot.current && want.name !== "Roll") {
+        // Same one-shot requested again after finishing (e.g. an NPC chaining
+        // attacks). Rolls are excluded: the anim state can outlive the clip by
+        // a few frames, which used to retrigger a visible second tumble.
+        actions.current[want.name]?.reset().play();
+        oneShot.current = want.name;
+      } else if (!want && current.current) {
+        // Override released: fade back into the locomotion blend.
+        actions.current[current.current]?.fadeOut(CROSSFADE);
+        current.current = "";
+      }
+    }
+    const overrideActive = !!current.current || !!oneShot.current;
+
+    // ---- Locomotion blend layer -----------------------------------------
+    const kWeight = 1 - Math.exp(-WEIGHT_DAMP * dt);
+    locoScale.current += ((overrideActive ? 0 : 1) - locoScale.current) * kWeight;
+
+    const speed = Math.hypot(entity.vx, entity.vz);
+    const crouched =
+      anim === "Crouch" || anim === "CrouchWalk" || (isLocal && game.crouching);
+    const moveFactor = THREE.MathUtils.clamp(speed / FULL_GAIT_SPEED, 0, 1);
+    const gaitName = crouched
+      ? "Crouch_Fwd_Loop"
+      : speed >= SPRINT_MIN
+        ? "Sprint_Loop"
+        : speed <= WALK_MAX
+          ? "Walk_Loop"
+          : "Jog_Fwd_Loop";
+    const idleName = crouched
+      ? "Crouch_Idle_Loop"
+      : gunIdle
+        ? "Pistol_Idle_Loop"
+        : "Idle_Loop";
+
+    for (const name of LOCO_CLIPS) {
+      const action = actions.current[name];
+      if (!action) continue;
+      const target =
+        (name === gaitName ? moveFactor : 0) + (name === idleName ? 1 - moveFactor : 0);
+      const w = locoWeights.current[name] ?? 0;
+      const next = w + (target * locoScale.current - w) * kWeight;
+      locoWeights.current[name] = next;
+      action.setEffectiveWeight(next);
     }
 
-    if (current.current !== want.name) {
-      const prev = actions.current[current.current];
-      prev?.fadeOut(CROSSFADE);
-      action.reset().fadeIn(CROSSFADE).play();
-      current.current = want.name;
-      oneShot.current = ONE_SHOTS.has(want.name) ? want.name : "";
-    } else if (ONE_SHOTS.has(want.name) && !oneShot.current) {
-      // Same one-shot requested again after finishing (e.g. rapid fire).
-      action.reset().play();
-      oneShot.current = want.name;
+    // Leg direction + gait reversal: legs lead into the travel direction
+    // (front hemisphere); moving backward keeps the legs forward-ish and
+    // plays the gait in reverse. Hysteresis avoids flapping at +/-90 degrees.
+    let targetLeg = 0;
+    if (speed > MOVE_EPSILON && !overrideActive) {
+      const rel = wrapAngle(Math.atan2(entity.vz, entity.vx) - entity.yaw);
+      const away = Math.abs(rel);
+      if (backpedal.current) {
+        if (away < Math.PI / 2 - 0.18) backpedal.current = false;
+      } else if (away > Math.PI / 2 + 0.18) {
+        backpedal.current = true;
+      }
+      targetLeg = THREE.MathUtils.clamp(
+        backpedal.current ? wrapAngle(rel - Math.PI) : rel,
+        -MAX_LEG_YAW,
+        MAX_LEG_YAW,
+      );
+    }
+    legYaw.current += (targetLeg - legYaw.current) * (1 - Math.exp(-LEG_DAMP * dt));
+    gaitDir.current +=
+      ((backpedal.current ? -1 : 1) - gaitDir.current) * (1 - Math.exp(-DIR_DAMP * dt));
+
+    // Advance the shared gait phase at the dominant clip's cadence so feet
+    // don't slide, and pin every gait clip to it (normalized time sync).
+    const gaitAction = actions.current[gaitName];
+    if (gaitAction) {
+      const dur = gaitAction.getClip().duration;
+      const ref = CLIP_REF_SPEED[gaitName] ?? WALK_SPEED;
+      gaitPhase.current += (gaitDir.current * speed * dt) / (ref * dur);
+      gaitPhase.current -= Math.floor(gaitPhase.current);
+      for (const name of GAIT_CLIPS) {
+        const action = actions.current[name];
+        if (action) action.time = gaitPhase.current * action.getClip().duration;
+      }
     }
 
-    action.timeScale =
-      want.name === "Roll"
-        ? // Finish the roll clip exactly when the dash ends.
-          action.getClip().duration / ROLL_DURATION
-        : want.timeScale;
+    // Whole model turns with the legs; the spine counter-twists back to the
+    // aim so the torso (and gun) keep pointing at the cursor.
+    const turn = legYaw.current * locoScale.current;
+    model.scene.rotation.y = -turn;
+    if (turn !== 0 && spineBones.current.length > 0) {
+      spineTwistQ.setFromAxisAngle(Y_AXIS, turn / spineBones.current.length);
+      for (const bone of spineBones.current) bone.quaternion.multiply(spineTwistQ);
+    }
   });
 
   if (!model) return <ProceduralCharacter entity={entity} />;
@@ -534,8 +846,10 @@ function MarketTerminal({ entity }: { entity: GameEntity }) {
 function EntityView({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
   const isCharacter = entity.kind === "Player" || entity.kind === "Npc";
+  /** Previous render position, for velocity estimation. */
+  const prevPos = useRef<{ x: number; z: number } | null>(null);
 
-  useFrame(() => {
+  useFrame((_, dt) => {
     if (!group.current) return;
     const isLocal = entity.id === game.localEntityId;
     const now = performance.now();
@@ -549,11 +863,22 @@ function EntityView({ entity }: { entity: GameEntity }) {
       return;
     }
 
-    if (isLocal && now - game.lastDirectInputAt < PREDICT_WINDOW) {
-      // Prediction drives the local player during WASD movement.
-      entity.x = game.predicted.x;
-      entity.z = game.predicted.z;
-      entity.yaw = game.predicted.yaw;
+    const predicting =
+      isLocal && entity.healthPct > 0 && now - game.lastDirectInputAt < PREDICT_WINDOW;
+    if (predicting) {
+      // Prediction drives the local player during WASD movement; render the
+      // smoothed position so the 20 Hz sim steps don't show on screen.
+      entity.x = game.rendered.x;
+      entity.z = game.rendered.z;
+      entity.yaw = game.rendered.yaw;
+      // Snapshot sampling is skipped here, so derive the anim from input
+      // instead of waiting for the server (which froze the old state).
+      if (game.roll) entity.anim = "Roll";
+      else if (game.input.moving) {
+        entity.anim = game.crouching ? "CrouchWalk" : game.input.run ? "Run" : "Walk";
+      } else {
+        entity.anim = game.crouching ? "Crouch" : "Idle";
+      }
     } else {
       sampleTransform(entity, now - INTERP_DELAY);
       if (isLocal) {
@@ -561,6 +886,9 @@ function EntityView({ entity }: { entity: GameEntity }) {
         game.predicted.x = entity.x;
         game.predicted.z = entity.z;
         game.predicted.yaw = entity.yaw;
+        game.rendered.x = entity.x;
+        game.rendered.z = entity.z;
+        game.rendered.yaw = entity.yaw;
       }
     }
 
@@ -569,6 +897,35 @@ function EntityView({ entity }: { entity: GameEntity }) {
     if (isLocal && game.aim.active && !game.roll) {
       entity.yaw = game.aim.yaw;
     }
+
+    // Smoothed world velocity for the directional locomotion blender. The
+    // local player uses input intent (instant response); remotes and NPCs
+    // differentiate the interpolated transform.
+    if (dt > 0) {
+      let tx = 0;
+      let tz = 0;
+      if (predicting && game.input.moving && !game.roll) {
+        const speed = game.crouching
+          ? CROUCH_SPEED
+          : game.input.run
+            ? RUN_SPEED
+            : WALK_SPEED;
+        tx = game.input.dx * speed;
+        tz = game.input.dz * speed;
+      } else if (prevPos.current) {
+        const ddx = (entity.x - prevPos.current.x) / dt;
+        const ddz = (entity.z - prevPos.current.z) / dt;
+        // Ignore teleport spikes (respawn, chunk snap).
+        if (Math.hypot(ddx, ddz) < 20) {
+          tx = ddx;
+          tz = ddz;
+        }
+      }
+      const k = 1 - Math.exp(-dt * 12);
+      entity.vx += (tx - entity.vx) * k;
+      entity.vz += (tz - entity.vz) * k;
+    }
+    prevPos.current = { x: entity.x, z: entity.z };
 
     // Stand on the visual ground surface (raised sidewalks vs road grade).
     group.current.position.set(
@@ -611,8 +968,14 @@ function EntityView({ entity }: { entity: GameEntity }) {
     case "Npc":
       body = (
         <group
-          onPointerOver={() => (document.body.style.cursor = "crosshair")}
-          onPointerOut={() => (document.body.style.cursor = "default")}
+          onPointerOver={() => {
+            game.hoverTargetId = entity.id;
+            document.body.style.cursor = "crosshair";
+          }}
+          onPointerOut={() => {
+            if (game.hoverTargetId === entity.id) game.hoverTargetId = null;
+            document.body.style.cursor = "default";
+          }}
         >
           <CharacterModel entity={entity} />
           <HealthBar entity={entity} />
@@ -688,6 +1051,7 @@ export function Entities() {
       {[...game.entities.values()].map((entity) => (
         <EntityView key={entity.id} entity={entity} />
       ))}
+      <TargetReticle />
     </>
   );
 }

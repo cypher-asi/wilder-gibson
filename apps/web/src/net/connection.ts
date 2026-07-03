@@ -1,8 +1,16 @@
 // WebSocket game connection: handshake, message dispatch, input sending.
 
+import * as THREE from "three";
 import { playSfx } from "../assets/audio";
 import { armorShield, game, initialAbilities, spawnEntity, useGame } from "../state/game";
 import { C2S, decode, encode, S2C } from "./protocol";
+
+/** World position of an entity's gun muzzle, if a mount is registered. */
+function muzzlePosition(entityId: number): THREE.Vector3 | null {
+  const mount = game.gunMounts.get(entityId);
+  if (!mount) return null;
+  return mount.muzzle.getWorldPosition(new THREE.Vector3());
+}
 
 export class GameConnection {
   private ws: WebSocket | null = null;
@@ -166,25 +174,75 @@ export class GameConnection {
           const target = game.entities.get(ev.d.target);
           if (target) {
             target.lastHitAt = now;
-            game.fx.push({
-              type: "hit",
-              x: target.x,
-              y: target.y + 1.3,
-              z: target.z,
-              damage: ev.d.damage,
-              at: now,
-            });
+            target.hitReactAt = now;
           }
+          // Impact point comes from the server (actual ray hit position).
+          game.fx.push({
+            type: "hit",
+            x: ev.d.x,
+            y: ev.d.y,
+            z: ev.d.z,
+            damage: ev.d.damage,
+            at: now,
+          });
+          const attacker = game.entities.get(ev.d.attacker);
+          const dx = attacker ? ev.d.x - attacker.x : 1;
+          const dz = attacker ? ev.d.z - attacker.z : 0;
+          const len = Math.hypot(dx, dz) || 1;
+          game.fx.push({
+            type: "impact",
+            x: ev.d.x,
+            y: ev.d.y,
+            z: ev.d.z,
+            dirX: dx / len,
+            dirZ: dz / len,
+            kind:
+              target && (target.kind === "Npc" || target.kind === "Player")
+                ? "flesh"
+                : "dust",
+            at: now,
+          });
+        } else if (ev.t === "Miss") {
+          const attacker = game.entities.get(ev.d.attacker);
+          const dx = attacker ? ev.d.x - attacker.x : 1;
+          const dz = attacker ? ev.d.z - attacker.z : 0;
+          const len = Math.hypot(dx, dz) || 1;
+          game.fx.push({
+            type: "impact",
+            x: ev.d.x,
+            y: 1.0,
+            z: ev.d.z,
+            dirX: dx / len,
+            dirZ: dz / len,
+            kind: "dust",
+            at: now,
+          });
         } else if (ev.t === "MuzzleFlash") {
-          void playSfx("sfx_shoot", 0.3);
           const attacker = game.entities.get(ev.d.attacker);
           if (attacker) {
-            // Muzzle at chest height; the tracer flies flat toward the target point.
+            const isLocal = ev.d.attacker === game.localEntityId;
+            const muzzle = muzzlePosition(ev.d.attacker);
+            const fx = muzzle?.x ?? attacker.x;
+            const fy = muzzle?.y ?? 1.35;
+            const fz = muzzle?.z ?? attacker.z;
+            if (!isLocal) {
+              // The local shooter already played its flash + sfx on click.
+              void playSfx("sfx_shoot", 0.3);
+              attacker.lastShotAt = now;
+              game.fx.push({
+                type: "flash",
+                x: fx,
+                y: fy,
+                z: fz,
+                yaw: Math.atan2(ev.d.tz - attacker.z, ev.d.tx - attacker.x),
+                at: now,
+              });
+            }
             game.fx.push({
               type: "tracer",
-              fx: attacker.x,
-              fy: 1.35,
-              fz: attacker.z,
+              fx,
+              fy,
+              fz,
               tx: ev.d.tx,
               ty: 1.25,
               tz: ev.d.tz,

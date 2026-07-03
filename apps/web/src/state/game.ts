@@ -36,6 +36,10 @@ export interface GameEntity {
   healthPct: number;
   /** ms timestamp of the last combat hit taken (drives health bar reveal). */
   lastHitAt: number;
+  /** ms timestamp of the last hit taken (drives flinch anim + red flash). */
+  hitReactAt: number;
+  /** ms timestamp of this entity's last ranged shot (drives remote shoot anim). */
+  lastShotAt: number;
   /** Interpolation buffer of recent server samples. */
   samples: RemoteSample[];
   /** Current render transform (written by interpolation/prediction). */
@@ -44,6 +48,9 @@ export interface GameEntity {
   z: number;
   yaw: number;
   anim: AnimState;
+  /** Smoothed world-space XZ velocity (m/s), drives directional locomotion. */
+  vx: number;
+  vz: number;
 }
 
 export interface PendingInput {
@@ -69,7 +76,37 @@ export type CombatFxEvent =
     }
   | { type: "hit"; x: number; y: number; z: number; damage: number; at: number }
   | { type: "death"; x: number; y: number; z: number; at: number }
-  | { type: "shockwave"; x: number; y: number; z: number; at: number };
+  | { type: "shockwave"; x: number; y: number; z: number; at: number }
+  | { type: "flash"; x: number; y: number; z: number; yaw: number; at: number }
+  | {
+      type: "impact";
+      x: number;
+      y: number;
+      z: number;
+      /** Incoming shot direction on XZ (sparks fly back along it). */
+      dirX: number;
+      dirZ: number;
+      kind: "flesh" | "dust";
+      at: number;
+    }
+  | {
+      type: "shell";
+      x: number;
+      y: number;
+      z: number;
+      /** Ejection direction on XZ (shooter's right side). */
+      dirX: number;
+      dirZ: number;
+      at: number;
+    };
+
+/** Weapon mount registered per character entity (muzzle FX + recoil kick). */
+export interface GunMount {
+  /** Group parented to the hand bone (kicked on recoil). */
+  holder: import("three").Group;
+  /** Empty at the barrel tip; world position used for flash/tracer origin. */
+  muzzle: import("three").Object3D;
+}
 
 /** Non-reactive game world (read from useFrame). */
 export const game = {
@@ -85,7 +122,7 @@ export const game = {
    */
   rendered: { x: 0, z: 0, yaw: 0 },
   /** Live WASD state this frame (drives the local player's anim locally). */
-  input: { moving: false, run: false },
+  input: { moving: false, run: false, dx: 0, dz: 0 },
   pendingInputs: [] as PendingInput[],
   nextSeq: 1,
   /** ms timestamp of the last direct (WASD) input; used to pick predict vs follow. */
@@ -94,6 +131,10 @@ export const game = {
   moveMarker: null as { x: number; z: number; at: number } | null,
   /** Mouse aim: cursor projected onto the ground plane (twin-stick facing). */
   aim: { x: 0, z: 0, yaw: 0, active: false },
+  /** Entity id of the enemy currently under the cursor (soft target lock). */
+  hoverTargetId: null as number | null,
+  /** Gun mounts (muzzle + recoil holder) keyed by character entity id. */
+  gunMounts: new Map<number, GunMount>(),
   /** Crouch toggle (mirrored to the server via SetCrouch). */
   crouching: false,
   /** Active dodge roll (local prediction; matches the server dash). */
@@ -101,7 +142,7 @@ export const game = {
   /** ms timestamp when the next roll is allowed. */
   rollReadyAt: 0,
   /** Gun draw state: LMB draws first, then shoots; auto-holsters when idle. */
-  gun: { drawn: false, readyAt: 0, lastShotAt: 0 },
+  gun: { drawn: false, readyAt: 0, lastShotAt: 0, shotSeq: 0 },
   /** Pending combat FX events (drained each frame by CombatFx). */
   fx: [] as CombatFxEvent[],
   /** Active connection sender (set by GameConnection.connect). */
@@ -113,14 +154,18 @@ export const game = {
     this.localEntityId = 0;
     this.input.moving = false;
     this.input.run = false;
+    this.input.dx = 0;
+    this.input.dz = 0;
     this.pendingInputs = [];
     this.nextSeq = 1;
     this.moveMarker = null;
     this.aim.active = false;
+    this.hoverTargetId = null;
+    this.gunMounts.clear();
     this.crouching = false;
     this.roll = null;
     this.rollReadyAt = 0;
-    this.gun = { drawn: false, readyAt: 0, lastShotAt: 0 };
+    this.gun = { drawn: false, readyAt: 0, lastShotAt: 0, shotSeq: 0 };
     this.fx = [];
     // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },
@@ -146,12 +191,16 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
     tint: data.appearance?.tint ?? 0xffffff,
     healthPct: data.health_pct,
     lastHitAt: 0,
+    hitReactAt: 0,
+    lastShotAt: 0,
     samples: [],
     x: data.position[0],
     y: data.position[1],
     z: data.position[2],
     yaw: data.yaw,
     anim: data.anim,
+    vx: 0,
+    vz: 0,
   };
   game.entities.set(data.id, entity);
   return entity;

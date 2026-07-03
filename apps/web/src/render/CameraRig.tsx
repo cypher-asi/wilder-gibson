@@ -21,8 +21,21 @@ export const cameraState = {
   maxDistance: 140,
 };
 
+/** Decaying recoil offset applied to the whole view (position + look target). */
+const recoil = { x: 0, z: 0, jolt: 0 };
+
+/**
+ * Kick the camera opposite the shot direction with a touch of random jitter.
+ * Called by PlayerInput when the local player fires.
+ */
+export function cameraKick(strength: number, yaw: number) {
+  recoil.x -= Math.cos(yaw) * strength;
+  recoil.z -= Math.sin(yaw) * strength;
+  recoil.jolt = Math.min(0.6, recoil.jolt + strength * 0.5);
+}
+
 /** Fog density at the default zoom; thinned as the camera pulls back. */
-const FOG_BASE_DENSITY = 0.0045;
+const FOG_BASE_DENSITY = 0.0035;
 const FOG_BASE_DISTANCE = 48;
 
 const PITCH_NEAR = THREE.MathUtils.degToRad(52);
@@ -137,14 +150,26 @@ export function CameraRig() {
     );
     const yaw = cameraState.yaw;
 
+    // Recoil: translate the whole view (camera + look target) by the decaying
+    // kick, plus a tiny random jitter while the jolt is fresh. Scales gently
+    // with zoom so the kick stays visible when pulled back.
+    const decay = Math.exp(-dt * 10);
+    recoil.x *= decay;
+    recoil.z *= decay;
+    recoil.jolt *= Math.exp(-dt * 14);
+    const kickScale = 0.6 + cameraState.distance / 60;
+    const jitter = recoil.jolt * kickScale;
+    const offX = recoil.x * kickScale + (Math.random() - 0.5) * jitter;
+    const offZ = recoil.z * kickScale + (Math.random() - 0.5) * jitter;
+
     const horizontal = Math.cos(pitch) * cameraState.distance;
     const height = Math.sin(pitch) * cameraState.distance;
     camera.position.set(
-      target.current.x + Math.cos(yaw) * horizontal,
+      target.current.x + offX + Math.cos(yaw) * horizontal,
       height,
-      target.current.z + Math.sin(yaw) * horizontal,
+      target.current.z + offZ + Math.sin(yaw) * horizontal,
     );
-    camera.lookAt(target.current.x, 1.2, target.current.z);
+    camera.lookAt(target.current.x + offX, 1.2, target.current.z + offZ);
 
     // Thin the fog when zoomed far out so the wider view stays readable.
     if (scene.fog instanceof THREE.FogExp2) {

@@ -16,8 +16,10 @@ pub enum C2S {
     Authenticate { token: String },
     /// Spawn a character into the world (must be authenticated).
     JoinWorld { character_id: CharacterId },
-    /// Direct movement input (WASD). `dir` is a normalized XZ direction, world space.
-    MoveInput { seq: u32, dx: f32, dz: f32, run: bool },
+    /// Direct movement input (WASD). `(dx, dz)` is a normalized XZ direction in
+    /// world space; `yaw` is the facing (twin-stick aim), which may differ from
+    /// the move direction (strafe/backpedal).
+    MoveInput { seq: u32, dx: f32, dz: f32, yaw: f32, run: bool },
     /// Click-to-move: server pathfinds to target.
     MoveTo { seq: u32, x: f32, z: f32 },
     /// Stop any current click-to-move path.
@@ -115,8 +117,12 @@ pub enum S2C {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
 pub enum CombatEvent {
-    Hit { attacker: EntityId, target: EntityId, damage: f32 },
-    Miss { attacker: EntityId },
+    /// A hit landed; (x, y, z) is the impact point for client VFX.
+    Hit { attacker: EntityId, target: EntityId, damage: f32, x: f32, y: f32, z: f32 },
+    /// Attack whiffed; (x, z) is where the shot/swing terminated.
+    Miss { attacker: EntityId, x: f32, z: f32 },
+    /// Ranged shot fired; (tx, tz) is the actual ray end point (impact,
+    /// blocking wall, or max range) so tracers terminate where bullets stop.
     MuzzleFlash { attacker: EntityId, tx: f32, tz: f32 },
     EntityDied { id: EntityId },
     /// Shockwave ability pulse originating at an entity (VFX broadcast).
@@ -157,7 +163,7 @@ mod tests {
 
     #[test]
     fn roundtrip_c2s() {
-        let msg = C2S::MoveInput { seq: 7, dx: 1.0, dz: 0.0, run: true };
+        let msg = C2S::MoveInput { seq: 7, dx: 1.0, dz: 0.0, yaw: 0.5, run: true };
         let text = encode(&msg);
         let back: C2S = decode(&text).unwrap();
         match back {

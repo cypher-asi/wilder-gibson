@@ -1,18 +1,23 @@
 // Short-lived combat visuals: tracers + muzzle flashes for ranged shots,
-// hit sparks with floating damage numbers, and a death pulse. Events are
-// queued in `game.fx` by the connection layer and drained here each frame.
+// impact sparks, shell casings, hit sparks with floating damage numbers,
+// and a death pulse. Events are queued in `game.fx` by the connection layer
+// (or PlayerInput for instant local feedback) and drained here each frame.
 
 import { Html } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { CombatFxEvent, game } from "../state/game";
+import { groundHeightAt } from "./Ground";
 
 const LIFETIME_MS: Record<CombatFxEvent["type"], number> = {
   tracer: 170,
   hit: 800,
   death: 600,
   shockwave: 550,
+  flash: 90,
+  impact: 380,
+  shell: 700,
 };
 
 interface ActiveFx {
@@ -54,6 +59,12 @@ export function CombatFx() {
           <HitFx key={id} ev={ev} />
         ) : ev.type === "shockwave" ? (
           <ShockwaveRing key={id} ev={ev} />
+        ) : ev.type === "flash" ? (
+          <MuzzleFlashFx key={id} ev={ev} />
+        ) : ev.type === "impact" ? (
+          <ImpactBurst key={id} ev={ev} />
+        ) : ev.type === "shell" ? (
+          <ShellCasing key={id} ev={ev} />
         ) : (
           <DeathPulse key={id} ev={ev} />
         ),
@@ -64,42 +75,212 @@ export function CombatFx() {
 
 const UP = new THREE.Vector3(0, 1, 0);
 
-/** Bright bullet streak from muzzle to the aim point, with a muzzle flash. */
+/**
+ * Bullet streak racing from the muzzle to the end point: a short bright
+ * segment whose head travels the full distance over the tracer lifetime.
+ */
 function Tracer({ ev }: { ev: Extract<CombatFxEvent, { type: "tracer" }> }) {
   const mesh = useRef<THREE.Mesh>(null);
-  const light = useRef<THREE.PointLight>(null);
 
-  const from = new THREE.Vector3(ev.fx, ev.fy, ev.fz);
-  const to = new THREE.Vector3(ev.tx, ev.ty, ev.tz);
-  const dir = to.clone().sub(from);
-  const length = Math.max(dir.length(), 0.1);
-  const mid = from.clone().add(to).multiplyScalar(0.5);
-  const quat = new THREE.Quaternion().setFromUnitVectors(UP, dir.normalize());
+  const { from, dir, dist, quat, streak } = useMemo(() => {
+    const from = new THREE.Vector3(ev.fx, ev.fy, ev.fz);
+    const to = new THREE.Vector3(ev.tx, ev.ty, ev.tz);
+    const delta = to.clone().sub(from);
+    const dist = Math.max(delta.length(), 0.1);
+    const dir = delta.normalize();
+    const quat = new THREE.Quaternion().setFromUnitVectors(UP, dir);
+    // Streak length scales with range but stays a "bullet", not a laser.
+    const streak = THREE.MathUtils.clamp(dist * 0.35, 0.8, 2.6);
+    return { from, dir, dist, quat, streak };
+  }, [ev]);
 
   useFrame(() => {
+    if (!mesh.current) return;
     const t = (performance.now() - ev.at) / LIFETIME_MS.tracer;
-    const fade = THREE.MathUtils.clamp(1 - t, 0, 1);
-    if (mesh.current) {
-      (mesh.current.material as THREE.MeshBasicMaterial).opacity = fade * 0.9;
-      mesh.current.visible = t < 1;
+    if (t >= 1) {
+      mesh.current.visible = false;
+      return;
     }
-    if (light.current) light.current.intensity = fade * 14;
+    mesh.current.visible = true;
+    const head = Math.min(1, t * 1.15) * dist;
+    const tail = Math.max(0, head - streak);
+    const len = Math.max(head - tail, 0.05);
+    mesh.current.position
+      .copy(from)
+      .addScaledVector(dir, (head + tail) / 2);
+    mesh.current.scale.set(1, len, 1);
+    (mesh.current.material as THREE.MeshBasicMaterial).opacity =
+      THREE.MathUtils.clamp(1.2 - t, 0, 1) * 0.9;
   });
 
   return (
-    <>
-      <mesh ref={mesh} position={mid} quaternion={quat}>
-        <cylinderGeometry args={[0.025, 0.025, length, 5]} />
-        <meshBasicMaterial
-          color="#ffd27a"
-          transparent
-          opacity={0.9}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
+    <mesh ref={mesh} quaternion={quat} visible={false}>
+      <cylinderGeometry args={[0.03, 0.03, 1, 5]} />
+      <meshBasicMaterial
+        color="#ffd27a"
+        transparent
+        opacity={0.9}
+        blending={THREE.AdditiveBlending}
+        depthWrite={false}
+      />
+    </mesh>
+  );
+}
+
+/** Crossed additive star + light at the muzzle for a single shot. */
+function MuzzleFlashFx({ ev }: { ev: Extract<CombatFxEvent, { type: "flash" }> }) {
+  const group = useRef<THREE.Group>(null);
+  const light = useRef<THREE.PointLight>(null);
+  const material = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: "#ffe3a0",
+        transparent: true,
+        opacity: 1,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      }),
+    [],
+  );
+  const baseScale = useMemo(() => 0.85 + Math.random() * 0.35, []);
+
+  useFrame(() => {
+    const t = (performance.now() - ev.at) / LIFETIME_MS.flash;
+    const fade = THREE.MathUtils.clamp(1 - t, 0, 1);
+    if (group.current) {
+      group.current.visible = t < 1;
+      group.current.scale.setScalar(baseScale * (0.7 + t * 0.6));
+    }
+    material.opacity = fade;
+    if (light.current) light.current.intensity = fade * 22;
+  });
+
+  return (
+    <group
+      ref={group}
+      position={[ev.x, ev.y, ev.z]}
+      rotation={[0, -ev.yaw, 0]}
+      visible={false}
+    >
+      {/* long tongue along the barrel (flat, reads from the top-down camera) */}
+      <mesh material={material} rotation={[-Math.PI / 2, 0, 0]} position={[0.28, 0, 0]}>
+        <planeGeometry args={[0.62, 0.16]} />
       </mesh>
-      <pointLight ref={light} position={from} color="#ffbf60" intensity={14} distance={7} />
-    </>
+      {/* side spikes */}
+      <mesh material={material} rotation={[-Math.PI / 2, 0, Math.PI / 2]} position={[0.1, 0, 0]}>
+        <planeGeometry args={[0.34, 0.12]} />
+      </mesh>
+      {/* vertical fin so the flash also reads at low camera angles */}
+      <mesh material={material} position={[0.28, 0, 0]}>
+        <planeGeometry args={[0.5, 0.14]} />
+      </mesh>
+      <pointLight ref={light} color="#ffbf60" intensity={22} distance={8} />
+    </group>
+  );
+}
+
+const IMPACT_COLORS = { flesh: "#ff5a4a", dust: "#d8cdb6" } as const;
+const IMPACT_GRAVITY = 7;
+
+/** Directional spark burst where a shot lands (flesh) or whiffs (dust). */
+function ImpactBurst({ ev }: { ev: Extract<CombatFxEvent, { type: "impact" }> }) {
+  const group = useRef<THREE.Group>(null);
+  const material = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: IMPACT_COLORS[ev.kind],
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    [ev.kind],
+  );
+  // Sparks fly back along the incoming shot with random spread + lift.
+  const parts = useMemo(
+    () =>
+      Array.from({ length: 6 }, () => ({
+        vx: -ev.dirX * (1.5 + Math.random() * 2.5) + (Math.random() - 0.5) * 2.4,
+        vy: 1.2 + Math.random() * 2.4,
+        vz: -ev.dirZ * (1.5 + Math.random() * 2.5) + (Math.random() - 0.5) * 2.4,
+        size: 0.035 + Math.random() * 0.05,
+      })),
+    [ev],
+  );
+
+  useFrame(() => {
+    if (!group.current) return;
+    const t = (performance.now() - ev.at) / 1000;
+    const life = (performance.now() - ev.at) / LIFETIME_MS.impact;
+    group.current.visible = life < 1;
+    if (life >= 1) return;
+    material.opacity = THREE.MathUtils.clamp(1 - life, 0, 1) * 0.95;
+    group.current.children.forEach((child, i) => {
+      const p = parts[i];
+      child.position.set(
+        p.vx * t,
+        p.vy * t - IMPACT_GRAVITY * t * t * 0.5,
+        p.vz * t,
+      );
+    });
+  });
+
+  return (
+    <group ref={group} position={[ev.x, ev.y, ev.z]}>
+      {parts.map((p, i) => (
+        <mesh key={i} material={material}>
+          <sphereGeometry args={[p.size, 4, 4]} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** Spent casing ejected sideways with spin and gravity. */
+function ShellCasing({ ev }: { ev: Extract<CombatFxEvent, { type: "shell" }> }) {
+  const mesh = useRef<THREE.Mesh>(null);
+  const v = useMemo(
+    () => ({
+      x: ev.dirX * (1.0 + Math.random() * 0.9) + (Math.random() - 0.5) * 0.5,
+      y: 2.0 + Math.random() * 1.2,
+      z: ev.dirZ * (1.0 + Math.random() * 0.9) + (Math.random() - 0.5) * 0.5,
+      spinX: 8 + Math.random() * 18,
+      spinZ: 8 + Math.random() * 18,
+    }),
+    [ev],
+  );
+
+  useFrame(() => {
+    if (!mesh.current) return;
+    const life = (performance.now() - ev.at) / LIFETIME_MS.shell;
+    mesh.current.visible = life < 1;
+    if (life >= 1) return;
+    const t = (performance.now() - ev.at) / 1000;
+    const x = ev.x + v.x * t;
+    const z = ev.z + v.z * t;
+    const floor = groundHeightAt(x, z) + 0.03;
+    const y = ev.y + v.y * t - 9.8 * t * t * 0.5;
+    mesh.current.position.set(x, Math.max(y, floor), z);
+    if (y > floor) {
+      mesh.current.rotation.x = v.spinX * t;
+      mesh.current.rotation.z = v.spinZ * t;
+    }
+    (mesh.current.material as THREE.MeshStandardMaterial).opacity =
+      THREE.MathUtils.clamp((1 - life) * 4, 0, 1);
+  });
+
+  return (
+    <mesh ref={mesh} visible={false}>
+      <cylinderGeometry args={[0.014, 0.014, 0.05, 6]} />
+      <meshStandardMaterial
+        color="#d9a63c"
+        metalness={0.8}
+        roughness={0.35}
+        transparent
+        opacity={1}
+      />
+    </mesh>
   );
 }
 
