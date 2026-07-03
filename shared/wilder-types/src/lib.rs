@@ -372,6 +372,10 @@ pub struct EntitySpawnData {
     pub health_pct: f32,
     /// Extra payload interpreted per kind (npc archetype, node resource, etc.)
     pub variant: u32,
+    /// For loot containers: the primary contained item, so the client can
+    /// float its icon over the crate. None for every other entity kind.
+    #[serde(default)]
+    pub item: Option<ItemKind>,
 }
 
 // ---------------------------------------------------------------------------

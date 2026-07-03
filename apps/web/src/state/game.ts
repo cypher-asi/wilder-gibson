@@ -40,6 +40,8 @@ export interface GameEntity {
   kind: EntityKind;
   name: string;
   variant: number;
+  /** Loot containers: primary contained item (drives the floating icon). */
+  item: import("../net/protocol").ItemKind | null;
   tint: number;
   healthPct: number;
   /** ms timestamp of the last combat hit taken (drives health bar reveal). */
@@ -200,6 +202,7 @@ export function spawnEntity(data: EntitySpawnData): GameEntity {
     kind: data.kind,
     name: data.name,
     variant: data.variant,
+    item: data.item ?? null,
     tint: data.appearance?.tint ?? 0xffffff,
     healthPct: data.health_pct,
     lastHitAt: 0,

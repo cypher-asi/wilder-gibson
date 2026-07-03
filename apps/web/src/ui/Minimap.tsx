@@ -222,11 +222,11 @@ export function Minimap() {
           ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
           ctx.fill();
         } else if (entity.kind === "LootContainer" && entity.variant === 1) {
-          // Ammo cache: bright amber blip so ammo is easy to find.
+          // Ammo cache: bright white blip so ammo is easy to find.
           ctx.save();
-          ctx.shadowColor = "rgba(255, 190, 40, 0.9)";
+          ctx.shadowColor = "rgba(255, 255, 255, 0.9)";
           ctx.shadowBlur = 6;
-          ctx.fillStyle = "#ffbe28";
+          ctx.fillStyle = "#ffffff";
           ctx.beginPath();
           ctx.arc(sx, sy, 2.6, 0, Math.PI * 2);
           ctx.fill();

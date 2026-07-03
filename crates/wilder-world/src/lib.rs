@@ -588,6 +588,7 @@ impl Player {
             anim: self.anim(),
             health_pct: 1.0,
             variant: 0,
+            item: None,
         }
     }
 }
@@ -3274,6 +3275,12 @@ impl World {
                     anim: AnimState::Idle,
                     health_pct: 1.0,
                     variant: container.variant,
+                    // Biggest stack decides the floating icon.
+                    item: container
+                        .items
+                        .iter()
+                        .max_by_key(|s| s.count)
+                        .map(|s| s.kind),
                 },
                 snap: EntitySnapshot {
                     id: container.entity,
@@ -3304,6 +3311,7 @@ impl World {
                     anim: AnimState::Idle,
                     health_pct: health,
                     variant: node.variant,
+                    item: None,
                 },
                 snap: EntitySnapshot {
                     id: node.entity,
@@ -3329,6 +3337,7 @@ impl World {
                     anim: AnimState::Idle,
                     health_pct: 1.0,
                     variant: s.variant,
+                    item: None,
                 },
                 snap: EntitySnapshot {
                     id: s.entity,

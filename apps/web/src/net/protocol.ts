@@ -157,6 +157,8 @@ export interface EntitySpawnData {
   anim: AnimState;
   health_pct: number;
   variant: number;
+  /** Loot containers: primary contained item (floating icon); null otherwise. */
+  item?: ItemKind | null;
 }
 
 export interface PropInstance {

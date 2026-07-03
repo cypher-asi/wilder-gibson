@@ -38,6 +38,7 @@ import {
 } from "../state/game";
 import { RED_NUM } from "../ui/colors";
 import { groundHeightAt } from "./Ground";
+import { itemSpriteMaterial } from "./itemSprite";
 import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
 
@@ -993,24 +994,33 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 const crateBoxGeo = new THREE.BoxGeometry(0.6, 0.55, 0.6);
 const crateCapGeo = new THREE.BoxGeometry(0.5, 0.06, 0.5);
 const crateBodyMat = new THREE.MeshStandardMaterial({
-  color: "#3a2f1d",
+  color: "#2a2f36",
   roughness: 0.6,
   metalness: 0.3,
 });
 const ammoBodyMat = new THREE.MeshStandardMaterial({
-  color: "#3a3410",
+  color: "#323841",
   roughness: 0.6,
   metalness: 0.3,
 });
 const crateCapMat = new THREE.MeshStandardMaterial({
-  color: "#ffe14d",
-  emissive: "#ffc93d",
+  color: "#ffffff",
+  emissive: "#e8f2ff",
   emissiveIntensity: 2,
 });
 const ammoCapMat = new THREE.MeshStandardMaterial({
-  color: "#ffd23d",
-  emissive: "#ffb100",
+  color: "#ffffff",
+  emissive: "#f4faff",
   emissiveIntensity: 2,
+});
+/** Soft white halo behind a crate's floating item icon (shared material). */
+const crateIconHaloMat = new THREE.SpriteMaterial({
+  map: entityGlowTexture,
+  color: "#ffffff",
+  transparent: true,
+  opacity: 0.3,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
 });
 let cratePulseFrame = -1;
 
@@ -1018,6 +1028,7 @@ function LootCrate({ entity }: { entity: GameEntity }) {
   // Ammo caches (variant 1) get a brighter cap + ground glow so ammo is easy
   // to spot without a tall beacon beam cluttering the scene.
   const isAmmo = entity.variant === 1;
+  const icon = useRef<THREE.Group>(null);
   useFrame(({ clock }) => {
     // Shared materials only need one update per frame, not one per crate.
     if (cratePulseFrame !== clock.elapsedTime) {
@@ -1025,6 +1036,10 @@ function LootCrate({ entity }: { entity: GameEntity }) {
       const pulse = 1.5 + Math.sin(clock.elapsedTime * 4) * 0.8;
       crateCapMat.emissiveIntensity = pulse;
       ammoCapMat.emissiveIntensity = pulse + 1.5;
+    }
+    // Gentle per-crate bob for the floating icon (phase from the entity id).
+    if (icon.current) {
+      icon.current.position.y = 1.02 + Math.sin(clock.elapsedTime * 1.8 + entity.id) * 0.05;
     }
   });
   return (
@@ -1047,11 +1062,20 @@ function LootCrate({ entity }: { entity: GameEntity }) {
         geometry={crateCapGeo}
         material={isAmmo ? ammoCapMat : crateCapMat}
       />
+      {/* White glowing icon of the contents, floating above the crate: a soft
+          additive halo behind the item's inventory glyph. Subtle at range but
+          instantly tells you what the drop is. */}
+      {entity.item && (
+        <group ref={icon} position={[0, 1.02, 0]}>
+          <sprite material={crateIconHaloMat} scale={[0.95, 0.95, 1]} raycast={noRaycast} />
+          <sprite material={itemSpriteMaterial(entity.item)} scale={[0.5, 0.5, 1]} raycast={noRaycast} />
+        </group>
+      )}
       {/* No real pointLight here: with ~150 ammo caches replicated, per-crate
           lights multiply every material's shading cost (each forward-rendered
           fragment loops over all scene lights) and force shader recompiles.
           A flat ground glow marks the cache instead of a tall beacon beam. */}
-      {isAmmo && <GroundGlow color="#ffcc33" radius={2.2} opacity={0.5} />}
+      {isAmmo && <GroundGlow color="#ffffff" radius={2.2} opacity={0.4} />}
     </group>
   );
 }

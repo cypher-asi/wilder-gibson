@@ -62,8 +62,9 @@ export function itemLabel(kind: ItemKind): string {
 const FILL = "#c9d8e6";
 const DIM = "#8aa0b4";
 
-/** Inner SVG content per item kind (48x48 viewBox). */
-const GLYPHS: Record<ItemKind, JSX.Element> = {
+/** Inner SVG content per item kind (48x48 viewBox). Shared with the in-world
+ * loot sprites (render/itemSprite.tsx), which rasterize these to textures. */
+export const GLYPHS: Record<ItemKind, JSX.Element> = {
   Medkit: (
     <>
       <rect x="7" y="14" width="34" height="24" rx="3" fill={FILL} />

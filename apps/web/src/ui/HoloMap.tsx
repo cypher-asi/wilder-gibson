@@ -667,7 +667,7 @@ function ExtractionMarkers({ view }: { view: RefObject<HoloView> }) {
   );
 }
 
-/** Amber markers on every replicated ammo cache so ammo is easy to locate. */
+/** White markers on every replicated ammo cache so ammo is easy to locate. */
 function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
   const [points, setPoints] = useState<{ id: number; x: number; z: number }[]>([]);
   useEffect(() => {
@@ -702,7 +702,7 @@ function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
         <mesh key={p.id} position={[p.x, 6, p.z]}>
           <octahedronGeometry args={[1]} />
           <meshBasicMaterial
-            color={new THREE.Color(2.4, 1.5, 0.3)}
+            color={new THREE.Color(2.0, 2.0, 2.0)}
             blending={THREE.AdditiveBlending}
             depthWrite={false}
             transparent

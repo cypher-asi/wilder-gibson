@@ -108,6 +108,7 @@ impl Npc {
             anim: self.anim,
             health_pct: (self.health / self.archetype.max_health).max(0.0),
             variant: self.archetype.variant,
+            item: None,
         }
     }
 
