@@ -305,99 +305,50 @@ const OUTPOSTS: &[((i32, i32), EntityKind, &str)] = &[
     ((0, -3), EntityKind::Building, "Storage Depot North"),
 ];
 
-/// Spots for service locations in a chunk: each spot is the sidewalk tile in
-/// front of an existing building's street face (-z side, matching the
-/// client's storefront convention), so every service lives in a real
-/// storefront. Prefers doors near the anchor (spawn in the spawn chunk,
-/// chunk centre elsewhere) and keeps doors at least 3 tiles apart. Falls
-/// back to plain walkable tiles on chunks without enough suitable
-/// buildings. Returns world-space positions; may be shorter than `count`
-/// on cramped chunks.
-fn station_spots(chunk: &ChunkData, coord: ChunkCoord, count: usize) -> Vec<Vec3> {
-    let (anchor_tx, anchor_tz) = if coord.x == 0 && coord.z == 0 {
-        ((SPAWN.x / TILE_SIZE) as i32, (SPAWN.z / TILE_SIZE) as i32)
-    } else {
-        (TILES_PER_CHUNK as i32 / 2, TILES_PER_CHUNK as i32 / 2)
-    };
-    // Door candidates: the tile just outside the front-face midpoint of
-    // every building footprint in the chunk.
-    let mut candidates: Vec<(i32, usize, usize)> = Vec::new();
+/// Minimum spacing between service locations, meters (two doors on the same
+/// building face stay far enough apart that their signs never overlap).
+const MIN_DOOR_SEP: f32 = 4.0 * TILE_SIZE;
+
+/// Door spots for a chunk: the sidewalk tile outside every tile of every
+/// building's street face (-z side, matching the client's procedural
+/// storefront convention). Service locations dock to these so each one
+/// lives in a real storefront. Road tiles and sliver footprints (chunk-cut
+/// building edges under 2 tiles wide) are skipped.
+fn door_spots(chunk: &ChunkData, coord: ChunkCoord) -> Vec<Vec3> {
+    let mut out = Vec::new();
     for b in &chunk.buildings {
-        if b.tz0 == 0 {
-            continue; // front row would be outside the chunk
+        if b.tz0 == 0 || b.tx1.saturating_sub(b.tx0) < 2 {
+            continue; // front row outside the chunk, or a sliver slice
         }
         let tz = b.tz0 as usize - 1;
-        let tx = (b.tx0 as usize + b.tx1 as usize - 1) / 2;
-        if tx >= TILES_PER_CHUNK || tz >= TILES_PER_CHUNK {
-            continue;
-        }
-        let kind = chunk.tile(tx, tz);
-        if !kind.walkable() {
-            continue;
-        }
-        let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
-        if d < 2 {
-            continue; // keep the anchor tile itself clear
-        }
-        // Doors opening straight onto a road rank behind sidewalk doors.
-        let penalty = if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
-        candidates.push((d + penalty, tx, tz));
-    }
-    candidates.sort();
-    let mut spots: Vec<(usize, usize)> = Vec::new();
-    for &(_, tx, tz) in &candidates {
-        if spots.len() >= count {
-            break;
-        }
-        if spots
-            .iter()
-            .all(|&(sx, sz)| (sx as i32 - tx as i32).abs().max((sz as i32 - tz as i32).abs()) >= 3)
-        {
-            spots.push((tx, tz));
-        }
-    }
-    // Fallback for chunks without enough hosting buildings: nearest plain
-    // walkable off-road tiles, as before.
-    if spots.len() < count {
-        let mut fallback: Vec<(i32, usize, usize)> = Vec::new();
-        for tz in 0..TILES_PER_CHUNK {
-            for tx in 0..TILES_PER_CHUNK {
-                let kind = chunk.tile(tx, tz);
-                if !kind.walkable() {
-                    continue;
-                }
-                let d = (tx as i32 - anchor_tx).abs().max((tz as i32 - anchor_tz).abs());
-                if d < 2 {
-                    continue;
-                }
-                let penalty =
-                    if matches!(kind, TileKind::Road | TileKind::RoadLine) { 100 } else { 0 };
-                fallback.push((d + penalty, tx, tz));
+        for tx in (b.tx0 as usize)..(b.tx1 as usize).min(TILES_PER_CHUNK) {
+            let kind = chunk.tile(tx, tz);
+            if !kind.walkable() || matches!(kind, TileKind::Road | TileKind::RoadLine) {
+                continue;
             }
-        }
-        fallback.sort();
-        for &(_, tx, tz) in &fallback {
-            if spots.len() >= count {
-                break;
-            }
-            if spots
-                .iter()
-                .all(|&(sx, sz)| (sx as i32 - tx as i32).abs().max((sz as i32 - tz as i32).abs()) >= 3)
-            {
-                spots.push((tx, tz));
-            }
-        }
-    }
-    spots
-        .into_iter()
-        .map(|(tx, tz)| {
-            Vec3::new(
+            out.push(Vec3::new(
                 coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
                 0.0,
                 coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
-            )
-        })
-        .collect()
+            ));
+        }
+    }
+    out
+}
+
+/// Nearest unused door to `target`, keeping MIN_DOOR_SEP from taken spots.
+fn pick_door(doors: &[Vec3], used: &[Vec3], target: Vec3) -> Option<Vec3> {
+    let mut best: Option<(f32, Vec3)> = None;
+    for &door in doors {
+        if used.iter().any(|&u| (u - door).length() < MIN_DOOR_SEP) {
+            continue;
+        }
+        let dist = (door - target).length();
+        if best.map(|(b, _)| dist < b).unwrap_or(true) {
+            best = Some((dist, door));
+        }
+    }
+    best.map(|(_, door)| door)
 }
 
 /// Deterministic, spread-out pedestrian tiles in a chunk for scattering ammo
@@ -503,6 +454,13 @@ struct Player {
     production: HashMap<EntityId, Vec<ProductionJobState>>,
     /// Cached account wallet (write-through to the store).
     wallet: u32,
+    /// Cached salvage currency (write-through to the store).
+    shards: u32,
+    /// Cached charge currency (write-through to the store).
+    energy: u32,
+    /// Last (wild, shards, energy) sent as a WalletUpdate; None forces the
+    /// initial send after join. Checked once per tick in replicate().
+    wallet_sent: Option<(u32, u32, u32)>,
     dirty: bool,
 }
 
@@ -780,11 +738,11 @@ impl World {
         }
 
         // One-time WILD grant per account (tracked in world meta).
-        let mut wallet = self
+        let (mut wallet, shards, energy) = self
             .store
             .account_by_id(account)
-            .map(|a| a.wallet)
-            .unwrap_or(0);
+            .map(|a| (a.wallet, a.shards, a.energy))
+            .unwrap_or((0, 0, 0));
         let grant_key = format!("wallet_granted_{account}");
         let granted: bool = self.store.meta(&grant_key).ok().flatten().unwrap_or(false);
         if !granted {
@@ -834,6 +792,9 @@ impl World {
             blueprints,
             production: HashMap::new(),
             wallet,
+            shards,
+            energy,
+            wallet_sent: None,
             dirty: true,
         };
         player.sync_shield();
@@ -1393,6 +1354,36 @@ impl World {
         }
     }
 
+    /// Grant Shards (salvage currency): bump the cached balance, mint it on
+    /// the ledger, and write through to the account store. The client's
+    /// WalletUpdate goes out on the next replicate pass.
+    fn grant_shards(&mut self, entity: EntityId, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.shards += amount;
+        let to = player_party(player);
+        let account = player.character.account_id;
+        let (shards, energy) = (player.shards, player.energy);
+        self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Shards { amount }, 0);
+        let _ = self.store.update_currencies(account, shards, energy);
+    }
+
+    /// Grant Energy (charge currency); see `grant_shards`.
+    fn grant_energy(&mut self, entity: EntityId, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        player.energy += amount;
+        let to = player_party(player);
+        let account = player.character.account_id;
+        let (shards, energy) = (player.shards, player.energy);
+        self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Energy { amount }, 0);
+        let _ = self.store.update_currencies(account, shards, energy);
+    }
+
     fn interact(&mut self, entity: EntityId, target: EntityId) {
         // Loot container?
         if let Some(container) = self.loot.get_mut(&target) {
@@ -1417,6 +1408,7 @@ impl World {
             container.items = leftovers;
             let owner = container.owner.clone();
             let in_supply = container.in_supply;
+            let variant = container.variant;
             player.dirty = true;
             let picker = player_party(player);
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
@@ -1425,6 +1417,10 @@ impl World {
                 self.loot.remove(&target);
             }
             self.record_loot_pickup(picker, owner, in_supply, &taken);
+            // Ammo caches carry a small Energy charge for whoever taps them.
+            if variant == 1 && !taken.is_empty() {
+                self.grant_energy(entity, 1);
+            }
             return;
         }
 
@@ -2509,6 +2505,14 @@ impl World {
                             TxAmount::Item { kind: stack.kind, count: stack.count },
                             0,
                         );
+                        player.sync_shield();
+                        player.dirty = true;
+                        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+                        // Salvage: destroying grants Shards scaled by how
+                        // much space the stack occupied (bulk = value).
+                        let gain = stack.count * stack.kind.slot_cost();
+                        self.grant_shards(entity, gain);
+                        return;
                     }
                 }
             }
@@ -2743,6 +2747,8 @@ impl World {
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
             self.persist_player_entity(entity);
+            // A completed extraction charges the runner's Energy reserve.
+            self.grant_energy(entity, 5);
         }
     }
 
@@ -2938,7 +2944,12 @@ impl World {
             if empty {
                 self.loot.remove(&cid);
             }
+            let grabbed_any = !taken.is_empty();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
+            // Ammo caches (the only auto-pickup) carry a small Energy charge.
+            if grabbed_any {
+                self.grant_energy(pid, 1);
+            }
         }
 
         let mut expired = Vec::new();
@@ -3065,6 +3076,11 @@ impl World {
     /// Place every spawn-district service building and hostile-ring outpost.
     /// Runs once at world start (before any player joins) so the POI list is
     /// always complete and positions never depend on who streamed what first.
+    ///
+    /// Each service docks to a real building door spot (a storefront face of
+    /// an existing procedural building). Buildings are sparse per chunk, so
+    /// doors are gathered from the target chunk and its 8 neighbours and the
+    /// nearest free one to the chunk's anchor wins.
     fn seed_district(&mut self) {
         let placements = || DISTRICT.iter().chain(OUTPOSTS.iter());
         let mut chunk_order: Vec<(i32, i32)> = Vec::new();
@@ -3073,18 +3089,52 @@ impl World {
                 chunk_order.push(c);
             }
         }
+        let mut used: Vec<Vec3> = Vec::new();
         for c in chunk_order {
             let stations: Vec<(EntityKind, &str)> = placements()
                 .filter(|&&(cc, _, _)| cc == c)
                 .map(|&(_, kind, name)| (kind, name))
                 .collect();
             let coord = ChunkCoord::new(c.0, c.1);
-            let chunk = self.chunks.get(coord);
-            let spots = station_spots(&chunk, coord, stations.len());
-            if spots.len() < stations.len() {
-                tracing::warn!(?coord, "chunk too cramped for all district buildings");
-            }
-            for (&(kind, name), pos) in stations.iter().zip(spots) {
+            let mut doors: Vec<Vec3> = Vec::new();
+            let gather = |doors: &mut Vec<Vec3>, r: i32, chunks: &mut ChunkCache| {
+                for dz in -r..=r {
+                    for dx in -r..=r {
+                        if dx.abs().max(dz.abs()) != r && r != 0 {
+                            continue; // only the new ring
+                        }
+                        let n = ChunkCoord::new(coord.x + dx, coord.z + dz);
+                        let chunk = chunks.get(n);
+                        doors.extend(door_spots(&chunk, n));
+                    }
+                }
+            };
+            gather(&mut doors, 0, &mut self.chunks);
+            gather(&mut doors, 1, &mut self.chunks);
+            let mut gathered_r = 1;
+            let anchor = if c == (0, 0) {
+                SPAWN
+            } else {
+                Vec3::new(
+                    (coord.x as f32 + 0.5) * CHUNK_SIZE,
+                    0.0,
+                    (coord.z as f32 + 0.5) * CHUNK_SIZE,
+                )
+            };
+            for &(kind, name) in &stations {
+                let mut picked = pick_door(&doors, &used, anchor);
+                // Building-poor neighbourhoods: widen the search ring until
+                // a free storefront turns up (bounded to stay near target).
+                while picked.is_none() && gathered_r < 3 {
+                    gathered_r += 1;
+                    gather(&mut doors, gathered_r, &mut self.chunks);
+                    picked = pick_door(&doors, &used, anchor);
+                }
+                let Some(pos) = picked else {
+                    tracing::warn!(?coord, name, "no free storefront door for service");
+                    continue;
+                };
+                used.push(pos);
                 let entity = self.alloc_entity();
                 self.statics.insert(
                     entity,
@@ -3365,6 +3415,17 @@ impl World {
         }
 
         for player in self.players.values_mut() {
+            // Push currency balances whenever any of them changed (join,
+            // vendor/market/bank flows, salvage, energy grants).
+            let balances = (player.wallet, player.shards, player.energy);
+            if player.wallet_sent != Some(balances) {
+                player.wallet_sent = Some(balances);
+                let _ = player.tx.send(S2C::WalletUpdate {
+                    wild: balances.0,
+                    shards: balances.1,
+                    energy: balances.2,
+                });
+            }
             let mut visible: Vec<EntitySnapshot> = Vec::new();
             let mut visible_ids: HashSet<EntityId> = HashSet::new();
 
@@ -3509,21 +3570,33 @@ mod tests {
 
     #[test]
     fn district_placements_have_room() {
-        // Every district/outpost chunk on the baked map yields enough
-        // walkable, spread-out spots for its buildings.
+        // Every district/outpost chunk (plus the neighbour rings the seeder
+        // may widen to) yields enough free storefront doors for its services.
         let generator = TerrainGenerator::new(0);
         for &(c, _, _) in DISTRICT.iter().chain(OUTPOSTS.iter()) {
             let coord = ChunkCoord::new(c.0, c.1);
-            let chunk = generator.generate(coord);
             let wanted = DISTRICT
                 .iter()
                 .chain(OUTPOSTS.iter())
                 .filter(|&&(cc, _, _)| cc == c)
                 .count();
-            let spots = station_spots(&chunk, coord, wanted);
-            assert_eq!(spots.len(), wanted, "chunk {coord:?} too cramped");
-            for pos in &spots {
-                assert_eq!(ChunkCoord::from_world(*pos), coord);
+            let mut doors: Vec<Vec3> = Vec::new();
+            for dz in -3..=3 {
+                for dx in -3..=3 {
+                    let n = ChunkCoord::new(coord.x + dx, coord.z + dz);
+                    doors.extend(door_spots(&generator.generate(n), n));
+                }
+            }
+            let anchor = Vec3::new(
+                (coord.x as f32 + 0.5) * CHUNK_SIZE,
+                0.0,
+                (coord.z as f32 + 0.5) * CHUNK_SIZE,
+            );
+            let mut used: Vec<Vec3> = Vec::new();
+            for _ in 0..wanted {
+                let picked = pick_door(&doors, &used, anchor);
+                assert!(picked.is_some(), "chunk {coord:?} too cramped");
+                used.push(picked.unwrap());
             }
         }
     }

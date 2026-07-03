@@ -40,6 +40,14 @@ pub struct LedgerSave {
     pub wild_minted: u64,
     pub wild_burned: u64,
     pub wild_agent_held: i64,
+    #[serde(default)]
+    pub shards_minted: u64,
+    #[serde(default)]
+    pub shards_burned: u64,
+    #[serde(default)]
+    pub energy_minted: u64,
+    #[serde(default)]
+    pub energy_burned: u64,
     pub blueprints_learned: u64,
     pub deaths: u64,
     pub npc_kills: u64,
@@ -60,6 +68,10 @@ pub struct Ledger {
     wild_burned: u64,
     /// Net WILD sitting on agent balances (vendor takings minus payouts).
     wild_agent_held: i64,
+    shards_minted: u64,
+    shards_burned: u64,
+    energy_minted: u64,
+    energy_burned: u64,
     pub blueprints_learned: u64,
     pub deaths: u64,
     pub npc_kills: u64,
@@ -98,6 +110,10 @@ impl Ledger {
             wild_minted: save.wild_minted,
             wild_burned: save.wild_burned,
             wild_agent_held: save.wild_agent_held,
+            shards_minted: save.shards_minted,
+            shards_burned: save.shards_burned,
+            energy_minted: save.energy_minted,
+            energy_burned: save.energy_burned,
             blueprints_learned: save.blueprints_learned,
             deaths: save.deaths,
             npc_kills: save.npc_kills,
@@ -114,6 +130,10 @@ impl Ledger {
             wild_minted: self.wild_minted,
             wild_burned: self.wild_burned,
             wild_agent_held: self.wild_agent_held,
+            shards_minted: self.shards_minted,
+            shards_burned: self.shards_burned,
+            energy_minted: self.energy_minted,
+            energy_burned: self.energy_burned,
             blueprints_learned: self.blueprints_learned,
             deaths: self.deaths,
             npc_kills: self.npc_kills,
@@ -181,6 +201,16 @@ impl Ledger {
                     }
                 }
             }
+            TxAmount::Shards { amount } => match effect {
+                Some(true) => self.shards_minted += *amount as u64,
+                Some(false) => self.shards_burned += *amount as u64,
+                None => {}
+            },
+            TxAmount::Energy { amount } => match effect {
+                Some(true) => self.energy_minted += *amount as u64,
+                Some(false) => self.energy_burned += *amount as u64,
+                None => {}
+            },
             TxAmount::Blueprint { .. } => {}
         }
 
@@ -236,6 +266,10 @@ impl Ledger {
             wild_burned: self.wild_burned,
             wild_circulating: self.wild_minted as i64 - self.wild_burned as i64,
             wild_agent_held: self.wild_agent_held,
+            shards_minted: self.shards_minted,
+            shards_burned: self.shards_burned,
+            energy_minted: self.energy_minted,
+            energy_burned: self.energy_burned,
             items: self.item_supplies(),
             blueprints_learned: self.blueprints_learned,
             players_online,

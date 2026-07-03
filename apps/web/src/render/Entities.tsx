@@ -222,6 +222,10 @@ function chooseOverride(anim: AnimState, isNpc: boolean): ClipChoice | null {
       // Players shoot via the upper-body layer on top of locomotion, so the
       // base layer keeps its idle/moving pose; NPCs swing full-body.
       return isNpc ? { name: "Punch_Cross", timeScale: 1.15 } : null;
+    case "Hit":
+      // Server hit-stun: the NPC stops in place, so play the flinch on the
+      // whole body. Players aren't stunned and flinch via the upper layer.
+      return isNpc ? { name: "Hit_Chest", timeScale: 1.2 } : null;
     case "Gather":
       return { name: "Interact", timeScale: 1 };
     default:
@@ -794,10 +798,12 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
         }
       }
     }
-    // Hit flinch layer + red damage flash.
+    // Hit flinch layer + red damage flash. NPCs get a full-body flinch via
+    // the server's Hit anim state instead (they're stun-locked in place), so
+    // the upper-body overlay is players-only to avoid double-playing.
     if (entity.hitReactAt > seenHit.current) {
       seenHit.current = entity.hitReactAt;
-      if (!dying) playUpper("Hit_Chest", 1.3);
+      if (!dying && !isNpc) playUpper("Hit_Chest", 1.3);
     }
     const flash =
       Math.max(0, 1 - (now - entity.hitReactAt) / HIT_FLASH_MS) * 0.55;

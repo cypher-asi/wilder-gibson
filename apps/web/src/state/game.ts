@@ -423,6 +423,8 @@ interface UiState {
   musicOn: boolean;
   /** Left-side pickup feed entries (newest last); expired by the HUD. */
   pickupFeed: PickupFeedEntry[];
+  /** Currency balances (WILD / Shards / Energy) shown under the vitals. */
+  wallet: { wild: number; shards: number; energy: number } | null;
   /** Active level-up celebration; cleared by the banner after it plays. */
   levelUp: LevelUpEvent | null;
   /** Bouncy currency toasts ("+N WILD"); self-expire in the HUD. */
@@ -510,6 +512,7 @@ export const useGame: import("zustand").UseBoundStore<
   visualStyle: loadVisualStyle(),
   musicOn: loadMusicOn(),
   pickupFeed: [],
+  wallet: null,
   levelUp: null,
   walletToasts: [],
 

@@ -34,10 +34,15 @@ pub struct Npc {
     /// Seconds of forced aggro on `target` after taking damage; lets the NPC
     /// retaliate against attackers beyond its passive aggro radius.
     pub provoked: f32,
+    /// Seconds of hit-stun remaining; a freshly shot NPC flinches and cannot
+    /// move or attack until this drains.
+    pub stun_timer: f32,
 }
 
 /// How long a damaged NPC stays locked onto its attacker.
 const PROVOKE_SECONDS: f32 = 8.0;
+/// Hit-stun duration: how long a shot NPC stands flinching before resuming.
+pub const HIT_STUN_SECONDS: f32 = 0.35;
 /// Provoked NPCs give up beyond this distance from the attacker.
 const PROVOKE_LEASH: f32 = 40.0;
 
@@ -71,6 +76,7 @@ impl Npc {
             anim: AnimState::Idle,
             chunk: ChunkCoord::from_world(home),
             provoked: 0.0,
+            stun_timer: 0.0,
         }
     }
 
@@ -130,6 +136,14 @@ impl Npc {
         self.attack_cooldown = (self.attack_cooldown - TICK_DT).max(0.0);
         self.provoked = (self.provoked - TICK_DT).max(0.0);
         self.anim = AnimState::Idle;
+
+        // Hit-stun: a freshly shot NPC stands flinching — no movement, no
+        // attacks — until the timer drains.
+        if self.stun_timer > 0.0 {
+            self.stun_timer = (self.stun_timer - TICK_DT).max(0.0);
+            self.anim = AnimState::Hit;
+            return None;
+        }
 
         // Acquire / validate target: nearest player in passive aggro range,
         // or the provoking attacker (pursued beyond that radius, up to a

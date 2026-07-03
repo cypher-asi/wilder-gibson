@@ -303,6 +303,8 @@ export type TxParty =
 export type TxAmount =
   | Tagged<"Item", { kind: ItemKind; count: number }>
   | Tagged<"Wild", { amount: number }>
+  | Tagged<"Shards", { amount: number }>
+  | Tagged<"Energy", { amount: number }>
   | Tagged<"Blueprint", { recipe: string }>;
 
 export type TxKind =
@@ -349,6 +351,10 @@ export interface EconomyStats {
   wild_burned: number;
   wild_circulating: number;
   wild_agent_held: number;
+  shards_minted: number;
+  shards_burned: number;
+  energy_minted: number;
+  energy_burned: number;
   items: ItemSupply[];
   blueprints_learned: number;
   players_online: number;
@@ -395,6 +401,7 @@ export type S2C =
       "XpUpdate",
       { xp: number; level: number; next_level_xp: number; gained: number }
     >
+  | Tagged<"WalletUpdate", { wild: number; shards: number; energy: number }>
   | Tagged<
       "AbilityUpdate",
       { ability: AbilityKind; cooldown: number; active: number }

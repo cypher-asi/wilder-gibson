@@ -139,6 +139,7 @@ function uiBlocksPointerLock(s: UiState): boolean {
   return (
     s.inventoryOpen ||
     s.mapOpen ||
+    s.economyOpen ||
     s.menuOpen ||
     s.chatOpen ||
     s.craftOpen ||

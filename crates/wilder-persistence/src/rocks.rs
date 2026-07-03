@@ -100,6 +100,8 @@ impl CharacterStore for RocksStore {
                 .unwrap_or_default()
                 .as_secs(),
             wallet: 0,
+            shards: 0,
+            energy: 0,
         };
         self.put_json(CF_ACCOUNTS, account.id.as_bytes(), &account)?;
         self.put_json(CF_USERNAME_INDEX, key.as_bytes(), &account.id)?;
@@ -122,6 +124,13 @@ impl CharacterStore for RocksStore {
     fn update_wallet(&self, id: AccountId, wallet: u32) -> StoreResult<()> {
         let mut account = self.account_by_id(id)?;
         account.wallet = wallet;
+        self.put_json(CF_ACCOUNTS, id.as_bytes(), &account)
+    }
+
+    fn update_currencies(&self, id: AccountId, shards: u32, energy: u32) -> StoreResult<()> {
+        let mut account = self.account_by_id(id)?;
+        account.shards = shards;
+        account.energy = energy;
         self.put_json(CF_ACCOUNTS, id.as_bytes(), &account)
     }
 

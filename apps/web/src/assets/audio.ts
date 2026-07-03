@@ -22,6 +22,20 @@ export async function playSfx(id: string, volume = 0.5) {
   }
 }
 
+const GRUNT_IDS = ["sfx_grunt1", "sfx_grunt2", "sfx_grunt3"];
+
+/** Pain grunt for a shot NPC: random variant + slight pitch wobble so rapid
+ * fire doesn't sound like a stuck sample. */
+export async function playGrunt(volume = 0.5) {
+  const id = GRUNT_IDS[Math.floor(Math.random() * GRUNT_IDS.length)];
+  const sfx = await getSfx(id);
+  if (sfx) {
+    sfx.volume(volume);
+    sfx.rate(0.92 + Math.random() * 0.16);
+    sfx.play();
+  }
+}
+
 // --- Synthesized UI blips (coin / deny) ------------------------------------
 // Tiny square-wave cues built on Web Audio so no asset files are needed and
 // the coin can be a proper two-note NES-style chime.

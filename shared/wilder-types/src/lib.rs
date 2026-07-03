@@ -490,6 +490,10 @@ pub enum TxParty {
 pub enum TxAmount {
     Item { kind: ItemKind, count: u32 },
     Wild { amount: u32 },
+    /// Salvage currency earned by destroying items.
+    Shards { amount: u32 },
+    /// Charge currency earned from extractions and ammo caches.
+    Energy { amount: u32 },
     Blueprint { recipe: String },
 }
 
@@ -560,6 +564,14 @@ pub struct EconomyStats {
     pub wild_burned: u64,
     /// minted - burned (includes WILD held by vendor agents).
     pub wild_circulating: i64,
+    #[serde(default)]
+    pub shards_minted: u64,
+    #[serde(default)]
+    pub shards_burned: u64,
+    #[serde(default)]
+    pub energy_minted: u64,
+    #[serde(default)]
+    pub energy_burned: u64,
     /// Net WILD sitting on agent balances (vendors/market). Negative means
     /// agents have paid out more than they took in (net faucet).
     pub wild_agent_held: i64,

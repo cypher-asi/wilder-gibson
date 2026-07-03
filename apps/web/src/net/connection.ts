@@ -4,6 +4,7 @@ import * as THREE from "three";
 import {
   playCoin,
   playDeny,
+  playGrunt,
   playLevelUp,
   playPowerUp,
   playPurchase,
@@ -220,6 +221,8 @@ export class GameConnection {
           if (target) {
             target.lastHitAt = now;
             target.hitReactAt = now;
+            // Shot NPCs vocalize their pain on top of the impact tick.
+            if (target.kind === "Npc") void playGrunt(0.45);
           }
           if (ev.d.attacker === game.localEntityId) {
             recentLocalHits.set(ev.d.target, now);
@@ -359,6 +362,22 @@ export class GameConnection {
               count: 10,
               at: performance.now(),
             });
+          }
+        }
+        break;
+      }
+      case "WalletUpdate": {
+        const prev = useGame.getState().wallet;
+        ui.set({ wallet: msg.d });
+        // Bouncy "+N CURRENCY" toasts near the wallet chips on gains
+        // (skip the initial balance push right after joining).
+        if (prev) {
+          if (msg.d.wild > prev.wild) ui.pushWalletToast(`+${msg.d.wild - prev.wild} WILD`);
+          if (msg.d.shards > prev.shards) {
+            ui.pushWalletToast(`+${msg.d.shards - prev.shards} SHARDS`);
+          }
+          if (msg.d.energy > prev.energy) {
+            ui.pushWalletToast(`+${msg.d.energy - prev.energy} ENERGY`);
           }
         }
         break;

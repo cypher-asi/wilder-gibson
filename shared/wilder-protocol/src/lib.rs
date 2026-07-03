@@ -126,6 +126,9 @@ pub enum S2C {
     CombatEvent(CombatEvent),
     /// XP/level progression changed (kills grant XP; sent on join too).
     XpUpdate { xp: u32, level: u32, next_level_xp: u32, gained: u32 },
+    /// The receiving player's currency balances (sent on join and whenever
+    /// any of the three changes).
+    WalletUpdate { wild: u32, shards: u32, energy: u32 },
     /// Authoritative ability state for the receiving player (on use + join).
     AbilityUpdate { ability: AbilityKind, cooldown: f32, active: f32 },
     Died { by: Option<String>, lost_items: bool },

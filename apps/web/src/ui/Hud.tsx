@@ -9,6 +9,7 @@ import { STYLES, VISUAL_STYLE_IDS, type VisualStyleId } from "../render/styles";
 import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
 import { RED_HEX } from "./colors";
+import { EconomyDashboard } from "./EconomyDashboard";
 import { GameMenu } from "./GameMenu";
 import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
 import { InventoryScreen } from "./InventoryScreen";
@@ -41,6 +42,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
         <>
           <Crosshair />
           <VitalsPanel />
+          <CurrencyPanel />
           <div className="minimap-panel">
             <Minimap />
             <PositionReadout />
@@ -65,6 +67,7 @@ export function Hud({ connection }: { connection: GameConnection }) {
           <MarketPanel connection={connection} />
           <VendorPanel connection={connection} />
           <HoloMap />
+          <EconomyDashboard connection={connection} />
           <PerfPanel />
         </>
       )}
@@ -267,6 +270,50 @@ function VitalsPanel() {
             "NO SHIELD"
           )}
         </span>
+      </div>
+    </div>
+  );
+}
+
+/** Currency chips under the vitals: WILD / Shards / Energy balances. */
+function CurrencyPanel() {
+  const wallet = useGame((s) => s.wallet);
+  return (
+    <div className="currency-panel">
+      <div className="currency-chip wild" title="WILD — soft currency (market, vendors)">
+        <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
+          <path
+            d="M10 1.5 L17.5 6 v8 L10 18.5 L2.5 14 v-8 Z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+          />
+          <path
+            d="M6 7 l1.5 6 L10 9.5 L12.5 13 L14 7"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className="currency-value">{wallet?.wild ?? 0}</span>
+        <span className="currency-name">WILD</span>
+      </div>
+      <div className="currency-chip shards" title="Shards — salvage from destroyed items">
+        <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
+          <path d="M10 1.5 L14.5 8 L10 18.5 L5.5 8 Z" fill="currentColor" opacity="0.85" />
+          <path d="M10 1.5 L14.5 8 L10 10.5 L5.5 8 Z" fill="currentColor" />
+        </svg>
+        <span className="currency-value">{wallet?.shards ?? 0}</span>
+        <span className="currency-name">SHARDS</span>
+      </div>
+      <div className="currency-chip energy" title="Energy — charge from extractions and ammo caches">
+        <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
+          <path d="M11.5 1.5 L4.5 11.5 h4 L8 18.5 L15.5 8.5 h-4 Z" fill="currentColor" />
+        </svg>
+        <span className="currency-value">{wallet?.energy ?? 0}</span>
+        <span className="currency-name">ENERGY</span>
       </div>
     </div>
   );

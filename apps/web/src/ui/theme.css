@@ -306,6 +306,61 @@ body {
   margin-bottom: 12px;
 }
 
+/* Currency chips (WILD / Shards / Energy) directly under the vitals bars,
+   on the same angled holo plane. */
+.currency-panel {
+  position: absolute;
+  top: 168px;
+  left: 44px;
+  display: flex;
+  gap: 10px;
+  filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.7));
+  transform: perspective(1100px) rotateX(9deg) rotateY(9deg) rotateZ(2deg);
+  transform-origin: left center;
+  pointer-events: none;
+}
+
+.currency-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--panel);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  font-family: var(--font-display);
+}
+
+.currency-chip.wild {
+  color: var(--accent);
+}
+
+.currency-chip.shards {
+  color: #eef4fa;
+}
+
+.currency-chip.energy {
+  color: #6ee8ff;
+}
+
+.currency-value {
+  font-size: 14px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-bright);
+}
+
+.currency-chip.shards .currency-value,
+.currency-chip.energy .currency-value {
+  color: inherit;
+}
+
+.currency-name {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+}
+
 .vitals-badge {
   min-width: 34px;
   padding: 4px 8px;
@@ -2435,6 +2490,278 @@ body {
   display: block;
 }
 
+/* ---------------------------------------------------------------------------
+ * Economy ledger dashboard (K key): KPI strip + tx feed + item supply.
+ * Rides on .map-overlay for the fullscreen backdrop.
+ * ------------------------------------------------------------------------- */
+
+.econ-overlay {
+  display: flex;
+  flex-direction: column;
+  padding: 58px 26px 16px;
+  gap: 12px;
+  font-family: var(--font-body);
+  cursor: default;
+}
+
+.econ-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.econ-kpi {
+  background: var(--panel);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  padding: 8px 12px 7px;
+}
+
+.econ-kpi-label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--text-dim);
+  margin-bottom: 3px;
+  white-space: nowrap;
+}
+
+.econ-kpi-value {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--accent-bright);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.econ-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr);
+  gap: 12px;
+}
+
+.econ-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch);
+  padding: 12px 14px;
+  box-shadow: var(--holo-layers);
+}
+
+.econ-panel-title {
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.28em;
+  color: var(--white);
+  margin-bottom: 10px;
+}
+
+.econ-panel-sub {
+  float: right;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(79, 195, 255, 0.5);
+}
+
+/* --- Transaction feed table ---------------------------------------------- */
+
+.econ-row {
+  display: grid;
+  grid-template-columns: 118px 1.1fr 1.1fr 108px 52px 1.3fr 70px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.08);
+}
+
+.econ-row .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-head {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--steel-border);
+  padding-bottom: 6px;
+}
+
+.econ-feed-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.econ-feed-list .econ-row:first-child {
+  background: var(--accent-faint);
+}
+
+.econ-hash {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.econ-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.econ-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.econ-block,
+.econ-fee {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.econ-party-player {
+  color: var(--accent-bright);
+}
+
+.econ-party-agent {
+  color: #ffd75e;
+}
+
+.econ-party-mint {
+  color: #7ed07e;
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+
+.econ-party-burn {
+  color: var(--red);
+  letter-spacing: 0.1em;
+  font-size: 10px;
+}
+
+.econ-amount {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.econ-amount-wild {
+  color: #8fe06a;
+}
+
+.econ-amount-bp {
+  color: #9b7fe8;
+}
+
+.econ-empty {
+  padding: 18px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* --- Item supply panel ----------------------------------------------------- */
+
+.econ-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.econ-tab {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  border: 1px solid var(--steel-border);
+  clip-path: var(--clip-notch-sm);
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.econ-tab:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.econ-tab.active {
+  color: var(--accent-bright);
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.econ-supply-row {
+  display: grid;
+  grid-template-columns: 1fr 62px 62px 62px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.08);
+}
+
+.econ-supply-head {
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--steel-border);
+  padding-bottom: 6px;
+}
+
+.econ-supply-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.econ-supply-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.econ-supply-tick {
+  width: 3px;
+  height: 12px;
+  border-radius: 1px;
+  flex: none;
+}
+
+.econ-burned {
+  color: var(--red);
+}
+
+.econ-live {
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+.econ-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
 /* ------------------------------------------------------------------ */
 /* Mario-style reward juice: level-up banner, wallet toasts, coin/xp   */
 /* pops. Appended block; .xp-bar override gives the XP flash a frame.   */
@@ -2631,3 +2958,4 @@ body {
     opacity: 0;
   }
 }
+
