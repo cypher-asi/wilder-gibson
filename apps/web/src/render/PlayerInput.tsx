@@ -45,6 +45,13 @@ const AIM_ASSIST_RADIUS = 1.2;
 const DRAW_TIME = 0.25;
 /** Seconds without shooting before the gun is holstered again. */
 const HOLSTER_AFTER = 5.0;
+/**
+ * Click buffer (ms): a click that lands mid-cooldown (or mid-draw) queues one
+ * shot that fires the moment the gun is ready, so rapid semi-auto clicking
+ * reaches the full fire rate instead of dropping shots whose press/release
+ * fell inside the cooldown window. Long enough to cover the draw time.
+ */
+const SHOT_BUFFER_MS = 350;
 
 const RANGED_WEAPONS = new Set(["Pistol", "Smg"]);
 
@@ -74,6 +81,8 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
   // which the page cannot suppress.
   const running = useRef(false);
   const lastShotAt = useRef(0);
+  /** Timestamp of the latest unconsumed click, for the shot buffer. */
+  const pendingShotAt = useRef(-Infinity);
   const raycaster = useRef(new THREE.Raycaster());
   const groundPlane = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
 
@@ -138,6 +147,7 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
         game.gun.lastShotAt = now; // baseline for the auto-holster timer
       }
       firing.current = true;
+      pendingShotAt.current = now;
     };
     const onPointerUp = (event: PointerEvent) => {
       if (event.button === 0) firing.current = false;
@@ -368,11 +378,15 @@ export function PlayerInput({ connection }: { connection: GameConnection }) {
    * except mid-roll.
    */
   function updateFire() {
-    if (!firing.current || !game.aim.active) return;
     const now = performance.now();
+    // A recent click keeps one shot queued even if the button was already
+    // released, so quick taps never fall between cooldown windows.
+    const buffered = now - pendingShotAt.current < SHOT_BUFFER_MS;
+    if ((!firing.current && !buffered) || !game.aim.active) return;
     if (!game.gun.drawn || now < game.gun.readyAt) return;
     if (game.roll) return; // no shooting mid-roll
     if (now - lastShotAt.current < equippedCooldown() * 1000) return;
+    pendingShotAt.current = -Infinity; // consume the buffered click
     lastShotAt.current = now;
     game.gun.lastShotAt = now;
     game.gun.shotSeq++;
