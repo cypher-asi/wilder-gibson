@@ -5,7 +5,13 @@
 import * as THREE from "three";
 import { getPbrTextureSet } from "../assets/catalog";
 import { BuildingInstance } from "../net/protocol";
-import { STYLE_TOON_APPLY, STYLE_TOON_DECLS, styleUniforms } from "./styles";
+import {
+  STYLE_TOON_APPLY,
+  STYLE_TOON_DECLS,
+  styleUniforms,
+  TRON_DECLS,
+  tronifyMaterial,
+} from "./styles";
 
 // ---------------------------------------------------------------------------
 // Stable exports used by other modules (Props.tsx, Atmosphere.tsx).
@@ -107,7 +113,38 @@ float fnoise(vec2 p) {
 const FACADE_FRAG_MAP = /* glsl */ `
 #include <map_fragment>
 vec3 fGlow = vec3(0.0);
-{
+if (uTron > 0.5) {
+  // TRON: black slab towers outlined by emissive circuits — a hot parapet
+  // line, dim floor lines every story, and blue/white window cells.
+  vec3 fWn = normalize(vFWorldNormal);
+  float fy = vFWorldPos.y - 0.14;
+  diffuseColor.rgb = TRON_BASE;
+  if (abs(fWn.y) < 0.5) {
+    float fu = (abs(fWn.x) > abs(fWn.z)) ? vFWorldPos.z : vFWorldPos.x;
+    float fFace = (abs(fWn.x) > abs(fWn.z)) ? (2.0 + step(0.0, fWn.x)) : (7.0 + step(0.0, fWn.z));
+    float fv = fy - 4.5;
+    if (fv > 0.12 && fy < uTopY - 0.5) {
+      vec2 fCell = vec2(floor(fu / 1.4), floor(fv / 3.0));
+      vec2 fFr = vec2(fract(fu / 1.4), fract(fv / 3.0));
+      float fIn = step(0.26, fFr.x) * step(fFr.x, 0.74) * step(0.25, fFr.y) * step(fFr.y, 0.7);
+      float fRatio = clamp(uLitRatio * uFLitBoost, 0.0, 0.6);
+      float fLit = step(1.0 - fRatio, fhash(fCell * 1.13 + fFace));
+      float fBr = 0.5 + 0.95 * fhash(fCell + fFace + 11.0);
+      // Blue window cells; a sparse fraction burn white-hot.
+      vec3 fCol = mix(TRON_BLUE, TRON_WHITE, step(0.85, fhash(fCell + fFace + 3.0)));
+      fGlow = fCol * (fIn * fLit * fBr * 1.6 * uFGlowGain);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.002, 0.005, 0.012), fIn);
+    }
+    // Dim floor-line circuit every story.
+    if (fv > 0.0 && fy < uTopY - 0.4) {
+      float fFloorD = abs(fv / 3.0 - floor(fv / 3.0 + 0.5)) * 3.0;
+      fGlow += TRON_BLUE * (1.0 - smoothstep(0.02, 0.07, fFloorD)) * 0.22;
+    }
+    // Parapet outline: the glowing roofline that draws the skyline.
+    fGlow += mix(TRON_BLUE, TRON_WHITE, 0.4)
+      * (1.0 - smoothstep(0.03, 0.14, abs(fy - uTopY))) * 1.6;
+  }
+} else {
   vec3 fWn = normalize(vFWorldNormal);
   float fy = vFWorldPos.y - 0.14; // buildings sit on raised tiles (GROUND_Y)
   diffuseColor.rgb *= uTint * uFTint;
@@ -289,13 +326,31 @@ const SHARED_FACTORIES: Record<string, () => THREE.Material> = {
     new THREE.MeshStandardMaterial({ color: "#ffffff", vertexColors: true, roughness: 0.92 }),
   // All emissive planes (signs, window glow, tips). Intensity is baked into
   // vertex colors (>1 values bloom); toneMapped=false keeps them punchy.
-  neon: () =>
-    new THREE.MeshBasicMaterial({
+  // Tron remaps the baked multi-hue palette to blue (white-hot when bright)
+  // while preserving each sign's luminance, so no geometry rebuild is needed.
+  neon: () => {
+    const mat = new THREE.MeshBasicMaterial({
       color: "#ffffff",
       vertexColors: true,
       toneMapped: false,
       side: THREE.DoubleSide,
-    }),
+    });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTron = styleUniforms.uTron;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\n" + TRON_DECLS)
+        .replace(
+          "#include <color_fragment>",
+          /* glsl */ `#include <color_fragment>
+if (uTron > 0.5) {
+  float nLum = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  diffuseColor.rgb = mix(TRON_BLUE, TRON_WHITE, smoothstep(1.2, 2.4, nLum)) * nLum * 1.25;
+}`,
+        );
+    };
+    mat.customProgramCacheKey = () => "tron-neon";
+    return mat;
+  },
   // Rolled-asphalt roof cap.
   roof: () =>
     withClonedPbr(
@@ -314,6 +369,9 @@ export function getSharedMaterial(key: string): THREE.Material {
   if (!mat) {
     const factory = SHARED_FACTORIES[key] ?? SHARED_FACTORIES.metalDark;
     mat = factory();
+    // Neon installs its own tron hue remap; everything else collapses to
+    // the flat blue-black slab in tron mode.
+    if (key !== "neon") tronifyMaterial(mat);
     sharedCache.set(key, mat);
   }
   return mat;

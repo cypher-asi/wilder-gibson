@@ -37,7 +37,13 @@ import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import * as THREE from "three";
 import { game, useGame } from "../state/game";
 import { tickFacades } from "./facade";
-import { applyStyle, STYLES, type AnimeSkySpec, type VisualStyle } from "./styles";
+import {
+  applyStyle,
+  STYLES,
+  styleUniforms,
+  type AnimeSkySpec,
+  type VisualStyle,
+} from "./styles";
 
 // ---------------------------------------------------------------------------
 // Sun & world placement (golden style)
@@ -493,7 +499,13 @@ export const envSkyMaterial = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
   fog: false,
-  uniforms: { uSunDir: { value: SUN_DIR }, uLum: { value: DISPLAY_TO_SCENE } },
+  uniforms: {
+    uSunDir: { value: SUN_DIR },
+    uLum: { value: DISPLAY_TO_SCENE },
+    // Shared style uniform: the ocean's far-tier mirror uses this material,
+    // so tron swaps its sunset gradient for a black/blue one live.
+    uTron: styleUniforms.uTron,
+  },
   vertexShader: /* glsl */ `
     varying vec3 vDir;
     void main() {
@@ -505,9 +517,17 @@ export const envSkyMaterial = new THREE.ShaderMaterial({
     varying vec3 vDir;
     uniform vec3 uSunDir;
     uniform float uLum;
+    uniform float uTron;
     void main() {
       vec3 dir = normalize(vDir);
       float h = dir.y;
+      if (uTron > 0.5) {
+        // Tron reflection sky: black zenith, deep blue horizon band.
+        vec3 tSky = mix(vec3(0.05, 0.22, 0.42), vec3(0.001, 0.003, 0.008),
+          smoothstep(-0.02, 0.35, h));
+        gl_FragColor = vec4(tSky, 1.0);
+        return;
+      }
       vec3 zenith = vec3(0.15, 0.24, 0.44);
       vec3 mid = vec3(0.85, 0.47, 0.28);
       vec3 horizon = vec3(0.98, 0.65, 0.42);

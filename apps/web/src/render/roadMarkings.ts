@@ -10,6 +10,7 @@
 import * as THREE from "three";
 import { CITY_ROAD, CITY_ROAD_LINE, cityTileAt } from "../game/citymap";
 import { groundTextureUniforms } from "./groundShader";
+import { styleUniforms, TRON_DECLS } from "./styles";
 import { LANE_WIDTH, MARKING_WIDTH, PARKING_LANE_WIDTH } from "../game/scale";
 import { CHUNK_SIZE, ChunkData, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 
@@ -360,6 +361,7 @@ export const markingsMaterial = new THREE.MeshStandardMaterial({
 // the road's damp sheen so paint doesn't float bright and dry on a wet street.
 markingsMaterial.onBeforeCompile = (shader) => {
   Object.assign(shader.uniforms, groundTextureUniforms);
+  shader.uniforms.uTron = styleUniforms.uTron;
   shader.vertexShader = shader.vertexShader
     .replace("#include <common>", "#include <common>\nvarying vec3 vMWPos;")
     .replace(
@@ -371,6 +373,7 @@ markingsMaterial.onBeforeCompile = (shader) => {
       "#include <common>",
       /* glsl */ `
 #include <common>
+${TRON_DECLS}
 varying vec3 vMWPos;
 uniform sampler2D uAsphaltMap;
 uniform sampler2D uAsphaltNormal;
@@ -402,6 +405,16 @@ float mFbm(vec2 p) {
       /* glsl */ `
 #include <map_fragment>
 vec2 mwp = vMWPos.xz;
+vec3 mEmissive = vec3(0.0);
+if (uTron > 0.5) {
+  // TRON: lane paint becomes clean emissive light lines — yellow (center)
+  // markings burn white, white markings glow blue. No wear, no textures.
+  // (vColor carries white-vs-yellow; it multiplies in later, hence the
+  // read here instead of diffuseColor.)
+  float mYellow = step(0.3, vColor.r - vColor.b);
+  mEmissive = mix(TRON_BLUE * 1.3, TRON_WHITE * 1.5, mYellow);
+  diffuseColor.rgb = vec3(0.0);
+} else {
 // Wear zones: medium-scale patches where the paint has mostly ground off,
 // plus fine chipping everywhere. Chipped fragments discard to show asphalt.
 float mZone = mFbm(mwp * 0.07 + 310.0);            // 0..1 wear region
@@ -421,6 +434,14 @@ diffuseColor.rgb *= 1.0 - 0.3 * mThin;
 diffuseColor.rgb *= 0.9 + 0.2 * mHash12(floor(mwp / 7.0) + 5.0);
 // Grime speckle dulls the paint like the surrounding road.
 diffuseColor.rgb *= 1.0 - 0.12 * smoothstep(0.55, 0.8, mFbm(mwp * 0.4 + 90.0));
+}
+`,
+    )
+    .replace(
+      "#include <emissivemap_fragment>",
+      /* glsl */ `
+#include <emissivemap_fragment>
+totalEmissiveRadiance += mEmissive;
 `,
     )
     .replace(

@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
+import { tronifyMaterial } from "../render/styles";
 
 export interface ManifestEntry {
   id: string;
@@ -63,6 +64,10 @@ async function loadModel(id: string): Promise<LoadedModel | null> {
           for (const tex of [m.map, m.normalMap, m.roughnessMap, m.metalnessMap, m.aoMap]) {
             if (tex) tex.anisotropy = 8;
           }
+          // Tron mode collapses every authored asset material to the black
+          // slab (idempotent across shared materials; material clones drop
+          // onBeforeCompile, so restyled characters are unaffected).
+          tronifyMaterial(m);
         }
       }
     });

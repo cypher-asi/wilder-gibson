@@ -17,6 +17,7 @@ import {
 import { ChunkData, TileKind, TILE_SIZE, TILES_PER_CHUNK } from "../net/protocol";
 import { groundMaterial } from "./groundShader";
 import { buildRoadMarkings, markingsMaterial } from "./roadMarkings";
+import { tronifyMaterial } from "./styles";
 
 /** Height of the raised sidewalk/plaza slab above road grade. */
 const CURB_H = 0.14;
@@ -465,6 +466,10 @@ const stainMat = new THREE.MeshStandardMaterial({
   polygonOffsetFactor: -1,
   polygonOffsetUnits: -1,
 });
+// Street steel collapses to the dark slab in tron mode (no iron textures).
+for (const m of [manholeCover, manholeRim, drainGrate, recessMat, utilityCover, stainMat]) {
+  tronifyMaterial(m);
+}
 // Manhole assembly: raised cast-iron rim ring, cover disc sunk below the rim
 // top, and a near-black gap ring between them so the seam has visible depth.
 const manholeGeo = new THREE.CircleGeometry(0.28, 24).rotateX(-Math.PI / 2).translate(0, 0.008, 0);

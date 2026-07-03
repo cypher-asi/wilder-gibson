@@ -20,6 +20,12 @@ import { useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useState } from "react";
 import * as THREE from "three";
 import {
+  CITY_BUILDING,
+  CITY_PARK,
+  CITY_PLAZA,
+  CITY_ROAD,
+  CITY_ROAD_LINE,
+  CITY_SIDEWALK,
   CITY_WATER,
   CityGeo,
   getCityGeo,
@@ -29,6 +35,7 @@ import {
 import { CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
 import { game } from "../state/game";
 import { proxyCovers, revealedChunks, REVEAL_FADE_MS } from "./chunkBuilder";
+import { tronifyMaterial } from "./styles";
 
 /** Proxy cell size in meters (8x8 chunks): the frustum-culling granularity. */
 const CELL = 256;
@@ -124,6 +131,101 @@ function tickOccupancy(dt: number): void {
 }
 
 // ---------------------------------------------------------------------------
+// Tile palette window: streets stay legible far beyond the streamed chunks.
+// A sliding window over the city tile grid is baked into an RGBA texture
+// (one texel per 2 m tile, so 1024 texels cover ~2 km around the player) and
+// the distant land mesh samples it instead of a flat color -- roads,
+// sidewalks, and parks continue to the horizon. Mipmapped linear filtering
+// antialiases the distant street grid for free.
+// ---------------------------------------------------------------------------
+
+/** Tile window side in texels (1 texel per tile => covers TILE_WIN*2 m). */
+const TILE_WIN = 1024;
+/** World meters covered by the tile window. */
+const TILE_SPAN = TILE_WIN * TILE_SIZE;
+/** Re-center when the player drifts this many tiles from the window middle. */
+const TILE_RECENTER = 128;
+
+// Distant albedo per tile kind (display-referred, decoded by the sRGB
+// sampler): averages of what the full ground shader converges to, so the
+// handoff at the streamed ring reads as a continuation, not a material swap.
+const TILE_COLORS: [number, number, number][] = [];
+TILE_COLORS[CITY_ROAD] = [40, 40, 44];
+TILE_COLORS[CITY_ROAD_LINE] = [104, 102, 96];
+TILE_COLORS[CITY_SIDEWALK] = [112, 109, 102];
+TILE_COLORS[CITY_PLAZA] = [98, 97, 95];
+TILE_COLORS[CITY_BUILDING] = [66, 62, 58];
+TILE_COLORS[CITY_PARK] = [58, 72, 48];
+TILE_COLORS[CITY_WATER] = [30, 44, 54];
+
+const tilePal32 = new Uint32Array(8);
+{
+  const bytes = new Uint8Array(tilePal32.buffer);
+  for (let k = 0; k < 8; k++) {
+    const [r, g, b] = TILE_COLORS[k] ?? TILE_COLORS[CITY_WATER];
+    bytes[k * 4] = r;
+    bytes[k * 4 + 1] = g;
+    bytes[k * 4 + 2] = b;
+    bytes[k * 4 + 3] = 255;
+  }
+}
+
+const tileTexData = new Uint8Array(TILE_WIN * TILE_WIN * 4);
+const tileTexture = new THREE.DataTexture(tileTexData, TILE_WIN, TILE_WIN);
+tileTexture.colorSpace = THREE.SRGBColorSpace;
+tileTexture.generateMipmaps = true;
+tileTexture.minFilter = THREE.LinearMipmapLinearFilter;
+tileTexture.magFilter = THREE.LinearFilter;
+tileTexture.anisotropy = 4;
+
+const tileUniforms = {
+  uTiles: { value: tileTexture },
+  // World meters of the window's min corner; starts far away (flat fallback
+  // color everywhere) until the grid loads and the first tick fills it.
+  uTilesOrigin: { value: new THREE.Vector2(1e7, 1e7) },
+};
+
+let tileWinX = 1e7; // window min corner, world tile coords
+let tileWinZ = 1e7;
+
+/** Re-bake the window texture when the player drifts far enough from its
+ * middle. The full rewrite is ~1M palette lookups (a few ms) but only fires
+ * once per ~256 m of travel. */
+function tickTileWindow(): void {
+  const grid = getCityGrid();
+  if (!grid) return;
+  const ptx = Math.floor(game.rendered.x / TILE_SIZE);
+  const ptz = Math.floor(game.rendered.z / TILE_SIZE);
+  if (
+    Math.abs(ptx - (tileWinX + TILE_WIN / 2)) <= TILE_RECENTER &&
+    Math.abs(ptz - (tileWinZ + TILE_WIN / 2)) <= TILE_RECENTER
+  ) {
+    return;
+  }
+  tileWinX = ptx - TILE_WIN / 2;
+  tileWinZ = ptz - TILE_WIN / 2;
+  tileUniforms.uTilesOrigin.value.set(tileWinX * TILE_SIZE, tileWinZ * TILE_SIZE);
+
+  const out = new Uint32Array(tileTexData.buffer);
+  const waterPx = tilePal32[CITY_WATER];
+  for (let z = 0; z < TILE_WIN; z++) {
+    const gz = tileWinZ + z - grid.tileMinZ;
+    const rowBase = z * TILE_WIN;
+    if (gz < 0 || gz >= grid.height) {
+      out.fill(waterPx, rowBase, rowBase + TILE_WIN);
+      continue;
+    }
+    const gridRow = gz * grid.width;
+    for (let x = 0; x < TILE_WIN; x++) {
+      const gx = tileWinX + x - grid.tileMinX;
+      out[rowBase + x] =
+        gx >= 0 && gx < grid.width ? tilePal32[grid.tiles[gridRow + gx]] : waterPx;
+    }
+  }
+  tileTexture.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
 // Materials: flat-shaded Lambert (scene fog + tone mapping for free; the
 // derivative-based flat normals mean geo.bin needs no normal data) with the
 // occupancy cutout injected. Buildings additionally tint by relative height.
@@ -148,11 +250,39 @@ const CUTOUT_FRAG = /* glsl */ `
 }
 `;
 
+// Buildings: darker base with a height gradient (street level reads as
+// shadowed massing, tops catch the light) plus faint 3 m floor bands that
+// fade out with distance -- distant boxes read as buildings, not white slabs.
+const BUILDING_TINT_FRAG = /* glsl */ `
+{
+  float pxGrade = mix(0.32, 1.0, vRelH * vRelH);
+  float pxBand = step(0.5, fract(vPxWorld.y / 3.0));
+  float pxDist = distance(vPxWorld, cameraPosition);
+  pxGrade *= 1.0 - 0.12 * pxBand * clamp(1.0 - pxDist / 450.0, 0.0, 1.0);
+  diffuseColor.rgb *= pxGrade;
+}
+`;
+
+// Ground: inside the tile window, replace the flat land color with the baked
+// per-tile street palette so roads continue far beyond the streamed chunks.
+// uTron guard: tron mode's flat black base (injected ahead of this block by
+// tronifyMaterial) must win over the palette.
+const GROUND_TILES_FRAG = /* glsl */ `
+{
+  vec2 tuv = (vPxWorld.xz - uTilesOrigin) / ${TILE_SPAN.toFixed(1)};
+  if (uTron < 0.5 && tuv.x >= 0.0 && tuv.y >= 0.0 && tuv.x < 1.0 && tuv.y < 1.0) {
+    diffuseColor.rgb = texture2D(uTiles, tuv).rgb;
+  }
+}
+`;
+
 function makeProxyMaterial(color: string, relH: boolean): THREE.MeshLambertMaterial {
   const mat = new THREE.MeshLambertMaterial({ color, flatShading: true });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uOcc = occUniforms.uOcc;
     shader.uniforms.uOccOrigin = occUniforms.uOccOrigin;
+    shader.uniforms.uTiles = tileUniforms.uTiles;
+    shader.uniforms.uTilesOrigin = tileUniforms.uTilesOrigin;
     shader.vertexShader = shader.vertexShader
       .replace(
         "#include <common>",
@@ -171,15 +301,20 @@ function makeProxyMaterial(color: string, relH: boolean): THREE.MeshLambertMater
         "#include <common>",
         `#include <common>
         ${CUTOUT_FRAG_DECLS}
-        ${relH ? "varying float vRelH;" : ""}`,
+        ${relH ? "varying float vRelH;" : "uniform sampler2D uTiles; uniform vec2 uTilesOrigin;"}`,
       )
       .replace(
         "#include <color_fragment>",
         `#include <color_fragment>
         ${CUTOUT_FRAG}
-        ${relH ? "diffuseColor.rgb *= mix(0.5, 1.25, vRelH * vRelH);" : ""}`,
+        ${relH ? BUILDING_TINT_FRAG : GROUND_TILES_FRAG}`,
       );
   };
+  // Distant massing joins the black slab world in tron mode. Distinct cache
+  // keys: the two proxy programs differ (aRelH tint) beyond their params.
+  // Tron's flat base lands before the relH multiply, so the far skyline
+  // keeps its height-graded value variation.
+  tronifyMaterial(mat, relH ? "tron-proxy-bldg" : "tron-proxy-gnd");
   return mat;
 }
 
@@ -415,8 +550,9 @@ function loadProxyAssets(): Promise<ProxyAssets> {
       getCityGeo(),
       new Promise<void>((resolve) => onCityMapReady(resolve)),
     ]);
-    // Warm concrete massing; the fog color does most of the distant grading.
-    const buildingMat = makeProxyMaterial("#8d8177", true);
+    // Mid-dark warm concrete; the height grade in BUILDING_TINT_FRAG darkens
+    // street level further and the fog color does the distant grading.
+    const buildingMat = makeProxyMaterial("#776c62", true);
     const groundMat = makeProxyMaterial("#4b4649", false);
     const cells = [
       ...(await buildBuildingCells(geo, buildingMat)),
@@ -464,6 +600,7 @@ export function CityProxy() {
 
   useFrame((_, dt) => {
     tickOccupancy(Math.min(dt, 0.1));
+    tickTileWindow();
     if (!assets) return;
 
     // Range cull: past the distance where fog eats everything (or the far

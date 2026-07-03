@@ -17,6 +17,7 @@ import { NODE_RESOURCES, RESOURCE_COLORS } from "../game/recipes";
 import { AnimState } from "../net/protocol";
 import { game, GameEntity, GunMount, useGame } from "../state/game";
 import { groundHeightAt } from "./Ground";
+import { isTronStyle } from "./styles";
 import { TargetReticle } from "./TargetReticle";
 
 /** Render remote entities this many ms in the past for smooth interpolation. */
@@ -246,36 +247,75 @@ function chooseClip(anim: AnimState, isNpc: boolean, gunIdle: boolean): ClipChoi
 /** Cloned material + its resting emissive, for the red damage flash. */
 interface FlashMaterial {
   mat: THREE.MeshStandardMaterial;
+  joints: boolean;
   baseEmissive: THREE.Color;
   baseIntensity: number;
 }
 
-/** Apply the cyberpunk restyle: gunmetal body, emissive neon joints. */
+/**
+ * Recolor the mannequin's cloned materials for the active style. Default:
+ * gunmetal shell with emissive neon joints. Tron: near-black shell with
+ * hot blue trim (white-hot cores under bloom); hostiles keep a warning red
+ * in both. Safe to re-run live on style switches — it also refreshes the
+ * resting emissive the hit flash lerps back to.
+ */
+function applyMannequinPalette(
+  flashables: FlashMaterial[],
+  tint: number,
+  hostile: boolean,
+  tron: boolean,
+): void {
+  for (const f of flashables) {
+    const m = f.mat;
+    if (f.joints) {
+      if (tron) {
+        m.color.set(0x04060c);
+        m.emissive.set(hostile ? 0xff4028 : 0x2fb8ff);
+        m.emissiveIntensity = hostile ? 2.6 : 3.2;
+        m.roughness = 0.3;
+        m.metalness = 0.6;
+      } else {
+        m.color.set(0x101318);
+        m.emissive.set(hostile ? 0xff3040 : tint || 0x40e8ff);
+        m.emissiveIntensity = 1.6;
+        m.roughness = 0.35;
+        m.metalness = 0.5;
+      }
+    } else if (tron) {
+      // Tron shell: black silhouette with a faint blue self-glow so the
+      // body reads against the black city.
+      m.color.set(0x04070e);
+      m.emissive.set(0x0d3a66);
+      m.emissiveIntensity = 0.35;
+      m.roughness = 0.4;
+      m.metalness = 0.75;
+    } else {
+      // M_Main: dark gunmetal shell.
+      m.color.set(hostile ? 0x2c2126 : 0x232936);
+      m.emissive.set(0x000000);
+      m.emissiveIntensity = 1;
+      m.roughness = 0.5;
+      m.metalness = 0.65;
+    }
+    f.baseEmissive.copy(m.emissive);
+    f.baseIntensity = m.emissiveIntensity;
+  }
+}
+
+/** Clone the mannequin materials and apply the active-style palette. */
 function restyleMannequin(
   scene: THREE.Group,
   tint: number,
   hostile: boolean,
 ): FlashMaterial[] {
-  const joints = new THREE.Color(hostile ? 0xff3040 : tint || 0x40e8ff);
   const flashables: FlashMaterial[] = [];
   const restyle = (mat: THREE.Material): THREE.Material => {
     const m = (mat as THREE.MeshStandardMaterial).clone();
-    if (m.name === "M_Joints") {
-      m.color.set(0x101318);
-      m.emissive.copy(joints);
-      m.emissiveIntensity = 1.6;
-      m.roughness = 0.35;
-      m.metalness = 0.5;
-    } else {
-      // M_Main: dark gunmetal shell.
-      m.color.set(hostile ? 0x2c2126 : 0x232936);
-      m.roughness = 0.5;
-      m.metalness = 0.65;
-    }
     flashables.push({
       mat: m,
-      baseEmissive: m.emissive.clone(),
-      baseIntensity: m.emissiveIntensity,
+      joints: m.name === "M_Joints",
+      baseEmissive: new THREE.Color(),
+      baseIntensity: 1,
     });
     return m;
   };
@@ -288,6 +328,12 @@ function restyleMannequin(
       ? mesh.material.map(restyle)
       : restyle(mesh.material);
   });
+  applyMannequinPalette(
+    flashables,
+    tint,
+    hostile,
+    isTronStyle(useGame.getState().visualStyle),
+  );
   return flashables;
 }
 
@@ -409,6 +455,13 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
       m.stopAllAction();
     };
   }, [model, entity.tint, entity.id, isNpc]);
+
+  // Live restyle on visual style switches (the mixer effect above must not
+  // re-run for a palette change — it would reset the animation state).
+  const tronStyle = useGame((s) => isTronStyle(s.visualStyle));
+  useEffect(() => {
+    applyMannequinPalette(flashMats.current, entity.tint, isNpc, tronStyle);
+  }, [tronStyle, entity.tint, isNpc, model]);
 
   useEffect(() => {
     if (!model || !pistolModel) return;
@@ -634,10 +687,17 @@ function CharacterModel({ entity }: { entity: GameEntity }) {
 /** Stylized runner: capsule body, emissive visor, walk bob. */
 function ProceduralCharacter({ entity }: { entity: GameEntity }) {
   const group = useRef<THREE.Group>(null);
-  const tint = new THREE.Color(entity.tint);
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
+  const tint = tron ? new THREE.Color("#2fb8ff") : new THREE.Color(entity.tint);
   const isNpc = entity.kind === "Npc";
-  const bodyColor = isNpc ? "#4a3038" : "#2b3550";
-  const visor = isNpc ? "#ff4444" : "#40e8ff";
+  const bodyColor = tron ? "#04070e" : isNpc ? "#4a3038" : "#2b3550";
+  const visor = tron
+    ? isNpc
+      ? "#ff4028"
+      : "#2fb8ff"
+    : isNpc
+      ? "#ff4444"
+      : "#40e8ff";
 
   useFrame(({ clock }) => {
     if (!group.current) return;

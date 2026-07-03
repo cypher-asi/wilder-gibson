@@ -17,9 +17,10 @@ import * as THREE from "three";
 import { Water } from "three/examples/jsm/objects/Water.js";
 import { CITY_WATER, cityTileAt } from "../game/citymap";
 import { TILE_SIZE } from "../net/protocol";
-import { game } from "../state/game";
+import { game, useGame } from "../state/game";
 import { DISPLAY_TO_SCENE, envSkyMaterial, SUN_DIR } from "./Atmosphere";
 import { CAMERA_FAR } from "./CameraRig";
+import { isTronStyle } from "./styles";
 
 /** Slightly under road grade (0) so coast tiles read flush with the sea. */
 const OCEAN_Y = -0.02;
@@ -106,13 +107,19 @@ function makeWater(geometry: THREE.PlaneGeometry, resolution: number): Water {
   water.receiveShadow = true;
   // Never intercept the ground raycasts used for aiming/click-to-move.
   water.raycast = () => {};
+  // The camera-following plane sorts as the nearest opaque object, which
+  // would shade every covered pixel before the city draws over it. Drawing
+  // it after the other opaques lets early-z reject all the fragments hidden
+  // under the ground, so the ocean only pays for pixels it actually shows.
+  water.renderOrder = 1;
   return water;
 }
 
-/** Is any city-map water tile within `radius` meters of (x, z)? */
+/** Is any city-map water tile within `radius` meters of (x, z)? Ring samples
+ * densify with radius so large-range checks don't skip whole coastlines. */
 function waterWithin(x: number, z: number, radius: number): boolean {
   for (let r = 0; r <= radius; r += TILE_SIZE * 4) {
-    const steps = r === 0 ? 1 : 8;
+    const steps = r === 0 ? 1 : Math.max(8, Math.ceil(r / 12));
     for (let i = 0; i < steps; i++) {
       const a = (i / steps) * Math.PI * 2;
       const sx = x + Math.cos(a) * r;
@@ -127,8 +134,13 @@ function waterWithin(x: number, z: number, radius: number): boolean {
 
 export function Ocean() {
   const camera = useThree((s) => s.camera);
+  const scene = useThree((s) => s.scene);
   const frame = useRef(0);
   const near = useRef(false);
+  // False when no water tile sits within the fog-visible range: deep in the
+  // city interior the whole plane would resolve to fog color behind opaque
+  // ground, so skip its draw (and its reflection pass) entirely.
+  const inRange = useRef(true);
 
   const { waters, geometry, proxySky } = useMemo(() => {
     // Segmented so the vertex-shader rim curve has vertices to bend
@@ -174,6 +186,21 @@ export function Ocean() {
     };
   }, [waters, geometry, proxySky]);
 
+  // Tron water: black glass with cold blue glints (default: warm sunset).
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
+  useEffect(() => {
+    for (const w of [waters.near, waters.far]) {
+      const u = w.material.uniforms;
+      if (tron) {
+        (u.waterColor.value as THREE.Color).set("#03101f");
+        (u.sunColor.value as THREE.Color).set("#2fb8ff").multiplyScalar(0.35);
+      } else {
+        (u.waterColor.value as THREE.Color).set("#0d2733").multiplyScalar(DISPLAY_TO_SCENE);
+        (u.sunColor.value as THREE.Color).set("#ffd9b0").multiplyScalar(DISPLAY_TO_SCENE);
+      }
+    }
+  }, [tron, waters]);
+
   useFrame((_, delta) => {
     frame.current++;
 
@@ -182,11 +209,17 @@ export function Ocean() {
       near.current = near.current
         ? waterWithin(x, z, NEAR_EXIT_M)
         : waterWithin(x, z, NEAR_ENTER_M);
+      // Visible range: where fog transmittance drops under ~2% (or the far
+      // plane). Past that the plane is pure fog color and contributes
+      // nothing, so a coastline further away means no ocean draw at all.
+      const density = scene.fog instanceof THREE.FogExp2 ? scene.fog.density : 0.0035;
+      const fogCut = Math.min(CAM_FAR, Math.sqrt(-Math.log(0.02)) / Math.max(density, 1e-5));
+      inRange.current = waterWithin(x, z, fogCut);
     }
 
     const active = near.current ? waters.near : waters.far;
     const idle = near.current ? waters.far : waters.near;
-    active.visible = true;
+    active.visible = inRange.current;
     idle.visible = false;
 
     // Follow the camera so the plane always fills the frustum. Wave noise is

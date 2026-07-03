@@ -5,9 +5,11 @@ import { useFrame } from "@react-three/fiber";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
 import { CHUNK_SIZE, ChunkData, PropInstance } from "../net/protocol";
+import { useGame } from "../state/game";
 import { mulberry, NEON_COLORS } from "./facade";
 import { groundHeightAt } from "./Ground";
 import { KitEntry, KitFit } from "./InstancedKit";
+import { isTronStyle, tronifyMaterial } from "./styles";
 
 // Archetype ids from wilder-terrain.
 export const STREETLIGHT = 0;
@@ -25,6 +27,11 @@ export const STOP_SIGN = 11;
 
 const poleMat = new THREE.MeshStandardMaterial({ color: "#1a1c20", roughness: 0.6, metalness: 0.7 });
 const darkMetal = new THREE.MeshStandardMaterial({ color: "#22252b", roughness: 0.5, metalness: 0.5 });
+tronifyMaterial(poleMat);
+tronifyMaterial(darkMetal);
+
+/** Blue-only sign palette for the tron style (dim steel-blue = "dead"). */
+const TRON_NEON_COLORS = ["#2fb8ff", "#59ccff", "#9fe6ff", "#dff6ff", "#1a86d9"];
 
 /**
  * Flickering neon sign plane: mostly steady, with per-seed random dropouts
@@ -71,15 +78,17 @@ export function NeonPlane({
  * don't glow uniformly.
  */
 function NeonSignProp({ seed }: { seed: number }) {
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
   const { color, dead, h, w } = useMemo(() => {
     const rng = mulberry(seed);
+    const palette = tron ? TRON_NEON_COLORS : NEON_COLORS;
     return {
-      color: NEON_COLORS[Math.floor(rng() * NEON_COLORS.length)],
+      color: palette[Math.floor(rng() * palette.length)],
       dead: rng() < 0.25,
       h: 0.6 + rng() * 0.5,
       w: 1.0 + rng() * 0.7,
     };
-  }, [seed]);
+  }, [seed, tron]);
   return (
     <group>
       <mesh material={poleMat} position={[0, 1.5, 0]} castShadow>
@@ -139,6 +148,10 @@ const poolGeo = new THREE.CircleGeometry(2.4, 24).rotateX(-Math.PI / 2);
 
 /** Light pools under this chunk's streetlights (they render instanced). */
 export function LightPools({ chunk }: { chunk: ChunkData }) {
+  // Warm sodium pools by default; cold blue in tron (shared material, so
+  // every mounted chunk agrees — the set is idempotent).
+  const tron = useGame((s) => isTronStyle(s.visualStyle));
+  poolMat.color.set(tron ? "#2fb8ff" : "#ffbe78");
   const pools = useMemo(
     () =>
       chunk.props

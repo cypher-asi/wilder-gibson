@@ -20,6 +20,7 @@ export const VISUAL_STYLE_IDS: VisualStyleId[] = [
   "blueHour",
   "animeDusk",
   "animeSunset",
+  "tron",
 ];
 
 /** Hand-painted sky dome parameters (anime styles only). */
@@ -404,15 +405,18 @@ const vec3 TRON_WHITE = vec3(${TRON_WHITE.r.toFixed(5)}, ${TRON_WHITE.g.toFixed(
 
 /**
  * Wire a stock three.js material (Standard/Lambert/Basic — anything built on
- * the common shader chunks) into tron mode: albedo collapses onto the
- * blue-black slab (keeping the texture's luminance so shapes still model),
- * and any authored emissive is remapped to the tron blue, brightening toward
- * white. A live uniform branch: zero-cost visual no-op in every other style.
+ * the common shader chunks) into tron mode: albedo collapses to the flat
+ * blue-black slab (no texture or vertex color reads through; only lighting
+ * models the shape), and any authored emissive is remapped to the tron blue,
+ * brightening toward white. A live uniform branch: visual no-op in every
+ * other style.
  *
  * `cacheKey` must be unique per distinct pre-existing onBeforeCompile so
  * materials with different custom shader code never share a program.
  */
 export function tronifyMaterial(mat: THREE.Material, cacheKey = "tron-std"): void {
+  if (mat.userData.tronified) return;
+  mat.userData.tronified = true;
   const prev = mat.onBeforeCompile;
   mat.onBeforeCompile = (shader, renderer) => {
     prev?.call(mat, shader, renderer);
@@ -422,10 +426,7 @@ export function tronifyMaterial(mat: THREE.Material, cacheKey = "tron-std"): voi
       .replace(
         "#include <color_fragment>",
         /* glsl */ `#include <color_fragment>
-if (uTron > 0.5) {
-  float tLum = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
-  diffuseColor.rgb = TRON_BASE * (0.35 + 2.4 * tLum);
-}`,
+if (uTron > 0.5) diffuseColor.rgb = TRON_BASE;`,
       )
       .replace(
         "#include <emissivemap_fragment>",
