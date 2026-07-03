@@ -32,8 +32,8 @@ const WHITE = 0;
 const YELLOW = 1;
 
 const COLORS: THREE.Color[] = [
-  new THREE.Color("#c9c9c0").convertSRGBToLinear(),
-  new THREE.Color("#bb9231").convertSRGBToLinear(),
+  new THREE.Color("#cfcfc6").convertSRGBToLinear(),
+  new THREE.Color("#c69c33").convertSRGBToLinear(),
 ];
 
 /** Height of paint above road grade (manholes render above this). */
@@ -352,3 +352,73 @@ export const markingsMaterial = new THREE.MeshStandardMaterial({
   polygonOffsetFactor: -2,
   polygonOffsetUnits: -2,
 });
+
+// Wear shader: chip the paint away (discard shows the asphalt underneath),
+// vary the tint per stretch, and match the road's damp sheen so paint doesn't
+// float bright and dry on a wet street.
+markingsMaterial.onBeforeCompile = (shader) => {
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nvarying vec3 vMWPos;")
+    .replace(
+      "#include <fog_vertex>",
+      "#include <fog_vertex>\nvMWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;",
+    );
+  shader.fragmentShader = shader.fragmentShader
+    .replace(
+      "#include <common>",
+      /* glsl */ `
+#include <common>
+varying vec3 vMWPos;
+float mHash12(vec2 p) {
+  vec3 q = fract(vec3(p.xyx) * 0.1031);
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+float mNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mHash12(i), mHash12(i + vec2(1.0, 0.0)), u.x),
+    mix(mHash12(i + vec2(0.0, 1.0)), mHash12(i + vec2(1.0, 1.0)), u.x),
+    u.y);
+}
+float mFbm(vec2 p) {
+  float a = 0.5;
+  float s = 0.0;
+  for (int i = 0; i < 3; i++) { s += a * mNoise(p); p *= 2.03; a *= 0.5; }
+  return s;
+}
+`,
+    )
+    .replace(
+      "#include <map_fragment>",
+      /* glsl */ `
+#include <map_fragment>
+vec2 mwp = vMWPos.xz;
+// Wear zones: medium-scale patches where the paint has mostly ground off,
+// plus fine chipping everywhere. Chipped fragments discard to show asphalt.
+float mZone = mFbm(mwp * 0.07 + 310.0);            // 0..1 wear region
+float mChip = mNoise(mwp * 9.0);                    // fine chip texture
+float mWear = smoothstep(0.35, 0.75, mZone);
+if (mChip < mWear * 0.85) discard;
+// Surviving paint near worn zones is thinner: darker, dirtier.
+float mThin = smoothstep(0.2, 0.75, mWear - 0.25 * (mChip - mWear));
+diffuseColor.rgb *= 1.0 - 0.3 * mThin;
+// Per-stretch tint drift so repaint batches don't match exactly.
+diffuseColor.rgb *= 0.9 + 0.2 * mHash12(floor(mwp / 7.0) + 5.0);
+// Grime speckle dulls the paint like the surrounding road.
+diffuseColor.rgb *= 1.0 - 0.12 * smoothstep(0.55, 0.8, mFbm(mwp * 0.4 + 90.0));
+`,
+    )
+    .replace(
+      "#include <roughnessmap_fragment>",
+      /* glsl */ `
+#include <roughnessmap_fragment>
+// Same damp field as the road shader so wet gloss lines up.
+float mDamp = clamp(0.35 + 0.55 * mFbm(mwp * 0.03 + 200.0), 0.0, 1.0);
+roughnessFactor = mix(roughnessFactor, roughnessFactor * 0.45 + 0.02, mDamp);
+diffuseColor.rgb *= 1.0 - 0.15 * mDamp;
+`,
+    );
+};

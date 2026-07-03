@@ -1,10 +1,12 @@
 // Close-up road/ground screenshot: slight tilt, zoomed in (dev only).
-// Usage: node tools/shot-road.mjs [outPrefix] [dragY] [scrollClicks]
+// Usage: node tools/shot-road.mjs [outPrefix] [dragY] [scrollClicks] [walkKeys] [walkSec]
 import puppeteer from "puppeteer";
 
 const outPrefix = process.argv[2] ?? "road";
 const dragY = Number(process.argv[3] ?? 120);
 const scrollClicks = Number(process.argv[4] ?? 6);
+const walkKeys = (process.argv[5] ?? "").split("").filter((c) => "wasd".includes(c));
+const walkSec = Number(process.argv[6] ?? 3);
 
 const browser = await puppeteer.launch({
   headless: "new",
@@ -35,6 +37,14 @@ if (!joined) {
   console.error("world did not join (no HUD); aborting shot");
   await browser.close();
   process.exit(2);
+}
+
+// Optionally walk (WASD) to reach a road before framing the shot.
+if (walkKeys.length > 0) {
+  for (const k of walkKeys) await page.keyboard.down(`Key${k.toUpperCase()}`);
+  await new Promise((r) => setTimeout(r, walkSec * 1000));
+  for (const k of walkKeys) await page.keyboard.up(`Key${k.toUpperCase()}`);
+  await new Promise((r) => setTimeout(r, 800));
 }
 
 // Zoom in with the scroll wheel.
