@@ -720,7 +720,7 @@ function AmmoMarkers({ view }: { view: RefObject<HoloView> }) {
 /** One cached texture per building kind: a colored badge with its glyph. */
 const poiBadgeCache = new Map<string, THREE.CanvasTexture>();
 
-function poiBadgeTexture(kind: string, glyph: string, color: string): THREE.CanvasTexture {
+function poiBadgeTexture(kind: string, icon: string, color: string): THREE.CanvasTexture {
   let tex = poiBadgeCache.get(kind);
   if (tex) return tex;
   const s = 64;
@@ -728,7 +728,7 @@ function poiBadgeTexture(kind: string, glyph: string, color: string): THREE.Canv
   canvas.width = s;
   canvas.height = s;
   const ctx = canvas.getContext("2d")!;
-  // Diamond badge with the kind's accent color and glyph.
+  // Diamond badge with the kind's accent color and its store icon.
   ctx.translate(s / 2, s / 2);
   ctx.rotate(Math.PI / 4);
   ctx.fillStyle = "rgba(6, 12, 20, 0.9)";
@@ -740,11 +740,18 @@ function poiBadgeTexture(kind: string, glyph: string, color: string): THREE.Canv
   ctx.strokeRect(-19, -19, 38, 38);
   ctx.rotate(-Math.PI / 4);
   ctx.shadowBlur = 0;
-  ctx.font = "800 26px Rajdhani, system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = color;
-  ctx.fillText(glyph, 0, 2);
+  // Line icon drawn from the 24x24 viewBox path, centered and scaled to ~28px.
+  const size = 28;
+  const scale = size / 24;
+  ctx.save();
+  ctx.translate(-size / 2, -size / 2);
+  ctx.scale(scale, scale);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2 / scale;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.stroke(new Path2D(icon));
+  ctx.restore();
   tex = new THREE.CanvasTexture(canvas);
   poiBadgeCache.set(kind, tex);
   return tex;
@@ -773,7 +780,7 @@ function PoiMarkers({ view }: { view: RefObject<HoloView> }) {
         return (
           <sprite key={p.id} position={[p.x, 14, p.z]} renderOrder={9}>
             <spriteMaterial
-              map={poiBadgeTexture(p.kind, style.glyph, style.color)}
+              map={poiBadgeTexture(p.kind, style.icon, style.color)}
               transparent
               depthTest={false}
               sizeAttenuation={false}
@@ -851,7 +858,18 @@ function MapLegend() {
         return (
           <div key={kind} className="map-legend-row" title={style.desc}>
             <span className="map-legend-badge" style={{ borderColor: style.color, color: style.color }}>
-              {style.glyph}
+              <svg
+                viewBox="0 0 24 24"
+                width="11"
+                height="11"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d={style.icon} />
+              </svg>
             </span>
             <span className="map-legend-label">{style.label}</span>
             <span className="map-legend-desc">{style.desc}</span>
