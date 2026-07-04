@@ -288,6 +288,7 @@ export type C2S =
   | Tagged<"UseItem", { slot: number }>
   | Tagged<"Craft", { recipe: string; station: number | null }>
   | Tagged<"QueueProduction", { building: number; recipe: string; count: number }>
+  | Tagged<"CollectProduction", { building: number }>
   | Tagged<"Market", MarketActionMsg>
   | Tagged<"Vendor", { vendor: number; action: VendorActionMsg }>
   | Tagged<"EconomySub", { on: boolean }>
@@ -612,7 +613,10 @@ export type S2C =
       "CraftResult",
       { ok: boolean; error: string | null; produced: ItemStack | null }
     >
-  | Tagged<"ProductionState", { building: number; jobs: ProductionJob[] }>
+  | Tagged<
+      "ProductionState",
+      { building: number; jobs: ProductionJob[]; buffered?: ItemStack[] }
+    >
   | Tagged<"MarketState", { listings: MarketListing[]; wallet: number }>
   | Tagged<"MarketResult", { ok: boolean; error: string | null }>
   | Tagged<

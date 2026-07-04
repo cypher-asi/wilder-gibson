@@ -12,6 +12,8 @@
 //! wheel, no collision stepping, not replicated). The economy is identical in
 //! both tiers; only the physical fidelity differs.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use wilder_combat::{weapon_stats, WeaponStats, FIST};
 use wilder_inventory as inv;
@@ -238,7 +240,7 @@ pub fn activity_of(goal: Goal) -> Activity {
     match goal {
         Goal::Gather { .. } => Activity::Gather,
         Goal::Trade { .. } | Goal::BuyMarket { .. } | Goal::Buy { .. } => Activity::Trade,
-        Goal::Craft { .. } => Activity::Craft,
+        Goal::Craft { .. } | Goal::Research { .. } | Goal::Collect { .. } => Activity::Craft,
         Goal::Patrol { .. } | Goal::Hunt { .. } | Goal::Idle | Goal::Retreat { .. } => {
             Activity::Fight
         }
@@ -270,8 +272,15 @@ pub enum Goal {
     BuyMarket { terminal_pos: Vec3, kind: ItemKind, count: u32, max_each: u32 },
     /// Work the market terminal for arbitrage opportunities.
     Trade { terminal_pos: Vec3 },
-    /// Craft at a station: inputs burn on arrival, output mints on the timer.
-    Craft { station: EntityId, station_pos: Vec3, recipe: &'static str, timer: f32, started: bool },
+    /// Walk to a station and queue a production batch through the shared
+    /// `queue_production` path (inputs + Energy burn at the counter; the
+    /// output lands in the building's buffer for a later Collect).
+    Craft { station: EntityId, station_pos: Vec3, recipe: &'static str },
+    /// Walk to a Laboratory and unlock `recipe` through the shared
+    /// `research()` path (fragments + resources + Energy).
+    Research { lab: EntityId, lab_pos: Vec3, recipe: &'static str },
+    /// Pick up this agent's buffered production output at a building.
+    Collect { building: EntityId, building_pos: Vec3 },
     /// Move toward a contested area looking for targets.
     Patrol { to: Vec3 },
     /// Push into a territory region to flip it: stand on the ground until
@@ -301,6 +310,8 @@ impl Goal {
             Goal::BuyMarket { terminal_pos, .. } => Some(*terminal_pos),
             Goal::Trade { terminal_pos } => Some(*terminal_pos),
             Goal::Craft { station_pos, .. } => Some(*station_pos),
+            Goal::Research { lab_pos, .. } => Some(*lab_pos),
+            Goal::Collect { building_pos, .. } => Some(*building_pos),
             Goal::Patrol { to } => Some(*to),
             Goal::Capture { to, .. } => Some(*to),
             Goal::Defend { to, .. } => Some(*to),
@@ -353,6 +364,14 @@ pub struct AgentSave {
     /// `AGENT_SEED_LAYOUT` bump, so no flat-stack migration is needed).
     #[serde(default)]
     pub inventory: Inventory,
+    /// Known blueprint recipe ids (defaults are re-inserted on load, so
+    /// older saves without the field just know the starter set).
+    #[serde(default)]
+    pub blueprints: Vec<String>,
+    /// Outstanding production work: (building, job id) of batches this agent
+    /// queued and hasn't collected yet.
+    #[serde(default)]
+    pub pending_jobs: Vec<(EntityId, u64)>,
     pub position: Vec3,
     pub health: f32,
     pub max_health: f32,
@@ -466,6 +485,12 @@ pub struct FactionAgent {
     /// Slotted backpack + equipped gear: the same model players use (36-slot
     /// volume budget, equip slots outside it). Equipped gear survives death.
     pub inventory: Inventory,
+    /// Known blueprint recipe ids. Like `traits` and the banked purse,
+    /// blueprint knowledge survives death (the respawned identity keeps it).
+    pub blueprints: HashSet<String>,
+    /// (building, job id) of queued production batches awaiting a Collect.
+    /// Cleared on death (the dead identity's jobs and buffers are purged).
+    pub pending_jobs: Vec<(EntityId, u64)>,
     pub position: Vec3,
     pub yaw: f32,
     pub health: f32,
@@ -682,6 +707,8 @@ impl FactionAgent {
             home_spot: self.home_spot,
             purse: self.purse,
             inventory: self.inventory.clone(),
+            blueprints: self.blueprints.iter().cloned().collect(),
+            pending_jobs: self.pending_jobs.clone(),
             position: self.position,
             health: self.health,
             max_health: self.max_health,
@@ -704,6 +731,16 @@ impl FactionAgent {
                 inventory.ensure_slot_count();
                 inventory
             },
+            blueprints: {
+                // Defaults are always known, whatever the save carried.
+                let mut blueprints: HashSet<String> =
+                    save.blueprints.into_iter().collect();
+                for id in wilder_crafting::DEFAULT_BLUEPRINTS {
+                    blueprints.insert((*id).to_string());
+                }
+                blueprints
+            },
+            pending_jobs: save.pending_jobs,
             position: save.position,
             yaw: 0.0,
             health: save.health.max(1.0),
@@ -948,27 +985,17 @@ impl FactionAgent {
                     AgentEvent::None
                 }
             }
-            Goal::Craft { station_pos, started, timer, .. } => {
-                if !started {
-                    if self.move_toward(world, station_pos, 3.0, dt, hot) > 5.0 {
-                        // No inputs consumed yet: transit re-scores like any
-                        // other errand so a crowding station can be rerouted.
-                        return if self.decision_timer <= 0.0 {
-                            AgentEvent::NeedsGoal
-                        } else {
-                            AgentEvent::None
-                        };
-                    }
-                    // Arrived: the world consumes inputs and flips `started`.
-                    return AgentEvent::Act;
-                }
-                self.anim = AnimState::Gather;
-                let next = timer - dt;
-                if let Goal::Craft { timer, .. } = &mut self.goal {
-                    *timer = next;
-                }
-                if next <= 0.0 {
-                    AgentEvent::Act // world mints the output and re-goals
+            Goal::Craft { station_pos, .. }
+            | Goal::Research { lab_pos: station_pos, .. }
+            | Goal::Collect { building_pos: station_pos, .. } => {
+                // Counter errands: queue a batch / research / collect the
+                // buffer on arrival. Nothing is committed until then, so
+                // transit re-scores like any other errand and a crowding
+                // station can be rerouted.
+                if self.move_toward(world, station_pos, 3.0, dt, hot) <= 5.0 {
+                    AgentEvent::Act
+                } else if self.decision_timer <= 0.0 {
+                    AgentEvent::NeedsGoal
                 } else {
                     AgentEvent::None
                 }
@@ -1070,6 +1097,8 @@ mod tests {
                 home_spot: None,
                 purse,
                 inventory,
+                blueprints: Vec::new(),
+                pending_jobs: Vec::new(),
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,
                 max_health: 100.0,
@@ -1142,6 +1171,8 @@ mod tests {
         a.purse.deposit(Currency::Wild, 25);
         a.add_item(ItemKind::Pistol, 1);
         a.equip_best_gear();
+        a.blueprints.insert("polymer".to_string());
+        a.pending_jobs.push((42, 7));
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
         let b = FactionAgent::from_save(99, back);
@@ -1153,6 +1184,9 @@ mod tests {
         assert_eq!(b.purse, a.purse, "carried and banked balances must survive");
         assert_eq!(b.count_item(ItemKind::Iron), 5);
         assert_eq!(b.inventory.equipped_weapon, Some(ItemKind::Pistol));
+        assert!(b.blueprints.contains("polymer"), "researched blueprints must survive");
+        assert!(b.blueprints.contains("steel_plate"), "defaults are always known");
+        assert_eq!(b.pending_jobs, vec![(42, 7)], "queued work notes must survive");
         assert_eq!(b.entity, 99);
     }
 

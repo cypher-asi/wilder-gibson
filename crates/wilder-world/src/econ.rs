@@ -127,6 +127,17 @@ pub enum EconActor {
     Agent(usize),
 }
 
+/// Durable owner identity for production jobs and output buffers: outlives
+/// entity ids across reconnects (players) and stays resolvable while the
+/// owner is offline. Players key on their character id, agents on the agent
+/// uuid (which persists across restarts; a respawn mints a fresh identity
+/// and orphans are purged on death).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OwnerId {
+    Player(CharacterId),
+    Agent(AgentId),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

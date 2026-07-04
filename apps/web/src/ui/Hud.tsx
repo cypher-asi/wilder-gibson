@@ -4,7 +4,7 @@ import { ROLL_COOLDOWN } from "../game/collision";
 import { interiorRegistry } from "../game/interiors";
 import { isVendorKind, POI_STYLES } from "../game/poi";
 import { nearestDoor } from "../render/Interior";
-import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
+import { RECIPES, RESEARCH_ENERGY, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { allRegions, MY_FACTION, regionOf, territoryControl } from "../game/territory";
 import { GameConnection } from "../net/connection";
 import { AbilityKind, Currency, ItemKind } from "../net/protocol";
@@ -661,6 +661,7 @@ function CraftingPanel({ connection }: { connection: GameConnection }) {
           Research unlocks blueprints. Cost per unlock: {RESEARCH_FRAGMENTS}x Blueprint
           Fragment ({fragments} held)
           {RESEARCH_RESOURCES.map(([k, n]) => ` · ${n}x ${shortName(k)}`).join("")}
+          {` · ${RESEARCH_ENERGY} Energy`}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {locked.length === 0 && (

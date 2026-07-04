@@ -10,27 +10,29 @@ export interface Recipe {
   inputs: [ItemKind, number][];
   output: [ItemKind, number];
   seconds: number;
+  /** Energy (wallet currency) burned per crafted unit, charged when queued. */
+  energy: number;
 }
 
 export const RECIPES: Recipe[] = [
   // Refinery: resources -> materials
-  { id: "steel_plate", station: "Refinery", inputs: [["Iron", 4]], output: ["SteelPlate", 1], seconds: 4 },
-  { id: "copper_wire", station: "Refinery", inputs: [["Copper", 3]], output: ["CopperWire", 2], seconds: 3 },
-  { id: "polymer", station: "Refinery", inputs: [["Chemicals", 3], ["Biomass", 2]], output: ["Polymer", 1], seconds: 5 },
-  { id: "circuit_board", station: "Refinery", inputs: [["Electronics", 2], ["CopperWire", 2]], output: ["CircuitBoard", 1], seconds: 6 },
-  { id: "bio_gel", station: "Refinery", inputs: [["Biomass", 4], ["Chemicals", 1]], output: ["BioGel", 1], seconds: 4 },
+  { id: "steel_plate", station: "Refinery", inputs: [["Iron", 4]], output: ["SteelPlate", 1], seconds: 4, energy: 1 },
+  { id: "copper_wire", station: "Refinery", inputs: [["Copper", 3]], output: ["CopperWire", 2], seconds: 3, energy: 1 },
+  { id: "polymer", station: "Refinery", inputs: [["Chemicals", 3], ["Biomass", 2]], output: ["Polymer", 1], seconds: 5, energy: 1 },
+  { id: "circuit_board", station: "Refinery", inputs: [["Electronics", 2], ["CopperWire", 2]], output: ["CircuitBoard", 1], seconds: 6, energy: 1 },
+  { id: "bio_gel", station: "Refinery", inputs: [["Biomass", 4], ["Chemicals", 1]], output: ["BioGel", 1], seconds: 4, energy: 1 },
   // Factory: materials -> gear
-  { id: "pipe", station: "Factory", inputs: [["SteelPlate", 2]], output: ["Pipe", 1], seconds: 6 },
-  { id: "knife", station: "Factory", inputs: [["SteelPlate", 1], ["Polymer", 1]], output: ["Knife", 1], seconds: 8 },
-  { id: "pistol", station: "Factory", inputs: [["SteelPlate", 3], ["Polymer", 2], ["CircuitBoard", 1]], output: ["Pistol", 1], seconds: 15 },
-  { id: "smg", station: "Factory", inputs: [["SteelPlate", 5], ["Polymer", 3], ["CircuitBoard", 2]], output: ["Smg", 1], seconds: 25 },
-  { id: "ammo_9mm", station: "Factory", inputs: [["SteelPlate", 1], ["Chemicals", 2]], output: ["Ammo9mm", 30], seconds: 3 },
-  { id: "jacket_armor", station: "Factory", inputs: [["Polymer", 4], ["BioGel", 1]], output: ["JacketArmor", 1], seconds: 10 },
-  { id: "plate_armor", station: "Factory", inputs: [["SteelPlate", 6], ["Polymer", 2], ["BioGel", 2]], output: ["PlateArmor", 1], seconds: 20 },
-  { id: "medkit", station: "Factory", inputs: [["BioGel", 2], ["Polymer", 1]], output: ["Medkit", 1], seconds: 6 },
+  { id: "pipe", station: "Factory", inputs: [["SteelPlate", 2]], output: ["Pipe", 1], seconds: 6, energy: 2 },
+  { id: "knife", station: "Factory", inputs: [["SteelPlate", 1], ["Polymer", 1]], output: ["Knife", 1], seconds: 8, energy: 2 },
+  { id: "pistol", station: "Factory", inputs: [["SteelPlate", 3], ["Polymer", 2], ["CircuitBoard", 1]], output: ["Pistol", 1], seconds: 15, energy: 2 },
+  { id: "smg", station: "Factory", inputs: [["SteelPlate", 5], ["Polymer", 3], ["CircuitBoard", 2]], output: ["Smg", 1], seconds: 25, energy: 2 },
+  { id: "ammo_9mm", station: "Factory", inputs: [["SteelPlate", 1], ["Chemicals", 2]], output: ["Ammo9mm", 30], seconds: 3, energy: 2 },
+  { id: "jacket_armor", station: "Factory", inputs: [["Polymer", 4], ["BioGel", 1]], output: ["JacketArmor", 1], seconds: 10, energy: 2 },
+  { id: "plate_armor", station: "Factory", inputs: [["SteelPlate", 6], ["Polymer", 2], ["BioGel", 2]], output: ["PlateArmor", 1], seconds: 20, energy: 2 },
+  { id: "medkit", station: "Factory", inputs: [["BioGel", 2], ["Polymer", 1]], output: ["Medkit", 1], seconds: 6, energy: 2 },
 ];
 
-/** Recipes every character knows from the start (mirror of wilder-world DEFAULT_BLUEPRINTS). */
+/** Recipes every character knows from the start (mirror of wilder-crafting DEFAULT_BLUEPRINTS). */
 export const DEFAULT_BLUEPRINTS = [
   "steel_plate",
   "copper_wire",
@@ -46,6 +48,8 @@ export const RESEARCH_RESOURCES: [ItemKind, number][] = [
   ["Electronics", 5],
   ["Chemicals", 5],
 ];
+/** Carried Energy burned per research (mirror of wilder-crafting RESEARCH_ENERGY). */
+export const RESEARCH_ENERGY = 5;
 
 /** Resource node variant -> resource (mirror of wilder_economy::RESOURCES order). */
 export const NODE_RESOURCES: ItemKind[] = [

@@ -27,6 +27,7 @@ use wilder_combat::{
     SHOCKWAVE_RADIUS, STIM_HEAL, STIM_SPEED_DURATION, STIM_SPEED_MULT,
 };
 use wilder_inventory as inv;
+use serde::{Deserialize, Serialize};
 use wilder_pathfinding::find_path;
 use wilder_persistence::{CharacterStore, RocksStore, Stash, WorldStore};
 use wilder_physics::{
@@ -44,7 +45,7 @@ use agents::{
     FactionAgent, Goal, TargetInfo, Tier, Traits, AGENT_RESPAWN_SECONDS, COLD_BUCKETS,
     COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS, RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
 };
-use econ::{Currency, EconActor, Purse};
+use econ::{Currency, EconActor, OwnerId, Purse};
 use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
 use market_stats::{MarketStats, MarketStatsSave};
@@ -121,8 +122,12 @@ const NODE_SEARCH_CHUNKS: i32 = 2;
 const NODE_CLAIM_CAP: u32 = 2;
 /// Chance for a blueprint fragment to drop from NPC kills / node gathers.
 const FRAGMENT_CHANCE: f64 = 0.10;
-/// Global hub power budget (kW) shared by all production jobs.
-const POWER_BUDGET: f32 = 100.0;
+/// Max jobs queued at one production building (all owners combined), so
+/// agents can't pile a queue up infinitely.
+const PRODUCTION_QUEUE_CAP: usize = 16;
+/// Reference MILD value of one Energy for agent utility scoring (Energy has
+/// no market price yet; this is what the craft EV charges per unit burned).
+const ENERGY_MILD_VALUE: f32 = 3.0;
 /// Market fee (percent) taken from every sale: routed to whoever holds the
 /// market's territory, burned otherwise.
 const MARKET_FEE_PCT: u32 = 5;
@@ -140,13 +145,14 @@ const SAFEHOUSE_RADIUS: f32 = 10.0;
 /// Themed resource zones ring the hub out to this chunk radius (Chebyshev);
 /// everything beyond is `ZoneKind::Mixed`.
 const ZONE_RING_CHUNKS: i32 = 6;
-/// Recipes every character knows from the start; the rest need lab research.
-const DEFAULT_BLUEPRINTS: &[&str] =
-    &["steel_plate", "copper_wire", "pipe", "knife", "ammo_9mm", "medkit"];
-/// Research cost: fragments + resources consumed to unlock any blueprint.
+/// Recipes every actor knows from the start; the rest need lab research.
+/// (Canonical set lives beside the recipes in wilder-crafting.)
+const DEFAULT_BLUEPRINTS: &[&str] = wilder_crafting::DEFAULT_BLUEPRINTS;
+/// Research cost: fragments + resources + Energy consumed per unlock.
 const RESEARCH_FRAGMENTS: u32 = 2;
 const RESEARCH_RESOURCES: &[(ItemKind, u32)] =
     &[(ItemKind::Electronics, 5), (ItemKind::Chemicals, 5)];
+const RESEARCH_ENERGY: u32 = wilder_crafting::RESEARCH_ENERGY;
 /// XP granted per NPC kill.
 const XP_SCAV_KILL: u32 = 25;
 const XP_RAIDER_KILL: u32 = 50;
@@ -623,11 +629,24 @@ fn xp_for_level(level: u32) -> u32 {
     level * 100
 }
 
-fn station_power(station: wilder_crafting::Station) -> f32 {
+/// Per-building energy throughput cap: the max summed `Recipe::energy` of
+/// concurrently running jobs at one station. Jobs past the cap wait in the
+/// queue unpowered. More district stations = more world throughput (this
+/// replaced the old global kW budget).
+fn station_energy_cap(station: wilder_crafting::Station) -> u32 {
     match station {
-        wilder_crafting::Station::Refinery => 10.0,
-        wilder_crafting::Station::Factory => 20.0,
-        wilder_crafting::Station::Laboratory => 30.0,
+        wilder_crafting::Station::Refinery => 4,
+        wilder_crafting::Station::Factory => 4,
+        wilder_crafting::Station::Laboratory => 5,
+    }
+}
+
+/// The static entity kind that hosts a crafting station.
+fn station_entity_kind(station: wilder_crafting::Station) -> EntityKind {
+    match station {
+        wilder_crafting::Station::Refinery => EntityKind::Refinery,
+        wilder_crafting::Station::Factory => EntityKind::Factory,
+        wilder_crafting::Station::Laboratory => EntityKind::Laboratory,
     }
 }
 
@@ -941,8 +960,6 @@ struct Player {
     overcharge_time: f32,
     /// Known blueprint recipe ids.
     blueprints: HashSet<String>,
-    /// Production queues per building entity (personal queues, Phase 3).
-    production: HashMap<EntityId, Vec<ProductionJobState>>,
     /// Cached account currency balances (write-through to the store).
     /// Carried burns on death, same as faction agents; banked is death-safe.
     purse: Purse,
@@ -1020,6 +1037,8 @@ impl SentSnap {
 
 struct ProductionJobState {
     id: u64,
+    /// Durable owner: outlives entity ids across reconnects/respawns.
+    owner: OwnerId,
     recipe: &'static wilder_crafting::Recipe,
     count: u32,
     done: u32,
@@ -1037,6 +1056,44 @@ impl ProductionJobState {
             remaining: self.remaining,
             powered: self.powered,
         }
+    }
+
+    fn to_save(&self) -> ProductionJobSave {
+        ProductionJobSave {
+            id: self.id,
+            owner: self.owner,
+            recipe: self.recipe.id.to_string(),
+            count: self.count,
+            done: self.done,
+            remaining: self.remaining,
+        }
+    }
+}
+
+/// Persisted form of a production job (world meta `production_queues`).
+/// The recipe rides as its id; jobs whose recipe no longer exists are
+/// dropped on load.
+#[derive(Serialize, Deserialize)]
+struct ProductionJobSave {
+    id: u64,
+    owner: OwnerId,
+    recipe: String,
+    count: u32,
+    done: u32,
+    remaining: f32,
+}
+
+impl ProductionJobSave {
+    fn into_state(self) -> Option<ProductionJobState> {
+        Some(ProductionJobState {
+            id: self.id,
+            owner: self.owner,
+            recipe: wilder_crafting::recipe(&self.recipe)?,
+            count: self.count,
+            done: self.done,
+            remaining: self.remaining,
+            powered: false,
+        })
     }
 }
 
@@ -1259,6 +1316,17 @@ pub struct World {
     market: Vec<wilder_market::Listing>,
     next_listing_id: u64,
     next_job_id: u64,
+    /// Shared production queues keyed by station building. Only buildings
+    /// with live jobs have an entry, so ticking scales with active industry,
+    /// not the statics map. Persisted in world meta (`production_queues`) —
+    /// jobs keep running while their owner is offline.
+    production: HashMap<EntityId, Vec<ProductionJobState>>,
+    /// Completed-but-uncollected output per (building, owner). The owner
+    /// collects within 5 m (players also auto-collect). Persisted in world
+    /// meta (`production_outputs`).
+    production_outputs: HashMap<(EntityId, OwnerId), Vec<ItemStack>>,
+    /// Production state changed since the last save sweep.
+    production_dirty: bool,
     /// Non-neutral territory control per region: which faction holds it.
     /// Persisted in world meta so the war map survives restarts.
     territory: HashMap<(i32, i32), FactionId>,
@@ -1346,6 +1414,36 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         }
     }
     let next_listing_id: u64 = store.meta("market_next_id").ok().flatten().unwrap_or(1);
+    // Production queues + output buffers survive restarts (spec §61): jobs
+    // keep running and buffered goods stay claimable. Building entity ids
+    // are stable because statics seed deterministically before anything
+    // dynamic allocates.
+    let production: HashMap<EntityId, Vec<ProductionJobState>> = store
+        .meta::<Vec<(EntityId, Vec<ProductionJobSave>)>>("production_queues")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(building, jobs)| {
+            let jobs: Vec<ProductionJobState> =
+                jobs.into_iter().filter_map(ProductionJobSave::into_state).collect();
+            (!jobs.is_empty()).then_some((building, jobs))
+        })
+        .collect();
+    let next_job_id = production
+        .values()
+        .flatten()
+        .map(|j| j.id + 1)
+        .max()
+        .unwrap_or(1);
+    let production_outputs: HashMap<(EntityId, OwnerId), Vec<ItemStack>> = store
+        .meta::<Vec<(EntityId, OwnerId, Vec<ItemStack>)>>("production_outputs")
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(building, owner, stacks)| ((building, owner), stacks))
+        .collect();
     // Ledger aggregates survive restarts; the recent-tx feed is in-memory.
     let ledger_save: LedgerSave = store.meta("econ_ledger").ok().flatten().unwrap_or_default();
     // Per-item market price history survives restarts too.
@@ -1368,7 +1466,10 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         chunks: ChunkCache::new(TerrainGenerator::new(seed), store),
         market,
         next_listing_id,
-        next_job_id: 1,
+        next_job_id,
+        production,
+        production_outputs,
+        production_dirty: false,
         players: HashMap::new(),
         npcs: HashMap::new(),
         npc_seeded_chunks: HashSet::new(),
@@ -1585,7 +1686,6 @@ impl World {
             stim_speed_time: 0.0,
             overcharge_time: 0.0,
             blueprints,
-            production: HashMap::new(),
             purse,
             wallet_sent: None,
             sent_snaps: HashMap::new(),
@@ -1633,34 +1733,10 @@ impl World {
     }
 
     fn leave(&mut self, entity: EntityId) {
-        if let Some(mut player) = self.players.remove(&entity) {
-            // Refund inputs for unfinished production so items aren't lost
-            // (queues are in-memory; jobs only run while the player is online).
-            let queues = std::mem::take(&mut player.production);
-            for jobs in queues.into_values() {
-                for job in jobs {
-                    let pending = job.count - job.done;
-                    for &(kind, count) in job.recipe.inputs {
-                        let refund = count * pending;
-                        if refund == 0 {
-                            continue;
-                        }
-                        let leftover = inv::add_items(&mut player.inventory.slots, kind, refund);
-                        if leftover > 0 {
-                            inv::add_items(&mut player.stash.slots, kind, leftover);
-                        }
-                        // Inputs were burned when the job was queued; the
-                        // refund re-mints them to the leaving player.
-                        self.ledger.record(
-                            TxKind::Mint,
-                            TxParty::Mint,
-                            player_party(&player),
-                            TxAmount::Item { kind, count: refund },
-                            0,
-                        );
-                    }
-                }
-            }
+        if let Some(player) = self.players.remove(&entity) {
+            // Production jobs persist and keep running while the owner is
+            // offline (queues live on the building, keyed by character id);
+            // no disconnect refund needed anymore.
             self.econ_subs.remove(&entity);
             self.item_subs.remove(&entity);
             self.persist_player(&player);
@@ -1744,7 +1820,10 @@ impl World {
             }
             C2S::Craft { recipe, station } => self.craft(entity, &recipe, station),
             C2S::QueueProduction { building, recipe, count } => {
-                self.queue_production(entity, building, &recipe, count)
+                self.queue_production(EconActor::Player(entity), building, &recipe, count);
+            }
+            C2S::CollectProduction { building } => {
+                self.collect_production(EconActor::Player(entity), building);
             }
             C2S::Market(action) => self.market_action(entity, action),
             C2S::Vendor { vendor, action } => self.vendor_action(entity, vendor, action),
@@ -2323,6 +2402,25 @@ impl World {
         }
     }
 
+    /// Shared-currency faucet for any econ actor: Purse credit + Mint leg +
+    /// write-through. Players route via the entity helpers (which also feed
+    /// the WalletUpdate delta); agents credit their purse directly and
+    /// persist with their shard save.
+    fn grant_currency_actor(&mut self, actor: EconActor, currency: Currency, amount: u32) {
+        if amount == 0 {
+            return;
+        }
+        match actor {
+            EconActor::Player(id) => self.grant_currency(id, currency, amount),
+            EconActor::Agent(idx) => {
+                let Some(agent) = self.agents.get_mut(idx) else { return };
+                agent.purse.credit(currency, amount);
+                let to = agent.party();
+                self.ledger.record(TxKind::Mint, TxParty::Mint, to, currency.tx_amount(amount), 0);
+            }
+        }
+    }
+
     /// Drop a loose currency pickup, jittered around `position` so multiple
     /// drops from one kill read as separate collectibles on the ground.
     fn spawn_currency_pickup(&mut self, position: Vec3, currency: Currency, amount: u32) {
@@ -2407,15 +2505,26 @@ impl World {
         }
     }
 
-    /// The recipes an actor may craft. Players research theirs; agents run
-    /// on the starter set until they get a real learned field (Phase 3).
-    #[allow(dead_code)]
+    /// The recipes an actor may craft. Both sides research theirs: players
+    /// persist via the blueprint store, agents via the population shards.
     fn actor_knows_blueprint(&self, actor: EconActor, recipe_id: &str) -> bool {
         match actor {
             EconActor::Player(id) => {
                 self.players.get(&id).is_some_and(|p| p.blueprints.contains(recipe_id))
             }
-            EconActor::Agent(_) => DEFAULT_BLUEPRINTS.contains(&recipe_id),
+            EconActor::Agent(idx) => {
+                self.agents.get(idx).is_some_and(|a| a.blueprints.contains(recipe_id))
+            }
+        }
+    }
+
+    /// Durable owner identity for production jobs/buffers: character id for
+    /// players (survives reconnects), agent uuid for agents (survives
+    /// restarts; a respawn mints a new identity and the old one is purged).
+    fn actor_owner_id(&self, actor: EconActor) -> Option<OwnerId> {
+        match actor {
+            EconActor::Player(id) => self.players.get(&id).map(|p| OwnerId::Player(p.character.id)),
+            EconActor::Agent(idx) => self.agents.get(idx).map(|a| OwnerId::Agent(a.agent_id)),
         }
     }
 
@@ -2682,13 +2791,10 @@ impl World {
                 let _ = player.tx.send(S2C::StashUpdate { slots: player.stash.slots.clone() });
             }
             EntityKind::Refinery | EntityKind::Factory | EntityKind::Laboratory => {
-                // Push this player's queue for the station (opens the UI).
-                let jobs: Vec<ProductionJob> = player
-                    .production
-                    .get(&target)
-                    .map(|jobs| jobs.iter().map(|j| j.to_wire()).collect())
-                    .unwrap_or_default();
-                let _ = player.tx.send(S2C::ProductionState { building: target, jobs });
+                // Grab any buffered output first (in-range by the check
+                // above), then push the shared queue state (opens the UI).
+                self.collect_production(EconActor::Player(entity), target);
+                self.send_production_state(entity, target);
             }
             EntityKind::MarketTerminal => {
                 self.send_market_state(entity);
@@ -2706,142 +2812,88 @@ impl World {
         }
     }
 
-    /// Instant crafting at a nearby station, and `research_<id>` unlocks at the
-    /// Laboratory. (Timed production queues are the Phase 3 path for stations.)
+    /// `research_<id>` unlocks at the Laboratory. Anything else is a legacy
+    /// instant-craft request: the bypass is retired, so it routes into the
+    /// shared production queue at the given (or nearest) matching station.
+    /// The current client only ever sends Craft for research.
     fn craft(&mut self, entity: EntityId, recipe_id: &str, station: Option<EntityId>) {
         if let Some(research_id) = recipe_id.strip_prefix("research_") {
-            self.research(entity, research_id);
+            self.research(EconActor::Player(entity), research_id);
             return;
         }
-        let Some(player) = self.players.get(&entity) else { return };
-        let fail = |player: &Player, error: &str| {
-            let _ = player.tx.send(S2C::CraftResult {
-                ok: false,
-                error: Some(error.into()),
-                produced: None,
-            });
-        };
+        let actor = EconActor::Player(entity);
         let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
-            fail(player, "unknown recipe");
+            self.craft_fail(actor, "unknown recipe");
             return;
         };
-        if !player.blueprints.contains(recipe.id) {
-            fail(player, "blueprint not researched");
-            return;
-        }
-        let station_kind = match recipe.station {
-            wilder_crafting::Station::Refinery => EntityKind::Refinery,
-            wilder_crafting::Station::Factory => EntityKind::Factory,
-            wilder_crafting::Station::Laboratory => EntityKind::Laboratory,
-        };
-        // The right kind of station must be within reach (explicit id or nearest).
-        let near_station = self.statics.values().any(|s| {
-            s.kind == station_kind
-                && station.map(|id| s.entity == id).unwrap_or(true)
-                && (s.position - player.character.position).length() < 5.0
+        let building = station.or_else(|| {
+            let pos = self.players.get(&entity)?.character.position;
+            self.services_by_kind
+                .get(&station_entity_kind(recipe.station))
+                .into_iter()
+                .flatten()
+                .min_by(|a, b| {
+                    let da = (a.1 - pos).length_squared();
+                    let db = (b.1 - pos).length_squared();
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|&(id, _)| id)
         });
-        if !near_station {
-            fail(player, &format!("no {:?} in reach", recipe.station));
+        let Some(building) = building else {
+            self.craft_fail(actor, &format!("no {:?} in reach", recipe.station));
             return;
-        }
-        let Some(player) = self.players.get_mut(&entity) else { return };
-        // Verify + consume inputs.
-        for &(kind, count) in recipe.inputs {
-            if inv::count_items(&player.inventory.slots, kind) < count {
-                let _ = player.tx.send(S2C::CraftResult {
-                    ok: false,
-                    error: Some(format!("need {}x {}", count, kind.display_name())),
-                    produced: None,
-                });
-                return;
-            }
-        }
-        let crafter = player_party(player);
-        for &(kind, count) in recipe.inputs {
-            inv::remove_items(&mut player.inventory.slots, kind, count);
-            self.ledger.record(
-                TxKind::CraftConsume,
-                crafter.clone(),
-                TxParty::Burn,
-                TxAmount::Item { kind, count },
-                0,
-            );
-        }
-        let (out_kind, out_count) = recipe.output;
-        let leftover = inv::add_items(&mut player.inventory.slots, out_kind, out_count);
-        player.dirty = true;
-        self.ledger.record(
-            TxKind::CraftProduce,
-            TxParty::Mint,
-            crafter.clone(),
-            TxAmount::Item { kind: out_kind, count: out_count },
-            0,
-        );
-        self.stats.add_crafted(&player_actor(player), out_count as u64);
-        let produced = ItemStack { kind: out_kind, count: out_count - leftover };
-        let _ = player.tx.send(S2C::CraftResult { ok: true, error: None, produced: Some(produced) });
-        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-        if leftover > 0 {
-            let pos = player.character.position;
-            self.spawn_loot(
-                pos,
-                vec![ItemStack { kind: out_kind, count: leftover }],
-                Some(crafter),
-                true,
-            );
-        }
+        };
+        self.queue_production(actor, building, recipe_id, 1);
     }
 
-    /// Unlock a blueprint at the Laboratory: consumes fragments + resources.
-    fn research(&mut self, entity: EntityId, recipe_id: &str) {
+    /// CraftResult failure notice (players get UI feedback; agents no-op).
+    fn craft_fail(&self, actor: EconActor, error: &str) {
+        self.actor_notify(
+            actor,
+            S2C::CraftResult { ok: false, error: Some(error.to_string()), produced: None },
+        );
+    }
+
+    /// Unlock a blueprint at the Laboratory — shared player/agent path:
+    /// consumes fragments + resources + carried Energy, inserts into the
+    /// actor's blueprint set (players persist via the blueprint store and
+    /// get a BlueprintsUpdate; agents persist through population shards).
+    /// Returns true when the unlock happened.
+    fn research(&mut self, actor: EconActor, recipe_id: &str) -> bool {
         let near_lab = self
-            .players
-            .get(&entity)
-            .map(|p| {
-                self.statics.values().any(|s| {
-                    s.kind == EntityKind::Laboratory
-                        && (s.position - p.character.position).length() < 5.0
-                })
-            })
-            .unwrap_or(false);
-        let Some(player) = self.players.get_mut(&entity) else { return };
-        let fail = |player: &Player, error: &str| {
-            let _ = player.tx.send(S2C::CraftResult {
-                ok: false,
-                error: Some(error.into()),
-                produced: None,
-            });
-        };
+            .services_by_kind
+            .get(&EntityKind::Laboratory)
+            .into_iter()
+            .flatten()
+            .any(|&(id, _)| self.actor_in_range(actor, id, 5.0));
         if !near_lab {
-            fail(player, "no Laboratory in reach");
-            return;
+            self.craft_fail(actor, "no Laboratory in reach");
+            return false;
         }
         let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
-            fail(player, "unknown blueprint");
-            return;
+            self.craft_fail(actor, "unknown blueprint");
+            return false;
         };
-        if player.blueprints.contains(recipe.id) {
-            fail(player, "already researched");
-            return;
+        if self.actor_knows_blueprint(actor, recipe.id) {
+            self.craft_fail(actor, "already researched");
+            return false;
         }
-        if inv::count_items(&player.inventory.slots, ItemKind::BlueprintFragment)
-            < RESEARCH_FRAGMENTS
-        {
-            fail(player, &format!("need {RESEARCH_FRAGMENTS}x Blueprint Fragment"));
-            return;
+        if self.actor_count_items(actor, ItemKind::BlueprintFragment) < RESEARCH_FRAGMENTS {
+            self.craft_fail(actor, &format!("need {RESEARCH_FRAGMENTS}x Blueprint Fragment"));
+            return false;
         }
         for &(kind, count) in RESEARCH_RESOURCES {
-            if inv::count_items(&player.inventory.slots, kind) < count {
-                fail(player, &format!("need {}x {}", count, kind.display_name()));
-                return;
+            if self.actor_count_items(actor, kind) < count {
+                self.craft_fail(actor, &format!("need {}x {}", count, kind.display_name()));
+                return false;
             }
         }
-        inv::remove_items(
-            &mut player.inventory.slots,
-            ItemKind::BlueprintFragment,
-            RESEARCH_FRAGMENTS,
-        );
-        let researcher = player_party(player);
+        if self.actor_purse(actor).map_or(0, |p| p.carried(Currency::Energy)) < RESEARCH_ENERGY {
+            self.craft_fail(actor, &format!("need {RESEARCH_ENERGY} Energy"));
+            return false;
+        }
+        let Some(researcher) = self.actor_party(actor) else { return false };
+        self.actor_remove_items(actor, ItemKind::BlueprintFragment, RESEARCH_FRAGMENTS);
         self.ledger.record(
             TxKind::CraftConsume,
             researcher.clone(),
@@ -2850,7 +2902,7 @@ impl World {
             0,
         );
         for &(kind, count) in RESEARCH_RESOURCES {
-            inv::remove_items(&mut player.inventory.slots, kind, count);
+            self.actor_remove_items(actor, kind, count);
             self.ledger.record(
                 TxKind::CraftConsume,
                 researcher.clone(),
@@ -2859,7 +2911,17 @@ impl World {
                 0,
             );
         }
-        player.blueprints.insert(recipe.id.to_string());
+        if let Some(purse) = self.actor_purse_mut(actor) {
+            purse.debit(Currency::Energy, RESEARCH_ENERGY);
+        }
+        self.persist_actor_purse(actor);
+        self.ledger.record(
+            TxKind::CraftConsume,
+            researcher.clone(),
+            TxParty::Burn,
+            TxAmount::Energy { amount: RESEARCH_ENERGY },
+            0,
+        );
         self.ledger.blueprints_learned += 1;
         self.ledger.record(
             TxKind::CraftProduce,
@@ -2868,72 +2930,82 @@ impl World {
             TxAmount::Blueprint { recipe: recipe.id.to_string() },
             0,
         );
-        player.dirty = true;
-        let known: Vec<String> = player.blueprints.iter().cloned().collect();
-        let _ = self
-            .store
-            .save_blueprints(player.character.id, &known);
-        let _ = player.tx.send(S2C::CraftResult { ok: true, error: None, produced: None });
-        let _ = player.tx.send(S2C::BlueprintsUpdate { known });
-        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+        match actor {
+            EconActor::Player(entity) => {
+                let Some(player) = self.players.get_mut(&entity) else { return true };
+                player.blueprints.insert(recipe.id.to_string());
+                player.dirty = true;
+                let known: Vec<String> = player.blueprints.iter().cloned().collect();
+                let _ = self.store.save_blueprints(player.character.id, &known);
+                let _ =
+                    player.tx.send(S2C::CraftResult { ok: true, error: None, produced: None });
+                let _ = player.tx.send(S2C::BlueprintsUpdate { known });
+                let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+                // WalletUpdate flows on the next replicate pass (wallet_sent
+                // delta check catches the Energy debit).
+            }
+            EconActor::Agent(idx) => {
+                self.agents[idx].blueprints.insert(recipe.id.to_string());
+            }
+        }
+        true
     }
 
-    /// Queue a timed production job at a station building (Phase 3).
+    /// Queue a timed production batch at a station building — the one entry
+    /// point for players and agents alike. Validation: building exists and
+    /// matches the recipe's station, actor within 5 m, blueprint known,
+    /// queue below cap, inputs AND `recipe.energy * count` carried Energy
+    /// available. Inputs and Energy burn up-front (CraftConsume); output
+    /// lands in the (building, owner) buffer as units complete. Returns the
+    /// job id on success.
     fn queue_production(
         &mut self,
-        entity: EntityId,
+        actor: EconActor,
         building: EntityId,
         recipe_id: &str,
         count: u32,
-    ) {
-        let station = self
-            .statics
-            .get(&building)
-            .map(|s| (s.kind, s.position));
-        let Some(player) = self.players.get_mut(&entity) else { return };
-        let fail = |player: &Player, error: &str| {
-            let _ = player.tx.send(S2C::CraftResult {
-                ok: false,
-                error: Some(error.into()),
-                produced: None,
-            });
+    ) -> Option<u64> {
+        let Some(kind) = self.statics.get(&building).map(|s| s.kind) else {
+            self.craft_fail(actor, "no such building");
+            return None;
         };
-        let Some((kind, pos)) = station else {
-            fail(player, "no such building");
-            return;
-        };
-        if (pos - player.character.position).length() > 5.0 {
-            fail(player, "too far from the building");
-            return;
+        if !self.actor_in_range(actor, building, 5.0) {
+            self.craft_fail(actor, "too far from the building");
+            return None;
         }
         let Some(recipe) = wilder_crafting::recipe(recipe_id) else {
-            fail(player, "unknown recipe");
-            return;
+            self.craft_fail(actor, "unknown recipe");
+            return None;
         };
-        if !player.blueprints.contains(recipe.id) {
-            fail(player, "blueprint not researched");
-            return;
+        if !self.actor_knows_blueprint(actor, recipe.id) {
+            self.craft_fail(actor, "blueprint not researched");
+            return None;
         }
-        let expected = match recipe.station {
-            wilder_crafting::Station::Refinery => EntityKind::Refinery,
-            wilder_crafting::Station::Factory => EntityKind::Factory,
-            wilder_crafting::Station::Laboratory => EntityKind::Laboratory,
-        };
-        if kind != expected {
-            fail(player, &format!("recipe needs a {:?}", recipe.station));
-            return;
+        if kind != station_entity_kind(recipe.station) {
+            self.craft_fail(actor, &format!("recipe needs a {:?}", recipe.station));
+            return None;
+        }
+        if self.production.get(&building).map_or(0, |q| q.len()) >= PRODUCTION_QUEUE_CAP {
+            self.craft_fail(actor, "production queue is full");
+            return None;
         }
         let count = count.clamp(1, 20);
-        // Inputs are consumed up-front for the whole batch.
+        // Inputs + Energy are consumed up-front for the whole batch.
         for &(k, c) in recipe.inputs {
-            if inv::count_items(&player.inventory.slots, k) < c * count {
-                fail(player, &format!("need {}x {}", c * count, k.display_name()));
-                return;
+            if self.actor_count_items(actor, k) < c * count {
+                self.craft_fail(actor, &format!("need {}x {}", c * count, k.display_name()));
+                return None;
             }
         }
-        let producer = player_party(player);
+        let energy = recipe.energy * count;
+        if self.actor_purse(actor).map_or(0, |p| p.carried(Currency::Energy)) < energy {
+            self.craft_fail(actor, &format!("need {energy} Energy"));
+            return None;
+        }
+        let owner = self.actor_owner_id(actor)?;
+        let producer = self.actor_party(actor)?;
         for &(k, c) in recipe.inputs {
-            inv::remove_items(&mut player.inventory.slots, k, c * count);
+            self.actor_remove_items(actor, k, c * count);
             self.ledger.record(
                 TxKind::CraftConsume,
                 producer.clone(),
@@ -2942,108 +3014,371 @@ impl World {
                 0,
             );
         }
-        let job = ProductionJobState {
-            id: self.next_job_id,
+        if energy > 0 {
+            if let Some(purse) = self.actor_purse_mut(actor) {
+                purse.debit(Currency::Energy, energy);
+            }
+            self.persist_actor_purse(actor);
+            self.ledger.record(
+                TxKind::CraftConsume,
+                producer,
+                TxParty::Burn,
+                TxAmount::Energy { amount: energy },
+                0,
+            );
+        }
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        self.production.entry(building).or_default().push(ProductionJobState {
+            id,
+            owner,
             recipe,
             count,
             done: 0,
             remaining: recipe.seconds,
             powered: false,
-        };
-        self.next_job_id += 1;
-        player.production.entry(building).or_default().push(job);
-        player.dirty = true;
-        let jobs: Vec<ProductionJob> =
-            player.production[&building].iter().map(|j| j.to_wire()).collect();
-        let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
-        let _ = player.tx.send(S2C::ProductionState { building, jobs });
+        });
+        self.production_dirty = true;
+        if let EconActor::Player(entity) = actor {
+            if let Some(player) = self.players.get(&entity) {
+                let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+            }
+            self.send_production_state(entity, building);
+        }
+        Some(id)
     }
 
-    /// Advance production queues under the global power budget.
+    /// Cancel one of the actor's queued jobs: the uncompleted units' inputs
+    /// and Energy come back (re-minted — the queue-time legs burned them);
+    /// finished units stay in the output buffer. No client message maps
+    /// here yet (cancel UI is Phase 6); agents and tests drive it directly.
+    #[allow(dead_code)]
+    fn cancel_production(&mut self, actor: EconActor, building: EntityId, job_id: u64) -> bool {
+        let Some(owner) = self.actor_owner_id(actor) else { return false };
+        let Some(queue) = self.production.get_mut(&building) else { return false };
+        let Some(pos) = queue.iter().position(|j| j.id == job_id && j.owner == owner) else {
+            return false;
+        };
+        let job = queue.remove(pos);
+        if queue.is_empty() {
+            self.production.remove(&building);
+        }
+        self.production_dirty = true;
+        let pending = job.count - job.done;
+        let party = self.actor_party(actor);
+        for &(kind, count) in job.recipe.inputs {
+            let refund = count * pending;
+            if refund == 0 {
+                continue;
+            }
+            let leftover = self.actor_add_items(actor, kind, refund);
+            if leftover > 0 {
+                if let Some(at) = self.actor_position(actor) {
+                    self.spawn_loot(
+                        at,
+                        vec![ItemStack { kind, count: leftover }],
+                        party.clone(),
+                        true,
+                    );
+                }
+            }
+            if let Some(party) = party.clone() {
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    party,
+                    TxAmount::Item { kind, count: refund },
+                    0,
+                );
+            }
+        }
+        let energy = job.recipe.energy * pending;
+        if energy > 0 {
+            if let Some(purse) = self.actor_purse_mut(actor) {
+                purse.credit(Currency::Energy, energy);
+            }
+            self.persist_actor_purse(actor);
+            if let Some(party) = party {
+                self.ledger.record(
+                    TxKind::Mint,
+                    TxParty::Mint,
+                    party,
+                    TxAmount::Energy { amount: energy },
+                    0,
+                );
+            }
+        }
+        if let EconActor::Player(entity) = actor {
+            if let Some(player) = self.players.get(&entity) {
+                let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+            }
+            self.send_production_state(entity, building);
+        }
+        true
+    }
+
+    /// Hand an actor everything buffered under its owner id at `building`
+    /// (5 m / interior rule). Whatever doesn't fit the pack stays buffered.
+    /// Returns what was actually collected.
+    fn collect_production(&mut self, actor: EconActor, building: EntityId) -> Vec<ItemStack> {
+        let Some(owner) = self.actor_owner_id(actor) else { return Vec::new() };
+        if !self.actor_in_range(actor, building, 5.0) {
+            return Vec::new();
+        }
+        let Some(stacks) = self.production_outputs.remove(&(building, owner)) else {
+            return Vec::new();
+        };
+        let mut collected = Vec::new();
+        let mut leftovers = Vec::new();
+        for stack in stacks {
+            let rem = self.actor_add_items(actor, stack.kind, stack.count);
+            if stack.count > rem {
+                collected.push(ItemStack { kind: stack.kind, count: stack.count - rem });
+            }
+            if rem > 0 {
+                leftovers.push(ItemStack { kind: stack.kind, count: rem });
+            }
+        }
+        if !leftovers.is_empty() {
+            self.production_outputs.insert((building, owner), leftovers);
+        }
+        if collected.is_empty() {
+            return collected;
+        }
+        self.production_dirty = true;
+        match actor {
+            EconActor::Player(entity) => {
+                if let Some(player) = self.players.get(&entity) {
+                    let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
+                    // The gather toast doubles as collection feedback until
+                    // the Phase 6 production UI lands.
+                    let _ = player
+                        .tx
+                        .send(S2C::GatherResult { gained: collected.clone(), denied: false });
+                }
+            }
+            EconActor::Agent(idx) => {
+                // Retire the pending note once nothing of ours is left here.
+                let live = self
+                    .production
+                    .get(&building)
+                    .is_some_and(|q| q.iter().any(|j| j.owner == owner))
+                    || self.production_outputs.contains_key(&(building, owner));
+                if !live {
+                    self.agents[idx].pending_jobs.retain(|&(b, _)| b != building);
+                }
+            }
+        }
+        collected
+    }
+
+    /// Push a building's shared queue plus the receiving player's own
+    /// buffer (opens/refreshes the production UI).
+    fn send_production_state(&self, entity: EntityId, building: EntityId) {
+        let Some(player) = self.players.get(&entity) else { return };
+        let jobs: Vec<ProductionJob> = self
+            .production
+            .get(&building)
+            .map(|q| q.iter().map(|j| j.to_wire()).collect())
+            .unwrap_or_default();
+        let buffered = self
+            .production_outputs
+            .get(&(building, OwnerId::Player(player.character.id)))
+            .cloned()
+            .unwrap_or_default();
+        let _ = player.tx.send(S2C::ProductionState { building, jobs, buffered });
+    }
+
+    /// Refresh the production UI of every online player invested in
+    /// `building` (has a job or a buffer there) after queue state changed.
+    fn broadcast_production_state(&self, building: EntityId) {
+        let queue = self.production.get(&building);
+        for player in self.players.values() {
+            let owner = OwnerId::Player(player.character.id);
+            let invested = queue.is_some_and(|q| q.iter().any(|j| j.owner == owner))
+                || self.production_outputs.contains_key(&(building, owner));
+            if invested {
+                self.send_production_state(player.entity, building);
+            }
+        }
+    }
+
+    /// Advance each active building's queue under its per-station energy
+    /// cap: jobs run concurrently from the head while the summed
+    /// `Recipe::energy` of running jobs fits `station_energy_cap`; the rest
+    /// wait unpowered. Completed units land in the (building, owner) output
+    /// buffer — never straight into a backpack. Cost scales with buildings
+    /// that actually have jobs, not the statics map.
     fn tick_production(&mut self) {
-        // Deterministic ordering: players by entity id, buildings by id.
-        let mut player_ids: Vec<EntityId> = self.players.keys().copied().collect();
-        player_ids.sort_unstable();
-
-        let mut power_used = 0.0f32;
-        let mut completions: Vec<(EntityId, Vec3, ItemStack)> = Vec::new();
-
-        for pid in player_ids {
-            let Some(player) = self.players.get_mut(&pid) else { continue };
-            let mut buildings: Vec<EntityId> = player.production.keys().copied().collect();
+        if !self.production.is_empty() {
+            let mut buildings: Vec<EntityId> = self.production.keys().copied().collect();
             buildings.sort_unstable();
             for building in buildings {
+                let mut completions: Vec<(OwnerId, &'static wilder_crafting::Recipe)> =
+                    Vec::new();
                 let mut state_changed = false;
-                let jobs = player.production.get_mut(&building).unwrap();
-                // Only the head job of each queue runs.
-                if let Some(job) = jobs.first_mut() {
-                    let draw = station_power(job.recipe.station);
-                    let powered = power_used + draw <= POWER_BUDGET;
-                    if powered {
-                        power_used += draw;
-                    }
-                    if powered != job.powered {
-                        job.powered = powered;
-                        state_changed = true;
-                    }
-                    if powered {
+                let now_empty = {
+                    let jobs = self.production.get_mut(&building).unwrap();
+                    let cap = jobs
+                        .first()
+                        .map(|j| station_energy_cap(j.recipe.station))
+                        .unwrap_or(0);
+                    let mut running = 0u32;
+                    for job in jobs.iter_mut() {
+                        let powered = running + job.recipe.energy <= cap;
+                        if powered {
+                            running += job.recipe.energy;
+                        }
+                        if powered != job.powered {
+                            job.powered = powered;
+                            state_changed = true;
+                        }
+                        if !powered {
+                            continue;
+                        }
                         job.remaining -= TICK_DT;
                         if job.remaining <= 0.0 {
                             job.done += 1;
                             job.remaining = job.recipe.seconds;
-                            let (kind, count) = job.recipe.output;
-                            let leftover =
-                                inv::add_items(&mut player.inventory.slots, kind, count);
-                            self.ledger.record(
-                                TxKind::CraftProduce,
-                                TxParty::Mint,
-                                TxParty::Player {
-                                    id: player.character.id,
-                                    name: player.character.name.clone(),
-                                    faction: FACTION_REBELS,
-                                },
-                                TxAmount::Item { kind, count },
-                                0,
-                            );
-                            self.stats.add_crafted(&player_actor(player), count as u64);
-                            completions.push((
-                                pid,
-                                player.character.position,
-                                ItemStack { kind, count: leftover },
-                            ));
-                            player.dirty = true;
+                            completions.push((job.owner, job.recipe));
                             state_changed = true;
-                            let _ = player
-                                .tx
-                                .send(S2C::InventoryUpdate(player.inventory.clone()));
                         }
                     }
+                    jobs.retain(|j| j.done < j.count);
+                    jobs.is_empty()
+                };
+                if now_empty {
+                    self.production.remove(&building);
                 }
-                let jobs = player.production.get_mut(&building).unwrap();
-                if jobs.first().map(|j| j.done >= j.count).unwrap_or(false) {
-                    jobs.remove(0);
-                    state_changed = true;
-                }
-                if jobs.is_empty() {
-                    player.production.remove(&building);
+                for (owner, recipe) in completions {
+                    self.complete_production_unit(building, owner, recipe);
                 }
                 if state_changed {
-                    let jobs: Vec<ProductionJob> = player
-                        .production
-                        .get(&building)
-                        .map(|jobs| jobs.iter().map(|j| j.to_wire()).collect())
-                        .unwrap_or_default();
-                    let _ = player.tx.send(S2C::ProductionState { building, jobs });
+                    self.production_dirty = true;
+                    self.broadcast_production_state(building);
                 }
             }
         }
+        // Seamless player pickup until the HUD grows a Collect button
+        // (Phase 6): buffered goods flow to online owners standing in range.
+        self.auto_collect_player_buffers();
+    }
 
-        // Overflow output that didn't fit the inventory drops at the player's feet.
-        for (pid, pos, stack) in completions {
-            if stack.count > 0 {
-                let owner = self.players.get(&pid).map(player_party);
-                self.spawn_loot(pos, vec![stack], owner, true);
+    /// One finished unit: buffer the output at (building, owner), mint it
+    /// on the ledger, bump craft stats, and let agents learn the margin.
+    fn complete_production_unit(
+        &mut self,
+        building: EntityId,
+        owner: OwnerId,
+        recipe: &'static wilder_crafting::Recipe,
+    ) {
+        let (kind, count) = recipe.output;
+        let buffer = self.production_outputs.entry((building, owner)).or_default();
+        match buffer.iter_mut().find(|s| s.kind == kind) {
+            Some(stack) => stack.count += count,
+            None => buffer.push(ItemStack { kind, count }),
+        }
+        self.production_dirty = true;
+        let party = self.owner_party(owner);
+        self.ledger.record(
+            TxKind::CraftProduce,
+            TxParty::Mint,
+            party,
+            TxAmount::Item { kind, count },
+            0,
+        );
+        match owner {
+            OwnerId::Player(id) => {
+                if let Some(p) = self.players.values().find(|p| p.character.id == id) {
+                    self.stats.add_crafted(&player_actor(p), count as u64);
+                }
             }
+            OwnerId::Agent(id) => {
+                if let Some(idx) = self.agents.iter().position(|a| a.agent_id == id) {
+                    let crafter = self.agent_actor_ref(idx);
+                    self.stats.add_crafted(&crafter, count as u64);
+                    // Learn the value-added margin net of the Energy burned.
+                    let in_value: u32 =
+                        recipe.inputs.iter().map(|&(k, c)| base_value(k) * c).sum();
+                    let out_value = base_value(kind).saturating_mul(count);
+                    let margin = out_value.saturating_sub(in_value) as f32
+                        - recipe.energy as f32 * ENERGY_MILD_VALUE;
+                    self.agents[idx].learn(Activity::Craft, margin);
+                }
+            }
+        }
+    }
+
+    /// Ledger party for a job owner, resolvable while the owner is offline
+    /// (players) or after the exact index moved (agents).
+    fn owner_party(&self, owner: OwnerId) -> TxParty {
+        match owner {
+            OwnerId::Player(id) => {
+                if let Some(p) = self.players.values().find(|p| p.character.id == id) {
+                    return player_party(p);
+                }
+                match self.store.character(id) {
+                    Ok(ch) => TxParty::Player { id, name: ch.name, faction: FACTION_REBELS },
+                    Err(_) => TxParty::Burn,
+                }
+            }
+            OwnerId::Agent(id) => match self.agents.iter().find(|a| a.agent_id == id) {
+                Some(a) => a.party(),
+                None => TxParty::Burn,
+            },
+        }
+    }
+
+    /// Buffered output flows to online player owners standing within reach
+    /// — the client has no Collect button until Phase 6, so goods must
+    /// keep reaching players without UI changes (interact also collects).
+    fn auto_collect_player_buffers(&mut self) {
+        if self.production_outputs.is_empty() {
+            return;
+        }
+        let mut pulls: Vec<(EntityId, EntityId)> = Vec::new();
+        for &(building, owner) in self.production_outputs.keys() {
+            let OwnerId::Player(char_id) = owner else { continue };
+            if let Some(p) = self.players.values().find(|p| p.character.id == char_id) {
+                pulls.push((p.entity, building));
+            }
+        }
+        pulls.sort_unstable();
+        for (entity, building) in pulls {
+            // collect_production applies the 5 m / interior range rule.
+            self.collect_production(EconActor::Player(entity), building);
+        }
+    }
+
+    /// Drop a dead identity's production: queued batches vanish (their
+    /// inputs and Energy were burned at queue time — carried-goods-at-risk
+    /// rules apply) and uncollected buffers burn on the ledger.
+    fn purge_owner_production(&mut self, owner: OwnerId, party: TxParty) {
+        let mut changed = false;
+        self.production.retain(|_, queue| {
+            let before = queue.len();
+            queue.retain(|j| j.owner != owner);
+            changed |= queue.len() != before;
+            !queue.is_empty()
+        });
+        let keys: Vec<(EntityId, OwnerId)> =
+            self.production_outputs.keys().filter(|&&(_, o)| o == owner).copied().collect();
+        for key in keys {
+            if let Some(stacks) = self.production_outputs.remove(&key) {
+                changed = true;
+                for stack in stacks {
+                    self.ledger.record(
+                        TxKind::Burn,
+                        party.clone(),
+                        TxParty::Burn,
+                        TxAmount::Item { kind: stack.kind, count: stack.count },
+                        0,
+                    );
+                }
+            }
+        }
+        if changed {
+            self.production_dirty = true;
         }
     }
 
@@ -4691,7 +5026,7 @@ impl World {
     /// home district after the timer. Equipped gear stays on the identity,
     /// exactly like a player's jacket staying on their back.
     fn kill_agent(&mut self, idx: usize, drop_loot: bool) {
-        let (entity, position, items, burned, party) = {
+        let (entity, position, items, burned, party, agent_id) = {
             let agent = &mut self.agents[idx];
             agent.health = 0.0;
             agent.anim = AnimState::Death;
@@ -4704,11 +5039,16 @@ impl World {
             agent.goal = Goal::Idle;
             agent.path.clear();
             agent.path_request = None;
+            agent.pending_jobs.clear();
             let items: Vec<ItemStack> =
                 agent.inventory.slots.iter_mut().filter_map(|s| s.take()).collect();
             let burned = agent.purse.burn_carried_on_death();
-            (agent.entity, agent.position, items, burned, agent.party())
+            (agent.entity, agent.position, items, burned, agent.party(), agent.agent_id)
         };
+        // The dying identity's production dies with it: queued batches drop
+        // (their inputs/Energy burned at queue time — same at-risk rule as
+        // carried goods) and uncollected buffers burn out of supply.
+        self.purge_owner_production(OwnerId::Agent(agent_id), party.clone());
         // Field intel: a body dropped here (danger signal).
         *self.region_casualties.entry(region_of(position)).or_insert(0) += 1;
         // Dead: out of the spatial grid, onto the respawn list.
@@ -5155,6 +5495,11 @@ impl World {
                 0,
             );
         }
+        // Crafters get a few Energy cells so the queue fuel (Phase 3) exists
+        // before their first pickup/cache tap; the rest earn it in the field.
+        if traits.leans(Activity::Craft) {
+            self.grant_currency_actor(EconActor::Agent(idx), Currency::Energy, 5);
+        }
         self.agents[idx].equip_best_gear();
         // Accumulated savings survive death: pull a comeback stake from the
         // vault into the fresh wallet so a proven earner returns funded rather
@@ -5598,50 +5943,97 @@ impl World {
             }
         }
 
-        // --- Craft: best-margin recipe the agent can feed ---
+        // --- Collect: finished production waiting in a buffer somewhere ---
         let craft_mult = traits.mult(Activity::Craft);
+        let agent_owner = OwnerId::Agent(self.agents[idx].agent_id);
+        for &(building, _) in &self.agents[idx].pending_jobs {
+            let Some(buffer) = self.production_outputs.get(&(building, agent_owner)) else {
+                continue;
+            };
+            let Some(building_pos) = self.statics.get(&building).map(|s| s.position) else {
+                continue;
+            };
+            // Errand value = what's sitting in the buffer; same 2.0 weight
+            // as the craft errand that queued it.
+            let value: u32 = buffer.iter().map(|s| base_value(s.kind) * s.count).sum();
+            let score = value as f32 * 2.0 * craft_mult;
+            if score > best.0 {
+                best = (score, Goal::Collect { building, building_pos });
+            }
+        }
+
+        // --- Craft: best-margin KNOWN recipe the agent can feed (inputs +
+        // Energy), margin net of the Energy the unit burns. The best locked
+        // recipe is remembered as a research prospect. ---
+        let carried_energy = self.agents[idx].purse.carried(Currency::Energy);
         let mut best_recipe: Option<(&'static wilder_crafting::Recipe, f32)> = None;
+        let mut best_locked: Option<(&'static wilder_crafting::Recipe, f32)> = None;
         for recipe in wilder_crafting::RECIPES {
             if recipe.station == wilder_crafting::Station::Laboratory {
-                continue;
-            }
-            let affordable = recipe
-                .inputs
-                .iter()
-                .all(|&(kind, count)| self.agents[idx].count_item(kind) >= count);
-            if !affordable {
                 continue;
             }
             let in_value: u32 =
                 recipe.inputs.iter().map(|&(k, c)| base_value(k) * c).sum();
             let out_value = base_value(recipe.output.0) * recipe.output.1;
-            let margin = out_value.saturating_sub(in_value) as f32;
-            if margin > 0.0 && best_recipe.map(|(_, m)| margin > m).unwrap_or(true) {
+            let margin = out_value.saturating_sub(in_value) as f32
+                - recipe.energy as f32 * ENERGY_MILD_VALUE;
+            if margin <= 0.0 {
+                continue;
+            }
+            if !self.agents[idx].blueprints.contains(recipe.id) {
+                if best_locked.map(|(_, m)| margin > m).unwrap_or(true) {
+                    best_locked = Some((recipe, margin));
+                }
+                continue;
+            }
+            let affordable = recipe
+                .inputs
+                .iter()
+                .all(|&(kind, count)| self.agents[idx].count_item(kind) >= count)
+                && recipe.energy <= carried_energy;
+            if !affordable {
+                continue;
+            }
+            if best_recipe.map(|(_, m)| margin > m).unwrap_or(true) {
                 best_recipe = Some((recipe, margin));
             }
         }
         if let Some((recipe, margin)) = best_recipe {
-            let station_kind = match recipe.station {
-                wilder_crafting::Station::Refinery => EntityKind::Refinery,
-                _ => EntityKind::Factory,
-            };
+            let station_kind = station_entity_kind(recipe.station);
             if let Some((station, station_pos, appeal)) = self.route_service(pos, station_kind) {
                 // Same 2.0 errand weight as gathering: value-added work at a
                 // station competes on equal footing with pulling raw drops,
                 // so craft-leaning agents actually consume resources — that
-                // consumption is the demand side of the market book.
+                // consumption is the demand side of the market book. A full
+                // queue kills the errand outright (the batch would bounce).
+                let full = self.production.get(&station).map_or(0, |q| q.len())
+                    >= PRODUCTION_QUEUE_CAP;
                 let score = margin * 2.0 * craft_mult * appeal;
-                if score > best.0 {
-                    best = (
-                        score,
-                        Goal::Craft {
-                            station,
-                            station_pos,
-                            recipe: recipe.id,
-                            timer: recipe.seconds,
-                            started: false,
-                        },
-                    );
+                if !full && score > best.0 {
+                    best = (score, Goal::Craft { station, station_pos, recipe: recipe.id });
+                }
+            }
+        }
+        // --- Research: a locked recipe beats everything we know and the
+        // tuition (fragments + resources + Energy) is in hand ---
+        if let Some((locked, locked_margin)) = best_locked {
+            let known_margin = best_recipe.map(|(_, m)| m).unwrap_or(0.0);
+            let funded = self.agents[idx].count_item(ItemKind::BlueprintFragment)
+                >= RESEARCH_FRAGMENTS
+                && RESEARCH_RESOURCES
+                    .iter()
+                    .all(|&(k, c)| self.agents[idx].count_item(k) >= c)
+                && carried_energy >= RESEARCH_ENERGY;
+            if locked_margin > known_margin && funded {
+                if let Some((lab, lab_pos, appeal)) =
+                    self.route_service(pos, EntityKind::Laboratory)
+                {
+                    // Modest utility: the unlock pays out over future crafts,
+                    // so score the margin ADVANTAGE, not the margin itself.
+                    let score = (locked_margin - known_margin) * craft_mult * appeal;
+                    if score > best.0 {
+                        best = (score, Goal::Research { lab, lab_pos, recipe: locked.id });
+                    }
                 }
             }
         }
@@ -5934,7 +6326,9 @@ impl World {
                 self.agents[idx].goal = Goal::Idle;
             }
             Goal::Trade { .. } => self.agent_trade(idx),
-            Goal::Craft { .. } => self.agent_craft_step(idx),
+            Goal::Craft { .. } => self.agent_queue_craft(idx),
+            Goal::Research { .. } => self.agent_research(idx),
+            Goal::Collect { .. } => self.agent_collect(idx),
             Goal::Loot { container, .. } => self.agent_loot_pickup(idx, container),
             Goal::Bank { .. } => self.agent_bank_deposit(idx),
             _ => {}
@@ -5970,6 +6364,7 @@ impl World {
         let items: Vec<ItemStack> = container.items.drain(..).collect();
         let owner = container.owner.clone();
         let in_supply = container.in_supply;
+        let variant = container.variant;
         let mut taken: Vec<ItemStack> = Vec::new();
         let mut leftovers: Vec<ItemStack> = Vec::new();
         for stack in items {
@@ -5994,6 +6389,10 @@ impl World {
             self.agents[idx].learn(Activity::Haul, value as f32);
             let picker = self.agents[idx].party();
             self.record_loot_pickup(picker, owner, in_supply, &taken);
+            // Ammo caches carry the same small Energy charge players tap.
+            if variant == 1 {
+                self.grant_currency_actor(EconActor::Agent(idx), Currency::Energy, 1);
+            }
         }
     }
 
@@ -6371,65 +6770,62 @@ impl World {
         }
     }
 
-    /// Craft goal steps: first arrival consumes inputs and starts the timer;
-    /// timer expiry mints the output.
-    fn agent_craft_step(&mut self, idx: usize) {
-        let Goal::Craft { recipe, started, .. } = self.agents[idx].goal else { return };
-        let Some(recipe) = wilder_crafting::recipe(recipe) else {
-            self.agents[idx].goal = Goal::Idle;
-            return;
-        };
-        let party = self.agents[idx].party();
-        if !started {
-            // Consume inputs (burn legs, same as the player craft flow).
-            let affordable = recipe
-                .inputs
-                .iter()
-                .all(|&(kind, count)| self.agents[idx].count_item(kind) >= count);
-            if !affordable {
-                self.agents[idx].goal = Goal::Idle;
-                return;
-            }
-            for &(kind, count) in recipe.inputs {
-                self.agents[idx].remove_item(kind, count);
-                self.ledger.record(
-                    TxKind::CraftConsume,
-                    party.clone(),
-                    TxParty::Burn,
-                    TxAmount::Item { kind, count },
-                    0,
-                );
-            }
-            if let Goal::Craft { started, timer, .. } = &mut self.agents[idx].goal {
-                *started = true;
-                *timer = recipe.seconds;
-            }
-            return;
-        }
-        // Timer done: mint the output. Output that doesn't fit the pack
-        // spills to the ground at the station (the player craft flow denies
-        // up front; agents already burned their inputs, so spill-not-drop).
-        let (kind, count) = recipe.output;
-        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, count);
-        self.ledger.record(
-            TxKind::CraftProduce,
-            TxParty::Mint,
-            party.clone(),
-            TxAmount::Item { kind, count },
-            0,
-        );
-        if leftover > 0 {
-            let pos = self.agents[idx].position;
-            self.spawn_loot(pos, vec![ItemStack { kind, count: leftover }], Some(party), true);
-        }
-        self.agents[idx].equip_best_gear();
-        let crafter = self.agent_actor_ref(idx);
-        self.stats.add_crafted(&crafter, count as u64);
-        // Learning: the craft's value-added margin over the whole errand.
-        let in_value: u32 = recipe.inputs.iter().map(|&(k, c)| base_value(k) * c).sum();
-        let out_value = base_value(kind).saturating_mul(count);
-        self.agents[idx].learn(Activity::Craft, out_value.saturating_sub(in_value) as f32);
+    /// Craft goal arrival: queue a batch through the SAME `queue_production`
+    /// path players use (5 m, blueprint, station, inputs, Energy, queue cap
+    /// all validated there; inputs + Energy burn at the counter). The agent
+    /// remembers (building, job_id) and comes back on a Collect errand;
+    /// learning happens per finished unit in `complete_production_unit`.
+    fn agent_queue_craft(&mut self, idx: usize) {
+        let Goal::Craft { station, recipe, .. } = self.agents[idx].goal else { return };
         self.agents[idx].goal = Goal::Idle;
+        let Some(recipe_def) = wilder_crafting::recipe(recipe) else { return };
+        // Batch what the pack and purse can feed, capped small so one agent
+        // doesn't squat a public queue slot for minutes.
+        let mut batch = u32::MAX;
+        for &(kind, count) in recipe_def.inputs {
+            batch = batch.min(self.agents[idx].count_item(kind) / count.max(1));
+        }
+        if recipe_def.energy > 0 {
+            batch = batch.min(self.agents[idx].purse.carried(Currency::Energy) / recipe_def.energy);
+        }
+        let batch = batch.min(5);
+        if batch == 0 {
+            return;
+        }
+        if let Some(job_id) = self.queue_production(EconActor::Agent(idx), station, recipe, batch)
+        {
+            self.agents[idx].pending_jobs.push((station, job_id));
+        }
+    }
+
+    /// Research goal arrival: unlock the blueprint through the shared
+    /// `research()` path (fragments + resources + Energy burn there; the
+    /// new recipe persists with the agent's shard save).
+    fn agent_research(&mut self, idx: usize) {
+        let Goal::Research { recipe, .. } = self.agents[idx].goal else { return };
+        self.agents[idx].goal = Goal::Idle;
+        self.research(EconActor::Agent(idx), recipe);
+    }
+
+    /// Collect goal arrival: pull this agent's output buffer at the
+    /// building (retires the pending-job note once nothing is left).
+    fn agent_collect(&mut self, idx: usize) {
+        let Goal::Collect { building, .. } = self.agents[idx].goal else { return };
+        self.agents[idx].goal = Goal::Idle;
+        let collected = self.collect_production(EconActor::Agent(idx), building);
+        if collected.is_empty() {
+            // Nothing here for us (raced a purge or a stale note): drop the
+            // note so the brain stops routing back.
+            let owner = OwnerId::Agent(self.agents[idx].agent_id);
+            let live = self
+                .production
+                .get(&building)
+                .is_some_and(|q| q.iter().any(|j| j.owner == owner))
+                || self.production_outputs.contains_key(&(building, owner));
+            if !live {
+                self.agents[idx].pending_jobs.retain(|&(b, _)| b != building);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -6587,6 +6983,8 @@ impl World {
                     home_spot,
                     purse: Purse::default(),
                     inventory: Inventory::new(),
+                    blueprints: Vec::new(),
+                    pending_jobs: Vec::new(),
                     position,
                     health: 100.0,
                     max_health: 100.0,
@@ -6757,24 +7155,58 @@ impl World {
 
     /// Walk-over auto-collect for loose currency, plus TTL expiry. The client
     /// hears the pickup cue and shows the "+N" toast off the resulting
-    /// WalletUpdate and the pickup entity's despawn.
+    /// WalletUpdate and the pickup entity's despawn. Hot agents share the
+    /// sweep (players get first grab) — this is how the crafting class earns
+    /// the Energy its queues burn. Cold agents skip physical pickups.
     fn tick_currency_pickups(&mut self) {
-        let mut grabbed: Vec<(EntityId, EntityId, Currency, u32)> = Vec::new();
+        let mut grabbed: Vec<(EconActor, EntityId, Currency, u32)> = Vec::new();
         for player in self.players.values() {
             for pickup in self.pickups.values() {
                 if (pickup.position - player.character.position).length()
                     <= CURRENCY_PICKUP_RADIUS
                 {
-                    grabbed.push((player.entity, pickup.entity, pickup.currency, pickup.amount));
+                    grabbed.push((
+                        EconActor::Player(player.entity),
+                        pickup.entity,
+                        pickup.currency,
+                        pickup.amount,
+                    ));
                 }
             }
         }
-        for (pid, cid, currency, amount) in grabbed {
-            // Another player may have grabbed it earlier this pass.
+        // Hot agents walking over a pickup collect it too. Pickups are few;
+        // the agent grid bounds the candidate set to the pickup's own chunk
+        // ring (the radius is well under a chunk).
+        for pickup in self.pickups.values() {
+            let c = ChunkCoord::from_world(pickup.position);
+            'found: for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let coord = ChunkCoord::new(c.x + dx, c.z + dz);
+                    for &i in self.agent_grid.get(&coord).into_iter().flatten() {
+                        let agent = &self.agents[i as usize];
+                        if agent.tier == Tier::Hot
+                            && agent.alive()
+                            && (pickup.position - agent.position).length()
+                                <= CURRENCY_PICKUP_RADIUS
+                        {
+                            grabbed.push((
+                                EconActor::Agent(i as usize),
+                                pickup.entity,
+                                pickup.currency,
+                                pickup.amount,
+                            ));
+                            break 'found;
+                        }
+                    }
+                }
+            }
+        }
+        for (actor, cid, currency, amount) in grabbed {
+            // Someone else may have grabbed it earlier this pass.
             if self.pickups.remove(&cid).is_none() {
                 continue;
             }
-            self.grant_currency(pid, currency, amount);
+            self.grant_currency_actor(actor, currency, amount);
         }
 
         let mut expired = Vec::new();
@@ -7728,6 +8160,28 @@ impl World {
         if let Err(e) = self.store.save_meta("stats_book", &self.stats) {
             tracing::error!("stats save failed: {e}");
         }
+        // Production queues + output buffers (jobs keep running while their
+        // owner is offline, so both must survive restarts).
+        if self.production_dirty {
+            let queues: Vec<(EntityId, Vec<ProductionJobSave>)> = self
+                .production
+                .iter()
+                .map(|(&b, jobs)| (b, jobs.iter().map(|j| j.to_save()).collect()))
+                .collect();
+            let outputs: Vec<(EntityId, OwnerId, Vec<ItemStack>)> = self
+                .production_outputs
+                .iter()
+                .map(|(&(b, o), stacks)| (b, o, stacks.clone()))
+                .collect();
+            match self
+                .store
+                .save_meta("production_queues", &queues)
+                .and_then(|()| self.store.save_meta("production_outputs", &outputs))
+            {
+                Ok(()) => self.production_dirty = false,
+                Err(e) => tracing::error!("production save failed: {e}"),
+            }
+        }
         // War map: persist region control when it changed since the last save.
         if self.territory_dirty {
             let cells: Vec<(i32, i32, FactionId)> =
@@ -7971,6 +8425,8 @@ pub mod bench {
                 Goal::BuyMarket { .. } => "buy-market",
                 Goal::Trade { .. } => "trade",
                 Goal::Craft { .. } => "craft",
+                Goal::Research { .. } => "research",
+                Goal::Collect { .. } => "collect",
                 Goal::Loot { .. } => "loot",
                 Goal::Hunt { .. } => "hunt",
                 Goal::Capture { .. } => "capture",
@@ -8135,6 +8591,9 @@ mod tests {
             market: Vec::new(),
             next_listing_id: 1,
             next_job_id: 1,
+            production: HashMap::new(),
+            production_outputs: HashMap::new(),
+            production_dirty: false,
             players: HashMap::new(),
             npcs: HashMap::new(),
             npc_seeded_chunks: HashSet::new(),
@@ -8208,6 +8667,8 @@ mod tests {
                     inv::add_items(&mut inventory.slots, ItemKind::Pipe, 1);
                     inventory
                 },
+                blueprints: Vec::new(),
+                pending_jobs: Vec::new(),
                 position,
                 health: 100.0,
                 max_health: 100.0,
@@ -8399,7 +8860,6 @@ mod tests {
                 stim_speed_time: 0.0,
                 overcharge_time: 0.0,
                 blueprints: HashSet::new(),
-                production: HashMap::new(),
                 purse: Purse::default(),
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
@@ -8560,6 +9020,8 @@ mod tests {
                 p
             },
             inventory: Inventory::new(),
+            blueprints: Vec::new(),
+            pending_jobs: Vec::new(),
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
             health: 80.0,
@@ -8793,7 +9255,6 @@ mod tests {
                 stim_speed_time: 0.0,
                 overcharge_time: 0.0,
                 blueprints: HashSet::new(),
-                production: HashMap::new(),
                 purse: Purse::default(),
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
@@ -8974,7 +9435,6 @@ mod tests {
                 stim_speed_time: 0.0,
                 overcharge_time: 0.0,
                 blueprints: HashSet::new(),
-                production: HashMap::new(),
                 purse: Purse::default(),
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
@@ -9659,5 +10119,305 @@ mod tests {
             .filter(|(a, s)| a.traits != **s)
             .count();
         assert!(moved > 0, "no agent learned anything in a minute of sim");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 3: energy-fueled building queues + output buffers
+    // -------------------------------------------------------------------
+
+    /// Register a bare station static (skips the full district seeding).
+    fn insert_test_station(world: &mut World, kind: EntityKind, pos: Vec3) -> EntityId {
+        let entity = world.alloc_entity();
+        world.register_static(StaticEntity {
+            entity,
+            kind,
+            position: pos,
+            name: "TEST STATION".into(),
+            variant: 0,
+            agent_id: uuid::Uuid::new_v4(),
+        });
+        entity
+    }
+
+    /// Stock a player for `steel_plate` batches: iron, blueprints, Energy.
+    fn stock_player(world: &mut World, entity: EntityId, iron: u32, energy: u32) {
+        let player = world.players.get_mut(&entity).unwrap();
+        inv::add_items(&mut player.inventory.slots, ItemKind::Iron, iron);
+        player.blueprints.insert("steel_plate".into());
+        player.purse.credit(Currency::Energy, energy);
+    }
+
+    #[test]
+    fn queue_charges_inputs_and_energy_upfront_and_cancel_refunds() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let entity = insert_test_player(&mut world, pos);
+        stock_player(&mut world, entity, 8, 10);
+        let actor = EconActor::Player(entity);
+
+        // 2x steel_plate: 8 iron + 2 Energy burn at the counter.
+        let job = world.queue_production(actor, station, "steel_plate", 2);
+        assert!(job.is_some());
+        assert_eq!(world.actor_count_items(actor, ItemKind::Iron), 0);
+        assert_eq!(world.actor_purse(actor).unwrap().carried(Currency::Energy), 8);
+
+        // Insufficient Energy denies the batch before anything is consumed.
+        let player = world.players.get_mut(&entity).unwrap();
+        inv::add_items(&mut player.inventory.slots, ItemKind::Iron, 40);
+        let denied = world.queue_production(actor, station, "steel_plate", 10);
+        assert!(denied.is_none(), "10 units need 10 Energy, only 8 carried");
+        assert_eq!(world.actor_count_items(actor, ItemKind::Iron), 40);
+
+        // Cancel refunds the uncompleted units' inputs AND Energy.
+        assert!(world.cancel_production(actor, station, job.unwrap()));
+        assert_eq!(world.actor_count_items(actor, ItemKind::Iron), 48);
+        assert_eq!(world.actor_purse(actor).unwrap().carried(Currency::Energy), 10);
+        assert!(world.production.is_empty(), "cancelled queue should retire");
+    }
+
+    #[test]
+    fn building_energy_cap_powers_concurrent_jobs_up_to_the_cap() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let entity = insert_test_player(&mut world, pos);
+        stock_player(&mut world, entity, 20, 5);
+        let actor = EconActor::Player(entity);
+        // 5 one-Energy jobs at a cap-4 Refinery: four run, the fifth waits.
+        for _ in 0..5 {
+            assert!(world.queue_production(actor, station, "steel_plate", 1).is_some());
+        }
+        world.tick_production();
+        let jobs = &world.production[&station];
+        let powered: Vec<bool> = jobs.iter().map(|j| j.powered).collect();
+        assert_eq!(powered, vec![true, true, true, true, false]);
+        // Progress accrues only on the powered four.
+        assert!(jobs[3].remaining < jobs[3].recipe.seconds);
+        assert_eq!(jobs[4].remaining, jobs[4].recipe.seconds);
+        // The sixth-teenth job bounces off the queue cap.
+        let player = world.players.get_mut(&entity).unwrap();
+        inv::add_items(&mut player.inventory.slots, ItemKind::Iron, 64);
+        player.purse.credit(Currency::Energy, 16);
+        for _ in 0..11 {
+            assert!(world.queue_production(actor, station, "steel_plate", 1).is_some());
+        }
+        assert_eq!(world.production[&station].len(), PRODUCTION_QUEUE_CAP);
+        assert!(world.queue_production(actor, station, "steel_plate", 1).is_none());
+    }
+
+    #[test]
+    fn output_buffers_collect_within_range_only() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let entity = insert_test_player(&mut world, pos);
+        stock_player(&mut world, entity, 4, 1);
+        let actor = EconActor::Player(entity);
+        let owner = world.actor_owner_id(actor).unwrap();
+        assert!(world.queue_production(actor, station, "steel_plate", 1).is_some());
+        // Step away so the auto-collect sweep can't grab the output.
+        world.players.get_mut(&entity).unwrap().character.position =
+            pos + Vec3::new(50.0, 0.0, 0.0);
+        for _ in 0..(4.0 / TICK_DT) as u32 + 2 {
+            world.tick_production();
+        }
+        assert!(world.production.is_empty(), "batch should have completed");
+        let buffer = &world.production_outputs[&(station, owner)];
+        assert!(
+            buffer.len() == 1
+                && buffer[0].kind == ItemKind::SteelPlate
+                && buffer[0].count == 1,
+            "output belongs in the buffer, not the backpack"
+        );
+        assert_eq!(world.actor_count_items(actor, ItemKind::SteelPlate), 0);
+        // Out of range: nothing moves.
+        assert!(world.collect_production(actor, station).is_empty());
+        assert!(world.production_outputs.contains_key(&(station, owner)));
+        // In range: the buffer empties into the pack.
+        world.players.get_mut(&entity).unwrap().character.position = pos;
+        let got = world.collect_production(actor, station);
+        assert!(got.len() == 1 && got[0].kind == ItemKind::SteelPlate && got[0].count == 1);
+        assert_eq!(world.actor_count_items(actor, ItemKind::SteelPlate), 1);
+        assert!(!world.production_outputs.contains_key(&(station, owner)));
+    }
+
+    #[test]
+    fn players_near_the_station_auto_collect_finished_units() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let entity = insert_test_player(&mut world, pos);
+        stock_player(&mut world, entity, 4, 1);
+        let actor = EconActor::Player(entity);
+        assert!(world.queue_production(actor, station, "steel_plate", 1).is_some());
+        // Standing at the counter: the finished unit flows straight through
+        // the buffer into the pack (no Collect button until Phase 6).
+        for _ in 0..(4.0 / TICK_DT) as u32 + 2 {
+            world.tick_production();
+        }
+        assert_eq!(world.actor_count_items(actor, ItemKind::SteelPlate), 1);
+        assert!(world.production_outputs.is_empty());
+    }
+
+    #[test]
+    fn production_queues_and_buffers_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(RocksStore::open(dir.path()).unwrap());
+        let (_tx, rx) = mpsc::unbounded_channel();
+        std::mem::forget(_tx);
+        let mut world = new_world(store.clone(), rx);
+        let station = world
+            .services_by_kind
+            .get(&EntityKind::Refinery)
+            .and_then(|v| v.first())
+            .map(|&(id, _)| id)
+            .expect("district seeding places refineries");
+        let station_pos = world.statics[&station].position;
+        let entity = insert_test_player(&mut world, station_pos);
+        stock_player(&mut world, entity, 8, 2);
+        let actor = EconActor::Player(entity);
+        let owner = world.actor_owner_id(actor).unwrap();
+        let job = world.queue_production(actor, station, "steel_plate", 2).unwrap();
+        // Half a unit of progress plus a hand-buffered stack to round-trip.
+        for _ in 0..40 {
+            world.tick_production();
+        }
+        world
+            .production_outputs
+            .insert((station, owner), vec![ItemStack { kind: ItemKind::Copper, count: 3 }]);
+        world.production_dirty = true;
+        let remaining_before = world.production[&station][0].remaining;
+        world.save_all();
+
+        // Restart: same store, fresh world.
+        let (_tx2, rx2) = mpsc::unbounded_channel();
+        std::mem::forget(_tx2);
+        let world2 = new_world(store, rx2);
+        let jobs = &world2.production[&station];
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, job);
+        assert_eq!(jobs[0].owner, owner);
+        assert_eq!(jobs[0].recipe.id, "steel_plate");
+        assert_eq!(jobs[0].count, 2);
+        assert!((jobs[0].remaining - remaining_before).abs() < 1e-3);
+        assert!(world2.next_job_id > job, "job ids must not recycle after load");
+        let buffer = &world2.production_outputs[&(station, owner)];
+        assert!(buffer.len() == 1 && buffer[0].kind == ItemKind::Copper && buffer[0].count == 3);
+    }
+
+    #[test]
+    fn research_costs_energy_and_agents_unlock_through_the_shared_path() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        insert_test_station(&mut world, EntityKind::Laboratory, pos);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        let actor = EconActor::Agent(idx);
+        assert!(!world.actor_knows_blueprint(actor, "polymer"));
+        world.agents[idx].add_item(ItemKind::BlueprintFragment, RESEARCH_FRAGMENTS);
+        world.agents[idx].add_item(ItemKind::Electronics, 5);
+        world.agents[idx].add_item(ItemKind::Chemicals, 5);
+        // Fragments + resources in hand but no Energy: research denied.
+        assert!(!world.research(actor, "polymer"));
+        world.agents[idx].purse.credit(Currency::Energy, RESEARCH_ENERGY);
+        assert!(world.research(actor, "polymer"));
+        assert!(world.actor_knows_blueprint(actor, "polymer"));
+        assert_eq!(world.agents[idx].purse.carried(Currency::Energy), 0);
+        assert_eq!(world.agents[idx].count_item(ItemKind::BlueprintFragment), 0);
+        // Unlocked knowledge rides the shard save format.
+        let save = world.agents[idx].save();
+        assert!(save.blueprints.contains(&"polymer".to_string()));
+    }
+
+    #[test]
+    fn agents_only_queue_recipes_they_know() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let actor_idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        let actor = EconActor::Agent(actor_idx);
+        // polymer is not a default blueprint: the shared validation denies it
+        // even with inputs + Energy in hand.
+        world.agents[actor_idx].add_item(ItemKind::Chemicals, 3);
+        world.agents[actor_idx].add_item(ItemKind::Biomass, 2);
+        world.agents[actor_idx].purse.credit(Currency::Energy, 5);
+        assert!(world.queue_production(actor, station, "polymer", 1).is_none());
+        world.agents[actor_idx].blueprints.insert("polymer".into());
+        assert!(world.queue_production(actor, station, "polymer", 1).is_some());
+    }
+
+    #[test]
+    fn agent_queue_craft_end_to_end_queues_waits_and_collects() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        // Gather-stocked crafter: iron for one plate + Energy to fuel it.
+        world.agents[idx].add_item(ItemKind::Iron, 4);
+        world.agents[idx].purse.credit(Currency::Energy, 2);
+        world.agents[idx].goal =
+            Goal::Craft { station, station_pos: pos, recipe: "steel_plate" };
+        world.agent_act(idx);
+        assert_eq!(world.agents[idx].pending_jobs, vec![(station, 1)]);
+        assert_eq!(world.agents[idx].count_item(ItemKind::Iron), 0);
+        assert_eq!(world.agents[idx].purse.carried(Currency::Energy), 1);
+        // The batch cooks into the agent's buffer.
+        for _ in 0..(4.0 / TICK_DT) as u32 + 2 {
+            world.tick_production();
+        }
+        let owner = OwnerId::Agent(world.agents[idx].agent_id);
+        assert!(world.production_outputs.contains_key(&(station, owner)));
+        // The brain routes a Collect errand at the waiting buffer...
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Collect { building, .. } if building == station),
+            "expected a Collect errand, got {:?}",
+            world.agents[idx].goal
+        );
+        // ...and arrival pulls the goods and retires the pending note.
+        world.agent_act(idx);
+        assert_eq!(world.agents[idx].count_item(ItemKind::SteelPlate), 1);
+        assert!(world.agents[idx].pending_jobs.is_empty());
+        assert!(!world.production_outputs.contains_key(&(station, owner)));
+    }
+
+    #[test]
+    fn agent_death_purges_its_jobs_and_buffers() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let station = insert_test_station(&mut world, EntityKind::Refinery, pos);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        world.agents[idx].add_item(ItemKind::Iron, 4);
+        world.agents[idx].purse.credit(Currency::Energy, 1);
+        assert!(world
+            .queue_production(EconActor::Agent(idx), station, "steel_plate", 1)
+            .is_some());
+        let owner = OwnerId::Agent(world.agents[idx].agent_id);
+        world
+            .production_outputs
+            .insert((station, owner), vec![ItemStack { kind: ItemKind::Pipe, count: 1 }]);
+        world.agents[idx].pending_jobs.push((station, 1));
+        world.kill_agent(idx, false);
+        assert!(world.production.is_empty(), "dead owner's queued jobs must drop");
+        assert!(!world.production_outputs.contains_key(&(station, owner)));
+        assert!(world.agents[idx].pending_jobs.is_empty());
+    }
+
+    #[test]
+    fn hot_agents_share_currency_pickups() {
+        let (mut world, _dir) = test_world();
+        let pos = Vec3::new(10.0, 0.0, 10.0);
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::crafter(), pos);
+        world.agents[idx].tier = Tier::Hot;
+        world.regrid_agent(idx);
+        world.spawn_currency_pickup(pos, Currency::Energy, 3);
+        // Pin the pickup onto the agent (spawn jitters the drop position).
+        for p in world.pickups.values_mut() {
+            p.position = pos;
+        }
+        let before = world.agents[idx].purse.carried(Currency::Energy);
+        world.tick_currency_pickups();
+        assert_eq!(world.agents[idx].purse.carried(Currency::Energy), before + 3);
+        assert!(world.pickups.is_empty());
     }
 }

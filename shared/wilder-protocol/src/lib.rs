@@ -47,6 +47,9 @@ pub enum C2S {
     Craft { recipe: String, station: Option<EntityId> },
     /// Queue a production job at a building. Phase 3.
     QueueProduction { building: EntityId, recipe: String, count: u32 },
+    /// Collect the sender's buffered production output at a building
+    /// (within 5 m). The server also auto-collects on proximity/interact.
+    CollectProduction { building: EntityId },
     /// Market actions. Phase 3.
     Market(MarketAction),
     /// NPC vendor actions (Armory, Bodega, Bank...). Requires being in reach
@@ -171,7 +174,14 @@ pub enum S2C {
         denied: bool,
     },
     CraftResult { ok: bool, error: Option<String>, produced: Option<ItemStack> },
-    ProductionState { building: EntityId, jobs: Vec<ProductionJob> },
+    /// A building's shared production queue (all owners' jobs) plus the
+    /// receiving player's own uncollected output buffer there.
+    ProductionState {
+        building: EntityId,
+        jobs: Vec<ProductionJob>,
+        #[serde(default)]
+        buffered: Vec<ItemStack>,
+    },
     MarketState { listings: Vec<MarketListing>, wallet: u32 },
     MarketResult { ok: bool, error: Option<String> },
     /// A vendor's stock/prices plus the receiving player's wallet (sent on
