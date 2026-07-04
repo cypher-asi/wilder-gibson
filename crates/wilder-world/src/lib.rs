@@ -929,15 +929,6 @@ struct Player {
     dirty: bool,
 }
 
-/// Above this many living agents, whole-map intel stops shipping one blip
-/// per agent and aggregates them into per-cell per-faction density clusters
-/// (players and Wapes stay individual). Keeps the ~1 Hz map stream a few KB
-/// at 50k agents instead of megabytes.
-const MAP_INTEL_BLIP_CAP: usize = 2048;
-/// Cell size (meters) for aggregated intel clusters. Matches the intel map's
-/// useful resolution: a dot every ~64 m reads as a density field.
-const INTEL_CLUSTER_CELL: f32 = 64.0;
-
 /// Max hot faction agents replicated to one player per tick. The client only
 /// draws ~24 full rigs plus a few hundred instanced silhouettes, so shipping
 /// every hot agent in view past that is pure wire cost. Nearest-first.
@@ -1680,10 +1671,14 @@ impl World {
                     player.map_intel = on;
                 }
                 if on {
-                    // Answer immediately so the map never opens blank.
+                    // Answer immediately so the map never opens blank: the
+                    // live blips (players + Wapes) plus a one-time full census
+                    // of every faction agent as static dots.
                     let blips = self.map_intel_blips();
+                    let census = self.map_census_blips();
                     if let Some(player) = self.players.get(&entity) {
                         let _ = player.tx.send(S2C::MapIntel { blips });
+                        let _ = player.tx.send(S2C::MapCensus { blips: census });
                     }
                 }
             }
@@ -6395,13 +6390,10 @@ impl World {
     // Map intel (whole-map blips for the M overlay)
     // -----------------------------------------------------------------------
 
-    /// Every living actor on the map as a quantized blip: players (kind 0),
-    /// faction agents hot or cold (kind 1) and wild Wapes (kind 2).
-    ///
-    /// Above `MAP_INTEL_BLIP_CAP` living agents, the per-agent blips are
-    /// replaced by per-cell per-faction density clusters (`count` > 1) so the
-    /// ~1 Hz whole-map stream stays a few KB no matter how big the sim gets.
-    /// Players and Wapes always stay individual.
+    /// The live map actors that actually move and stay few in number:
+    /// players (kind 0) and wild Wapes (kind 2). Faction agents are shipped
+    /// once as a static `MapCensus` on subscribe (see `map_census_blips`), so
+    /// this ~5 Hz stream stays tiny no matter how big the population is.
     fn map_intel_blips(&self) -> Vec<AgentBlip> {
         let q = |v: f32| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         let mut blips: Vec<AgentBlip> = Vec::new();
@@ -6418,58 +6410,6 @@ impl World {
                 count: 1,
             });
         }
-        let living_agents = self.agents.iter().filter(|a| a.alive()).count();
-        if living_agents <= MAP_INTEL_BLIP_CAP {
-            blips.reserve(living_agents);
-            for a in &self.agents {
-                if !a.alive() {
-                    continue;
-                }
-                blips.push(AgentBlip {
-                    id: a.entity,
-                    faction: a.faction,
-                    kind: 1,
-                    x: q(a.position.x),
-                    z: q(a.position.z),
-                    count: 1,
-                });
-            }
-        } else {
-            // (cell x, cell z, faction) -> (count, sum x, sum z); the blip
-            // sits at the members' centroid, not the cell corner.
-            let mut cells: HashMap<(i32, i32, FactionId), (u32, f64, f64)> = HashMap::new();
-            for a in &self.agents {
-                if !a.alive() {
-                    continue;
-                }
-                let cx = (a.position.x / INTEL_CLUSTER_CELL).floor() as i32;
-                let cz = (a.position.z / INTEL_CLUSTER_CELL).floor() as i32;
-                let e = cells.entry((cx, cz, a.faction)).or_insert((0, 0.0, 0.0));
-                e.0 += 1;
-                e.1 += a.position.x as f64;
-                e.2 += a.position.z as f64;
-            }
-            blips.reserve(cells.len());
-            for ((cx, cz, faction), (n, sx, sz)) in cells {
-                blips.push(AgentBlip {
-                    // Synthetic id, stable per (cell, faction), so client
-                    // blip tracks interpolate cluster drift between
-                    // snapshots instead of respawning dots. Bit 52 keeps it
-                    // clear of real entity ids while staying inside
-                    // JavaScript's 2^53 safe-integer range (blip ids become
-                    // JS numbers client-side).
-                    id: (1u64 << 52)
-                        | ((faction as u64) << 44)
-                        | (((cx as u32 as u64) & 0x3f_ffff) << 22)
-                        | ((cz as u32 as u64) & 0x3f_ffff),
-                    faction,
-                    kind: 1,
-                    x: q((sx / n as f64) as f32),
-                    z: q((sz / n as f64) as f32),
-                    count: n.min(u16::MAX as u32) as u16,
-                });
-            }
-        }
         for n in self.npcs.values() {
             if !n.alive() {
                 continue;
@@ -6480,6 +6420,30 @@ impl World {
                 kind: 2,
                 x: q(n.position.x),
                 z: q(n.position.z),
+                count: 1,
+            });
+        }
+        blips
+    }
+
+    /// One-time full census of every living faction agent as an individual
+    /// static blip (kind 1). Sent when the map opens; the client renders it
+    /// as a single point cloud that never updates per-frame. No cap and no
+    /// clustering — the compact wire form (6 bytes/blip, no id/count) keeps
+    /// even a 25k population to ~150 KB in a single frame.
+    fn map_census_blips(&self) -> Vec<AgentBlip> {
+        let q = |v: f32| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let mut blips: Vec<AgentBlip> = Vec::with_capacity(self.agents.len());
+        for a in &self.agents {
+            if !a.alive() {
+                continue;
+            }
+            blips.push(AgentBlip {
+                id: 0,
+                faction: a.faction,
+                kind: 1,
+                x: q(a.position.x),
+                z: q(a.position.z),
                 count: 1,
             });
         }

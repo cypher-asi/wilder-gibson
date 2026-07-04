@@ -643,6 +643,13 @@ export class GameConnection {
         game.mapIntel.version++;
         break;
       }
+      case "MapCensus": {
+        // One-time static census of every faction agent, sent on map open.
+        // Consumed once by the holo map's CensusLayer (not per-frame).
+        game.mapIntel.census = msg.d.blips;
+        game.mapIntel.censusVersion++;
+        break;
+      }
       case "LeaderboardState": {
         ui.set({ leaderboard: msg.d });
         break;

@@ -604,6 +604,7 @@ export type S2C =
   | Tagged<"EconomyTxs", { txs: EconTx[]; stats: EconomyStats }>
   | Tagged<"ItemMarketState", ItemMarketState>
   | Tagged<"MapIntel", { blips: AgentBlip[] }>
+  | Tagged<"MapCensus", { blips: AgentBlip[] }>
   | Tagged<"LeaderboardState", LeaderboardData>
   | Tagged<"Chat", { from: string; text: string }>
   | Tagged<"Ping", { nonce: number }>
@@ -644,6 +645,8 @@ const BIN_ANIMS: AnimState[] = [
 const SNAP_ENTITY_BYTES = 25;
 /** Bytes per blip in a binary MapIntel. */
 const INTEL_BLIP_BYTES = 16;
+/** Bytes per blip in a binary MapCensus (u8 faction, u8 kind, i16 x/z). */
+const CENSUS_BLIP_BYTES = 6;
 
 /** Entity/blip ids fit in 2^53, so two u32 reads beat BigInt conversion. */
 function readId(view: DataView, offset: number): number {
@@ -699,6 +702,24 @@ export function decodeBinary(buf: ArrayBuffer): S2C | null {
       o += INTEL_BLIP_BYTES;
     }
     return { t: "MapIntel", d: { blips } };
+  }
+  if (tag === 3) {
+    // MapCensus: u32 count, then packed static blips (no id/count on wire).
+    const count = view.getUint32(1, true);
+    const blips: AgentBlip[] = new Array(count);
+    let o = 5;
+    for (let i = 0; i < count; i++) {
+      blips[i] = {
+        id: 0,
+        faction: view.getUint8(o),
+        kind: view.getUint8(o + 1),
+        x: view.getInt16(o + 2, true),
+        z: view.getInt16(o + 4, true),
+        count: 1,
+      };
+      o += CENSUS_BLIP_BYTES;
+    }
+    return { t: "MapCensus", d: { blips } };
   }
   return null;
 }

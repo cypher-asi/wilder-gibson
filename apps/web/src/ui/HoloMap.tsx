@@ -370,6 +370,7 @@ function HoloScene({ view, filters }: { view: RefObject<HoloView>; filters: MapF
       <PlayerMarker view={view} />
       <AmmoMarkers view={view} />
       {filters.pois && <PoiMarkers view={view} />}
+      <CensusLayer filters={filters} />
       <BlipLayer filters={filters} />
       {filters.zones && <ZoneLabels />}
       <DistrictLabels />
@@ -902,6 +903,86 @@ interface BlipTrack {
 
 /** Scratch color for per-blip brightness scaling (no per-frame allocs). */
 const blipScratchColor = new THREE.Color();
+
+/** Static census of every faction agent as one point cloud, built once when
+ * the census arrives on map open (and rebuilt only when the faction filters
+ * or registry change). These dots don't move or update per-frame — that's
+ * what keeps rendering the whole 25k+ population cheap. Live, moving actors
+ * (players, wild Wapes) come from `BlipLayer` on top of this. */
+function CensusLayer({ filters }: { filters: MapFilters }) {
+  const factions = useGame((s) => s.factions);
+
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setDrawRange(0, 0);
+    return geo;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Agents glow at 1.4x their faction color, matching BlipLayer's agent tint.
+  const palette = useMemo(() => {
+    const agents = new Map<FactionId, THREE.Color>();
+    for (const f of factions) agents.set(f.id, new THREE.Color(f.color).multiplyScalar(1.4));
+    return { agents, fallback: new THREE.Color(0xffffff) };
+  }, [factions]);
+
+  const filtersRef = useRef(filters);
+  filtersRef.current = filters;
+  const seenVersion = useRef(-1);
+  const dirty = useRef(true);
+  // Filter toggles and registry changes force a rebuild; the census content
+  // itself changes only on map open (censusVersion bump), caught in useFrame.
+  useEffect(() => {
+    dirty.current = true;
+  }, [filters, palette]);
+
+  useFrame(() => {
+    if (game.mapIntel.censusVersion !== seenVersion.current) {
+      seenVersion.current = game.mapIntel.censusVersion;
+      dirty.current = true;
+    }
+    if (!dirty.current) return;
+    dirty.current = false;
+
+    const census = game.mapIntel.census;
+    const f = filtersRef.current;
+    let n = 0;
+    for (const b of census) if (factionOn(f, b.faction)) n++;
+    const pos = new Float32Array(n * 3);
+    const col = new Float32Array(n * 3);
+    let i = 0;
+    for (const b of census) {
+      if (!factionOn(f, b.faction)) continue;
+      const c = palette.agents.get(b.faction) ?? palette.fallback;
+      pos[i * 3] = b.x;
+      pos[i * 3 + 1] = 12;
+      pos[i * 3 + 2] = b.z;
+      col[i * 3] = c.r;
+      col[i * 3 + 1] = c.g;
+      col[i * 3 + 2] = c.b;
+      i++;
+    }
+    geometry.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    geometry.setDrawRange(0, i);
+  });
+
+  useEffect(() => () => geometry.dispose(), [geometry]);
+
+  return (
+    <points geometry={geometry} frustumCulled={false} renderOrder={7}>
+      <pointsMaterial
+        size={4}
+        sizeAttenuation={false}
+        vertexColors
+        transparent
+        depthTest={false}
+        depthWrite={false}
+        blending={THREE.AdditiveBlending}
+      />
+    </points>
+  );
+}
 
 /** Whole-map actor blips from the MapIntel stream, as one point cloud.
  * Players read bright cyan-white, agents their faction color, and wild Wapes

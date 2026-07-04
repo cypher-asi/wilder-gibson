@@ -186,7 +186,11 @@ pub enum S2C {
     /// (throttled) while new fills land for the watched kind.
     ItemMarketState(ItemMarketState),
     /// Whole-map actor blips, streamed ~1 Hz to `MapIntelSub` subscribers.
+    /// Only players and wild Wapes; faction agents ship once as `MapCensus`.
     MapIntel { blips: Vec<AgentBlip> },
+    /// One-time full census of every living faction agent, sent when the map
+    /// opens. Static (no interpolation), so the wire form drops `id`/`count`.
+    MapCensus { blips: Vec<AgentBlip> },
     /// Leaderboards + faction/guild standings, refreshed for economy
     /// dashboard subscribers.
     LeaderboardState(LeaderboardData),
@@ -414,6 +418,7 @@ pub fn decode<'a, T: Deserialize<'a>>(text: &'a str) -> Result<T, serde_json::Er
 /// Frame tags (first byte of a binary frame).
 const BIN_SNAPSHOT: u8 = 1;
 const BIN_MAP_INTEL: u8 = 2;
+const BIN_MAP_CENSUS: u8 = 3;
 
 /// Bytes per entity in a binary Snapshot: u64 id, i32 cm x/y/z, i16 centirad
 /// yaw, u8 anim, u8 health, u8 shield.
@@ -421,6 +426,10 @@ const SNAP_ENTITY_BYTES: usize = 8 + 12 + 2 + 3;
 /// Bytes per blip in a binary MapIntel: u64 id, u8 faction, u8 kind,
 /// i16 x/z (meters), u16 count.
 const INTEL_BLIP_BYTES: usize = 8 + 1 + 1 + 4 + 2;
+/// Bytes per blip in a binary MapCensus: u8 faction, u8 kind, i16 x/z
+/// (meters). Static dots need no id or cluster count, so this stays tiny
+/// (~150 KB for 25k agents in a single one-time frame).
+const CENSUS_BLIP_BYTES: usize = 1 + 1 + 4;
 
 /// Stable wire code for an animation state (append-only; the client maps
 /// codes back by index).
@@ -493,6 +502,18 @@ pub fn encode_binary(msg: &S2C) -> Option<Vec<u8>> {
             }
             Some(buf)
         }
+        S2C::MapCensus { blips } => {
+            let mut buf = Vec::with_capacity(1 + 4 + blips.len() * CENSUS_BLIP_BYTES);
+            buf.push(BIN_MAP_CENSUS);
+            buf.extend_from_slice(&(blips.len() as u32).to_le_bytes());
+            for b in blips {
+                buf.push(b.faction);
+                buf.push(b.kind);
+                buf.extend_from_slice(&b.x.to_le_bytes());
+                buf.extend_from_slice(&b.z.to_le_bytes());
+            }
+            Some(buf)
+        }
         _ => None,
     }
 }
@@ -558,6 +579,29 @@ pub fn decode_binary(buf: &[u8]) -> Option<S2C> {
                 });
             }
             Some(S2C::MapIntel { blips })
+        }
+        BIN_MAP_CENSUS => {
+            if rest.len() < 4 {
+                return None;
+            }
+            let count = rd_u32(rest, 0) as usize;
+            let body = &rest[4..];
+            if body.len() != count * CENSUS_BLIP_BYTES {
+                return None;
+            }
+            let mut blips = Vec::with_capacity(count);
+            for i in 0..count {
+                let o = i * CENSUS_BLIP_BYTES;
+                blips.push(AgentBlip {
+                    id: 0,
+                    faction: body[o],
+                    kind: body[o + 1],
+                    x: rd_i16(body, o + 2),
+                    z: rd_i16(body, o + 4),
+                    count: 1,
+                });
+            }
+            Some(S2C::MapCensus { blips })
         }
         _ => None,
     }
@@ -664,6 +708,31 @@ mod tests {
 
         // Cold messages stay JSON.
         assert!(encode_binary(&S2C::Ping { nonce: 1 }).is_none());
+    }
+
+    #[test]
+    fn binary_map_census_roundtrip() {
+        let census = S2C::MapCensus {
+            blips: vec![
+                AgentBlip { id: 0, faction: FACTION_REBELS, kind: 1, x: 900, z: -4200, count: 1 },
+                AgentBlip { id: 0, faction: FACTION_FORUM, kind: 1, x: -32000, z: 14000, count: 1 },
+            ],
+        };
+        let buf = encode_binary(&census).expect("map census is a hot message");
+        // 6 bytes per blip, no per-blip id/count on the wire.
+        assert_eq!(buf.len(), 1 + 4 + 2 * CENSUS_BLIP_BYTES);
+        match decode_binary(&buf).unwrap() {
+            S2C::MapCensus { blips } => {
+                assert_eq!(blips.len(), 2);
+                assert_eq!(blips[0].faction, FACTION_REBELS);
+                assert_eq!(blips[0].x, 900);
+                assert_eq!(blips[0].z, -4200);
+                assert_eq!(blips[1].faction, FACTION_FORUM);
+                assert_eq!(blips[1].x, -32000);
+                assert_eq!(blips[1].z, 14000);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

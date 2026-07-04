@@ -26,8 +26,8 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<S2C>();
     let send_task = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
-            // Hot per-tick messages (Snapshot, MapIntel) go as compact binary
-            // frames; everything else stays JSON text.
+            // Hot messages (Snapshot, MapIntel, MapCensus) go as compact
+            // binary frames; everything else stays JSON text.
             let frame = match encode_binary(&msg) {
                 Some(bytes) => Message::Binary(bytes.into()),
                 None => Message::Text(encode(&msg).into()),

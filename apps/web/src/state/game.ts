@@ -208,7 +208,13 @@ export const game = {
    * it from useFrame, and a reactive set at stream rate re-rendered React
    * five times a second for data no component tree depends on.
    */
-  mapIntel: { blips: [] as AgentBlip[], version: 0 },
+  mapIntel: {
+    blips: [] as AgentBlip[],
+    version: 0,
+    /** One-time full census of faction agents (static dots), set on map open. */
+    census: [] as AgentBlip[],
+    censusVersion: 0,
+  },
   /** Active connection sender (set by GameConnection.connect). */
   send: null as ((msg: import("../net/protocol").C2S) => void) | null,
 
@@ -235,6 +241,8 @@ export const game = {
     this.fx = [];
     this.mapIntel.blips = [];
     this.mapIntel.version++;
+    this.mapIntel.census = [];
+    this.mapIntel.censusVersion++;
     // Note: `send` is intentionally preserved; it is replaced on reconnect.
   },
 };
