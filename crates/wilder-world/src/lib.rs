@@ -630,7 +630,9 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
 /// they feed the congestion counter that spreads agents across services.
 fn goal_service_target(goal: Goal) -> Option<EntityId> {
     match goal {
-        Goal::Sell { store, .. } | Goal::Buy { store, .. } => Some(store),
+        Goal::Sell { store, .. } | Goal::Buy { store, .. } | Goal::Bank { store, .. } => {
+            Some(store)
+        }
         Goal::Craft { station, .. } => Some(station),
         _ => None,
     }
@@ -915,13 +917,17 @@ struct Player {
     /// Cached death-safe banked MILD (write-through to the store). Deposited
     /// and withdrawn at a Bank; never lost on death.
     bank: u32,
-    /// Cached salvage currency (write-through to the store).
+    /// Cached salvage currency (write-through to the store). At-risk on death.
     shards: u32,
-    /// Cached charge currency (write-through to the store).
+    /// Cached death-safe banked Shards.
+    bank_shards: u32,
+    /// Cached charge currency (write-through to the store). At-risk on death.
     energy: u32,
-    /// Last (wild, bank, shards, energy) sent as a WalletUpdate; None forces
-    /// the initial send after join. Checked once per tick in replicate().
-    wallet_sent: Option<(u32, u32, u32, u32)>,
+    /// Cached death-safe banked Energy.
+    bank_energy: u32,
+    /// Last (wild, bank, shards, bank_shards, energy, bank_energy) sent as a
+    /// WalletUpdate; None forces the initial send. Checked in replicate().
+    wallet_sent: Option<(u32, u32, u32, u32, u32, u32)>,
     /// Quantized state last sent per entity: replicate() sends an entity in
     /// the tick snapshot only when this changed (delta replication). Loot,
     /// statics and idle actors cost nothing per tick.
@@ -1448,11 +1454,11 @@ impl World {
         }
 
         // One-time MILD grant per account (tracked in world meta).
-        let (mut wallet, bank, shards, energy) = self
+        let (mut wallet, bank, shards, bank_shards, energy, bank_energy) = self
             .store
             .account_by_id(account)
-            .map(|a| (a.wallet, a.bank, a.shards, a.energy))
-            .unwrap_or((0, 0, 0, 0));
+            .map(|a| (a.wallet, a.bank, a.shards, a.bank_shards, a.energy, a.bank_energy))
+            .unwrap_or((0, 0, 0, 0, 0, 0));
         let grant_key = format!("wallet_granted_{account}");
         let granted: bool = self.store.meta(&grant_key).ok().flatten().unwrap_or(false);
         if !granted {
@@ -1507,7 +1513,9 @@ impl World {
             wallet,
             bank,
             shards,
+            bank_shards,
             energy,
+            bank_energy,
             wallet_sent: None,
             sent_snaps: HashMap::new(),
             map_intel: false,
@@ -3309,6 +3317,10 @@ impl World {
             offers,
             wallet: player.wallet,
             bank: player.bank,
+            shards: player.shards,
+            bank_shards: player.bank_shards,
+            energy: player.energy,
+            bank_energy: player.bank_energy,
         });
     }
 
@@ -3476,45 +3488,69 @@ impl World {
                 self.distribute_commerce(pos, fee, vendor_agent, true);
                 Ok(())
             }
-            VendorAction::Deposit { amount } => {
+            VendorAction::Deposit { currency, amount } => {
                 if kind != EntityKind::Bank {
                     return Err("only a Bank holds deposits".into());
                 }
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                let amount = amount.min(player.wallet);
-                if amount == 0 {
-                    return Err("no MILD to deposit".into());
-                }
-                player.wallet -= amount;
-                player.bank += amount;
-                let account = player.character.account_id;
-                let (wallet, bank) = (player.wallet, player.bank);
-                player.dirty = true;
-                // MILD stays in supply — it just moves from the at-risk wallet
-                // into the death-safe vault, so there's no mint/burn to record.
-                let _ = self.store.update_wallet(account, wallet);
-                let _ = self.store.update_bank(account, bank);
-                Ok(())
+                self.move_to_bank(entity, currency, amount, true)
             }
-            VendorAction::Withdraw { amount } => {
+            VendorAction::Withdraw { currency, amount } => {
                 if kind != EntityKind::Bank {
                     return Err("only a Bank holds deposits".into());
                 }
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                let amount = amount.min(player.bank);
-                if amount == 0 {
-                    return Err("nothing banked to withdraw".into());
-                }
-                player.bank -= amount;
-                player.wallet += amount;
-                let account = player.character.account_id;
-                let (wallet, bank) = (player.wallet, player.bank);
-                player.dirty = true;
-                let _ = self.store.update_wallet(account, wallet);
-                let _ = self.store.update_bank(account, bank);
-                Ok(())
+                self.move_to_bank(entity, currency, amount, false)
             }
         }
+    }
+
+    /// Move `amount` of a currency between a player's at-risk carried balance
+    /// and their death-safe bank vault (`deposit` picks the direction). The
+    /// currency never leaves supply — it just changes its exposure to death —
+    /// so no ledger leg is recorded. Write-through to the account store.
+    fn move_to_bank(
+        &mut self,
+        entity: EntityId,
+        currency: wilder_protocol::Currency,
+        amount: u32,
+        deposit: bool,
+    ) -> Result<(), String> {
+        use wilder_protocol::Currency as Cur;
+        let player = self.players.get_mut(&entity).ok_or("not in world")?;
+        // (carried, banked) balance pointers for the chosen currency.
+        let (carried, banked): (&mut u32, &mut u32) = match currency {
+            Cur::Mild => (&mut player.wallet, &mut player.bank),
+            Cur::Shards => (&mut player.shards, &mut player.bank_shards),
+            Cur::Energy => (&mut player.energy, &mut player.bank_energy),
+        };
+        let (src, dst) = if deposit { (carried, banked) } else { (banked, carried) };
+        let amount = amount.min(*src);
+        if amount == 0 {
+            return Err(if deposit { "nothing to deposit" } else { "nothing banked" }.into());
+        }
+        *src -= amount;
+        *dst += amount;
+        let account = player.character.account_id;
+        player.dirty = true;
+        let (wallet, bank, shards, bank_shards, energy, bank_energy) = (
+            player.wallet,
+            player.bank,
+            player.shards,
+            player.bank_shards,
+            player.energy,
+            player.bank_energy,
+        );
+        // Persist whichever pair of balances this currency lives in.
+        match currency {
+            Cur::Mild => {
+                let _ = self.store.update_wallet(account, wallet);
+                let _ = self.store.update_bank(account, bank);
+            }
+            Cur::Shards | Cur::Energy => {
+                let _ = self.store.update_currencies(account, shards, energy);
+                let _ = self.store.update_bank_currencies(account, bank_shards, bank_energy);
+            }
+        }
+        Ok(())
     }
 
     /// Route a commerce cut to whoever holds the territory it happened in:
@@ -4164,6 +4200,13 @@ impl World {
                 dropped.push(stack);
             }
         }
+        // Carried currency is at-risk too: MILD, Shards and Energy all burn on
+        // death (only the banked portion is safe). Coin doesn't scatter as
+        // loot — it's simply gone from supply.
+        let account = player.character.account_id;
+        let lost_wallet = std::mem::take(&mut player.wallet);
+        let lost_shards = std::mem::take(&mut player.shards);
+        let lost_energy = std::mem::take(&mut player.energy);
         // Ledger: everything in the backpack burns out of supply on death.
         // The physical drop is salvage — whoever picks it up re-mints it,
         // attributed as a transfer from the dead player.
@@ -4176,6 +4219,37 @@ impl World {
                 TxAmount::Item { kind: stack.kind, count: stack.count },
                 0,
             );
+        }
+        if lost_wallet > 0 {
+            self.ledger.record(
+                TxKind::Burn,
+                victim.clone(),
+                TxParty::Burn,
+                TxAmount::Wild { amount: lost_wallet },
+                0,
+            );
+            let _ = self.store.update_wallet(account, 0);
+        }
+        if lost_shards > 0 {
+            self.ledger.record(
+                TxKind::Burn,
+                victim.clone(),
+                TxParty::Burn,
+                TxAmount::Shards { amount: lost_shards },
+                0,
+            );
+        }
+        if lost_energy > 0 {
+            self.ledger.record(
+                TxKind::Burn,
+                victim.clone(),
+                TxParty::Burn,
+                TxAmount::Energy { amount: lost_energy },
+                0,
+            );
+        }
+        if lost_shards > 0 || lost_energy > 0 {
+            let _ = self.store.update_currencies(account, 0, 0);
         }
         self.ledger.deaths += 1;
         // Equipped gear survives (jacket stays on your back).
@@ -4791,6 +4865,15 @@ impl World {
                 0,
             );
         }
+        // Accumulated savings survive death: pull a comeback stake from the
+        // vault into the fresh wallet so a proven earner returns funded rather
+        // than broke. Whatever stays banked keeps riding along, still safe.
+        // Internal move (agent-held either way), so no mint/burn is recorded.
+        let comeback = self.agents[idx].bank.min(agents::AGENT_COMEBACK_WITHDRAW);
+        if comeback > 0 {
+            self.agents[idx].bank -= comeback;
+            self.agents[idx].wallet += comeback;
+        }
     }
 
     /// Staging position for a district (near its service cluster). Always on
@@ -4956,10 +5039,23 @@ impl World {
             }
         }
 
-        // Safety overrides: hurt or flush agents fall back to a sanctuary.
-        if health_frac < RETREAT_HEALTH_PCT || (wallet > WEALTH_RETREAT && retreat_cd <= 0.0) {
+        // Safety override: hurt agents fall back to a sanctuary and heal.
+        if health_frac < RETREAT_HEALTH_PCT {
             let to = self.nearest_sanctuary_spot(pos);
             self.commit_goal(idx, Goal::Retreat { to });
+            return;
+        }
+        // Wealth override: a flush agent hauls its at-risk wallet to a Bank and
+        // vaults it (death-safe). Carrying it into the field risks losing the
+        // lot on death, so securing it is the rational move. No Bank reachable
+        // → fall back to the old behavior and wait it out in a sanctuary.
+        if wallet > WEALTH_RETREAT && retreat_cd <= 0.0 {
+            if let Some((store, store_pos, _)) = self.route_service(pos, EntityKind::Bank) {
+                self.commit_goal(idx, Goal::Bank { store, store_pos });
+            } else {
+                let to = self.nearest_sanctuary_spot(pos);
+                self.commit_goal(idx, Goal::Retreat { to });
+            }
             return;
         }
 
@@ -5427,8 +5523,25 @@ impl World {
             Goal::Trade { .. } => self.agent_trade(idx),
             Goal::Craft { .. } => self.agent_craft_step(idx),
             Goal::Loot { container, .. } => self.agent_loot_pickup(idx, container),
+            Goal::Bank { .. } => self.agent_bank_deposit(idx),
             _ => {}
         }
+    }
+
+    /// Vault the agent's at-risk wallet (above its operating float) into its
+    /// death-safe bank balance. Reached the Bank counter. The MILD stays in
+    /// supply — it's still agent-held — so there's no ledger leg; only its
+    /// exposure to death changes.
+    fn agent_bank_deposit(&mut self, idx: usize) {
+        let agent = &mut self.agents[idx];
+        let deposit = agent.wallet.saturating_sub(agents::AGENT_BANK_KEEP);
+        if deposit > 0 {
+            agent.wallet -= deposit;
+            agent.bank += deposit;
+        }
+        // Vaulted: suppress another wealth run for a while, then back to work.
+        agent.retreat_cooldown = agents::RETREAT_COOLDOWN;
+        agent.goal = Goal::Idle;
     }
 
     /// Drain a loot container into the agent's pack (it walked onto the
@@ -6099,6 +6212,7 @@ impl World {
                     home,
                     home_spot,
                     wallet: 0,
+                    bank: 0,
                     inventory: Vec::new(),
                     position,
                     health: 100.0,
@@ -6422,7 +6536,7 @@ impl World {
                 name: p.character.name.clone(),
                 faction: FACTION_REBELS,
                 guild: None,
-                wealth: p.wallet as i64,
+                wealth: p.wallet as i64 + p.bank as i64,
             });
         }
         for a in &self.agents {
@@ -6434,7 +6548,7 @@ impl World {
                 name: a.name.clone(),
                 faction: a.faction,
                 guild: Some(a.guild.clone()),
-                wealth: a.wallet as i64 + a.carried_value() as i64,
+                wealth: a.wallet as i64 + a.bank as i64 + a.carried_value() as i64,
             });
         }
         let mut regions_by_faction: HashMap<FactionId, u32> = HashMap::new();
@@ -7062,14 +7176,23 @@ impl World {
         for player in self.players.values_mut() {
             // Push currency balances whenever any of them changed (join,
             // vendor/market/bank flows, salvage, energy grants).
-            let balances = (player.wallet, player.bank, player.shards, player.energy);
+            let balances = (
+                player.wallet,
+                player.bank,
+                player.shards,
+                player.bank_shards,
+                player.energy,
+                player.bank_energy,
+            );
             if player.wallet_sent != Some(balances) {
                 player.wallet_sent = Some(balances);
                 let _ = player.tx.send(S2C::WalletUpdate {
                     wild: balances.0,
                     bank: balances.1,
                     shards: balances.2,
-                    energy: balances.3,
+                    bank_shards: balances.3,
+                    energy: balances.4,
+                    bank_energy: balances.5,
                 });
             }
             let mut visible: Vec<EntitySnapshot> = Vec::new();
@@ -7433,6 +7556,7 @@ pub mod bench {
                 Goal::Capture { .. } => "capture",
                 Goal::Defend { .. } => "defend",
                 Goal::Retreat { .. } => "retreat",
+                Goal::Bank { .. } => "bank",
             };
             *goal_counts.entry(label).or_insert(0) += 1;
         }
@@ -7652,6 +7776,7 @@ mod tests {
                 home: 0,
                 home_spot: None,
                 wallet: 100,
+                bank: 0,
                 inventory: vec![ItemStack { kind: ItemKind::Pipe, count: 1 }],
                 position,
                 health: 100.0,
@@ -7847,7 +7972,9 @@ mod tests {
                 wallet: 0,
                 bank: 0,
                 shards: 0,
+                bank_shards: 0,
                 energy: 0,
+                bank_energy: 0,
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
@@ -7898,6 +8025,67 @@ mod tests {
     }
 
     #[test]
+    fn banked_wealth_survives_death_and_funds_comeback() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::gatherer(), contested);
+        // Savings in the vault, at-risk MILD in the wallet on top.
+        world.agents[idx].bank = 500;
+        world.agents[idx].wallet = 200;
+        // Death burns the carried wallet but never touches the vault.
+        world.kill_agent(idx, false);
+        assert_eq!(world.agents[idx].wallet, 0, "carried wallet burns on death");
+        assert_eq!(world.agents[idx].bank, 500, "banked MILD is safe from death");
+        // Respawn pulls a comeback stake out of the vault into the fresh wallet.
+        world.agents[idx].respawn_in = 0.0;
+        world.respawn_agent(idx);
+        assert!(
+            world.agents[idx].wallet >= agents::AGENT_COMEBACK_WITHDRAW,
+            "respawn should fund the wallet from the vault"
+        );
+        assert_eq!(
+            world.agents[idx].bank,
+            500 - agents::AGENT_COMEBACK_WITHDRAW,
+            "the comeback stake comes out of the vault"
+        );
+    }
+
+    #[test]
+    fn agent_wealth_run_vaults_the_wallet() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        // Stand an agent on a Bank counter so the deposit executes on arrival.
+        let bank_pos = world
+            .services_by_kind
+            .get(&EntityKind::Bank)
+            .and_then(|v| v.first())
+            .map(|&(_, p)| p)
+            .expect("a Bank was seeded");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), bank_pos);
+        world.agents[idx].wallet = WEALTH_RETREAT + 400;
+        world.agents[idx].retreat_cooldown = 0.0;
+        world.agents[idx].health = world.agents[idx].max_health;
+        // Decide → wealth override routes to the Bank; then execute the deposit.
+        world.decide_agent(idx);
+        assert!(
+            matches!(world.agents[idx].goal, Goal::Bank { .. }),
+            "a flush agent should choose a bank run"
+        );
+        world.agent_bank_deposit(idx);
+        assert_eq!(
+            world.agents[idx].wallet,
+            agents::AGENT_BANK_KEEP,
+            "deposit leaves only the operating float in the wallet"
+        );
+        assert_eq!(
+            world.agents[idx].bank,
+            WEALTH_RETREAT + 400 - agents::AGENT_BANK_KEEP,
+            "everything above the float is vaulted"
+        );
+    }
+
+    #[test]
     fn agent_positions_and_destinations_stay_on_walkable_land() {
         let (mut world, _dir) = test_world();
         world.seed_neighborhood_stores();
@@ -7939,6 +8127,7 @@ mod tests {
             home: 7, // NORTH STAR
             home_spot: None,
             wallet: 50,
+            bank: 0,
             inventory: Vec::new(),
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
@@ -8177,7 +8366,9 @@ mod tests {
                 wallet: 0,
                 bank: 0,
                 shards: 0,
+                bank_shards: 0,
                 energy: 0,
+                bank_energy: 0,
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,

@@ -7,7 +7,7 @@ import { nearestDoor } from "../render/Interior";
 import { RECIPES, RESEARCH_FRAGMENTS, RESEARCH_RESOURCES } from "../game/recipes";
 import { allRegions, MY_FACTION, regionOf, territoryControl } from "../game/territory";
 import { GameConnection } from "../net/connection";
-import { AbilityKind, ItemKind } from "../net/protocol";
+import { AbilityKind, Currency, ItemKind } from "../net/protocol";
 import { cameraState } from "../render/CameraRig";
 import { activeWeaponKind, consumableHotbar, game, useGame } from "../state/game";
 import { ChatWindow } from "./ChatWindow";
@@ -240,12 +240,29 @@ function VitalsPanel() {
   );
 }
 
-/** Currency chips under the vitals: MILD / Shards / Energy balances. */
+/** A small dim "+N" badge showing the death-safe banked portion of a currency. */
+function BankedBadge({ amount }: { amount: number }) {
+  if (amount <= 0) return null;
+  return (
+    <span
+      title="Banked — safe from death (withdraw at a Bank)"
+      style={{ fontSize: 9, color: "var(--text-dim)", marginLeft: 3 }}
+    >
+      +{amount.toLocaleString("en-US")}▪
+    </span>
+  );
+}
+
+/** Currency chips under the vitals: MILD / Shards / Energy. The plain value is
+ * the at-risk carried amount (lost on death); the dim "+N" badge is banked. */
 function CurrencyPanel() {
   const wallet = useGame((s) => s.wallet);
   return (
     <div className="currency-panel">
-      <div className="currency-chip wild" title="MILD — soft currency (market, vendors)">
+      <div
+        className="currency-chip wild"
+        title="MILD — soft currency (market, vendors). Carried MILD is lost on death; bank it to keep it."
+      >
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
           <path
             d="M10 1.5 L17.5 6 v8 L10 18.5 L2.5 14 v-8 Z"
@@ -263,21 +280,30 @@ function CurrencyPanel() {
           />
         </svg>
         <span className="currency-value">{(wallet?.wild ?? 0).toLocaleString("en-US")}</span>
+        <BankedBadge amount={wallet?.bank ?? 0} />
         <span className="currency-name">MILD</span>
       </div>
-      <div className="currency-chip shards" title="Shards — salvage from destroyed items">
+      <div
+        className="currency-chip shards"
+        title="Shards — salvage from destroyed items. Carried Shards are lost on death; bank them to keep them."
+      >
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
           <path d="M10 1.5 L14.5 8 L10 18.5 L5.5 8 Z" fill="currentColor" opacity="0.85" />
           <path d="M10 1.5 L14.5 8 L10 10.5 L5.5 8 Z" fill="currentColor" />
         </svg>
         <span className="currency-value">{(wallet?.shards ?? 0).toLocaleString("en-US")}</span>
+        <BankedBadge amount={wallet?.bank_shards ?? 0} />
         <span className="currency-name">SHARDS</span>
       </div>
-      <div className="currency-chip energy" title="Energy — charge from extractions and ammo caches">
+      <div
+        className="currency-chip energy"
+        title="Energy — charge from extractions and ammo caches. Carried Energy is lost on death; bank it to keep it."
+      >
         <svg viewBox="0 0 20 20" width={14} height={14} aria-hidden="true">
           <path d="M11.5 1.5 L4.5 11.5 h4 L8 18.5 L15.5 8.5 h-4 Z" fill="currentColor" />
         </svg>
         <span className="currency-value">{(wallet?.energy ?? 0).toLocaleString("en-US")}</span>
+        <BankedBadge amount={wallet?.bank_energy ?? 0} />
         <span className="currency-name">ENERGY</span>
       </div>
     </div>
@@ -990,6 +1016,8 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
   const vendor = useGame((s) => s.vendor);
   const inventory = useGame((s) => s.inventory);
   const set = useGame((s) => s.set);
+  const [bankAmount, setBankAmount] = useState("");
+  const [bankCurrency, setBankCurrency] = useState<Currency>("Mild");
 
   if (!nearVendor) return null;
   const style = POI_STYLES[nearVendor.kind];
@@ -1017,7 +1045,7 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
           connection.send({ t: "Interact", d: { entity_id: nearVendor.id } });
         }}
       >
-        {label} — {isBank ? "[E] CONVERT CASH" : "[E] TRADE"}
+        {label} — {isBank ? "[E] BANK" : "[E] TRADE"}
       </div>
     );
   }
@@ -1041,11 +1069,144 @@ function VendorPanel({ connection }: { connection: GameConnection }) {
   );
 
   if (isBank) {
+    const v = vendor?.id === nearVendor.id ? vendor : null;
+    const CURRENCIES: { id: Currency; label: string }[] = [
+      { id: "Mild", label: "MILD" },
+      { id: "Shards", label: "SHARDS" },
+      { id: "Energy", label: "ENERGY" },
+    ];
+    const carried =
+      v == null
+        ? null
+        : bankCurrency === "Mild"
+          ? v.wallet
+          : bankCurrency === "Shards"
+            ? v.shards
+            : v.energy;
+    const banked =
+      v == null
+        ? null
+        : bankCurrency === "Mild"
+          ? v.bank
+          : bankCurrency === "Shards"
+            ? v.bank_shards
+            : v.bank_energy;
+    const amt = Math.max(0, Math.floor(Number(bankAmount) || 0));
+    const canDeposit = amt > 0 && (carried ?? 0) >= amt;
+    const canWithdraw = amt > 0 && (banked ?? 0) >= amt;
+    const label = CURRENCIES.find((c) => c.id === bankCurrency)?.label ?? "";
+    const actionStyle = (enabled: boolean) => ({
+      fontSize: 10,
+      textAlign: "center" as const,
+      color: enabled ? "var(--accent)" : "var(--text-dim)",
+      border: `1px solid ${enabled ? "var(--accent-dim)" : "var(--steel-border)"}`,
+      padding: "4px 8px",
+      cursor: enabled ? "pointer" : "default",
+      flex: 1,
+    });
     return (
       <div className="inventory" style={{ right: "auto", left: 16, maxWidth: 360 }}>
         {header}
-        <div style={{ fontSize: 12, color: "var(--accent-bright)", marginBottom: 6 }}>
-          Wallet: {wallet ?? "…"} MILD
+        <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 8 }}>
+          Carried currency is lost when you die — only banked balances are safe.
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          {CURRENCIES.map((c) => (
+            <div
+              key={c.id}
+              onClick={() => {
+                setBankCurrency(c.id);
+                setBankAmount("");
+              }}
+              style={{
+                flex: 1,
+                textAlign: "center",
+                fontSize: 10,
+                padding: "4px 6px",
+                cursor: "pointer",
+                color: bankCurrency === c.id ? "var(--accent-bright)" : "var(--text-dim)",
+                borderBottom: `2px solid ${
+                  bankCurrency === c.id ? "var(--accent)" : "transparent"
+                }`,
+              }}
+            >
+              {c.label}
+            </div>
+          ))}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: 12,
+            marginBottom: 8,
+          }}
+        >
+          <span style={{ color: "var(--accent-bright)" }}>
+            Carried: {carried ?? "…"} {label}
+          </span>
+          <span style={{ color: "var(--text)" }}>Vault: {banked ?? "…"}</span>
+        </div>
+        <input
+          type="number"
+          min={0}
+          value={bankAmount}
+          onChange={(e) => setBankAmount(e.target.value)}
+          placeholder="amount"
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            background: "var(--panel-bg, #0a0f14)",
+            border: "1px solid var(--steel-border)",
+            color: "var(--text)",
+            padding: "4px 8px",
+            fontSize: 12,
+            marginBottom: 6,
+          }}
+        />
+        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+          <div
+            style={actionStyle(canDeposit)}
+            onClick={() => {
+              if (canDeposit) {
+                sendVendor({ t: "Deposit", d: { currency: bankCurrency, amount: amt } });
+                setBankAmount("");
+              }
+            }}
+          >
+            DEPOSIT
+          </div>
+          <div
+            style={actionStyle(canWithdraw)}
+            onClick={() => {
+              if (canWithdraw) {
+                sendVendor({ t: "Withdraw", d: { currency: bankCurrency, amount: amt } });
+                setBankAmount("");
+              }
+            }}
+          >
+            WITHDRAW
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <div
+            style={actionStyle((carried ?? 0) > 0)}
+            onClick={() => {
+              if ((carried ?? 0) > 0)
+                sendVendor({ t: "Deposit", d: { currency: bankCurrency, amount: carried ?? 0 } });
+            }}
+          >
+            DEPOSIT ALL
+          </div>
+          <div
+            style={actionStyle((banked ?? 0) > 0)}
+            onClick={() => {
+              if ((banked ?? 0) > 0)
+                sendVendor({ t: "Withdraw", d: { currency: bankCurrency, amount: banked ?? 0 } });
+            }}
+          >
+            WITHDRAW ALL
+          </div>
         </div>
         <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 10 }}>
           Cash converts 1:1 into MILD minus a 10% handling fee. Whoever holds

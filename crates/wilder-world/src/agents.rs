@@ -33,8 +33,14 @@ pub const COLD_TICK_BUDGET: u64 = 1024;
 pub const AGENT_RESPAWN_SECONDS: f32 = 60.0;
 /// Retreat when health drops below this fraction.
 pub const RETREAT_HEALTH_PCT: f32 = 0.4;
-/// Retreat to bank/rest when the wallet exceeds this many MILD.
+/// Bank the wallet down (and rest) when it exceeds this many MILD.
 pub const WEALTH_RETREAT: u32 = 600;
+/// Operating float an agent keeps in its wallet after a bank run (enough to
+/// re-arm and buy meds); everything above this is deposited into the vault.
+pub const AGENT_BANK_KEEP: u32 = 150;
+/// MILD a fresh (respawned) agent pulls from its bank vault to fund the next
+/// life, on top of the minted grubstake. Accumulated savings survive death.
+pub const AGENT_COMEBACK_WITHDRAW: u32 = 300;
 /// Seconds between goal re-scores (staggered per agent).
 pub const DECISION_SECONDS: (f32, f32) = (1.0, 2.0);
 /// Seconds between gather pulls at a spot.
@@ -236,7 +242,7 @@ pub fn activity_of(goal: Goal) -> Activity {
             Activity::Fight
         }
         Goal::Capture { .. } | Goal::Defend { .. } => Activity::Capture,
-        Goal::Sell { .. } | Goal::Loot { .. } => Activity::Haul,
+        Goal::Sell { .. } | Goal::Loot { .. } | Goal::Bank { .. } => Activity::Haul,
     }
 }
 
@@ -278,6 +284,8 @@ pub enum Goal {
     Retreat { to: Vec3 },
     /// Walk to a dropped loot container and grab its contents.
     Loot { container: EntityId, pos: Vec3 },
+    /// Haul wealth to a Bank and deposit it into the death-safe vault.
+    Bank { store: EntityId, store_pos: Vec3 },
 }
 
 impl Goal {
@@ -296,6 +304,7 @@ impl Goal {
             Goal::Defend { to, .. } => Some(*to),
             Goal::Retreat { to } => Some(*to),
             Goal::Loot { pos, .. } => Some(*pos),
+            Goal::Bank { store_pos, .. } => Some(*store_pos),
         }
     }
 }
@@ -336,6 +345,9 @@ pub struct AgentSave {
     #[serde(default)]
     pub home_spot: Option<Vec3>,
     pub wallet: u32,
+    /// Death-safe banked MILD (survives kills and respawns; funds comebacks).
+    #[serde(default)]
+    pub bank: u32,
     pub inventory: Vec<ItemStack>,
     pub position: Vec3,
     pub health: f32,
@@ -422,6 +434,9 @@ pub struct FactionAgent {
     /// anchor). `None` = stage at the home district's spot.
     pub home_spot: Option<Vec3>,
     pub wallet: u32,
+    /// Death-safe banked MILD: never burns on death. Deposited during wealth
+    /// runs; partially withdrawn to fund the next life on respawn.
+    pub bank: u32,
     pub inventory: Vec<ItemStack>,
     pub position: Vec3,
     pub yaw: f32,
@@ -621,6 +636,7 @@ impl FactionAgent {
             home: self.home,
             home_spot: self.home_spot,
             wallet: self.wallet,
+            bank: self.bank,
             inventory: self.inventory.clone(),
             position: self.position,
             health: self.health,
@@ -639,6 +655,7 @@ impl FactionAgent {
             home: save.home,
             home_spot: save.home_spot,
             wallet: save.wallet,
+            bank: save.bank,
             inventory: save.inventory,
             position: save.position,
             yaw: 0.0,
@@ -868,6 +885,7 @@ impl FactionAgent {
             }
             Goal::Sell { store_pos, .. }
             | Goal::Buy { store_pos, .. }
+            | Goal::Bank { store_pos, .. }
             | Goal::BuyMarket { terminal_pos: store_pos, .. }
             | Goal::Trade { terminal_pos: store_pos } => {
                 if self.move_toward(world, store_pos, 3.0, dt, hot) <= 5.0 {
@@ -1000,6 +1018,7 @@ mod tests {
                 home: 4,
                 home_spot: None,
                 wallet: 80,
+                bank: 0,
                 inventory: vec![ItemStack { kind: ItemKind::Iron, count: 5 }],
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,

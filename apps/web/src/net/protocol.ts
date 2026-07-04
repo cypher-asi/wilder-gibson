@@ -259,10 +259,15 @@ export type MarketActionMsg =
   | Tagged<"Cancel", { listing_id: number }>
   | TaggedUnit<"Refresh">;
 
+/** A bankable currency (at-risk when carried, safe when banked). */
+export type Currency = "Mild" | "Shards" | "Energy";
+
 export type VendorActionMsg =
   | Tagged<"Buy", { kind: ItemKind; count: number }>
   | Tagged<"Sell", { kind: ItemKind; count: number }>
   | Tagged<"Convert", { count: number }>
+  | Tagged<"Deposit", { currency: Currency; amount: number }>
+  | Tagged<"Withdraw", { currency: Currency; amount: number }>
   | TaggedUnit<"Refresh">;
 
 export type C2S =
@@ -570,7 +575,17 @@ export type S2C =
       "XpUpdate",
       { xp: number; level: number; next_level_xp: number; gained: number }
     >
-  | Tagged<"WalletUpdate", { wild: number; shards: number; energy: number }>
+  | Tagged<
+      "WalletUpdate",
+      {
+        wild: number;
+        bank: number;
+        shards: number;
+        bank_shards: number;
+        energy: number;
+        bank_energy: number;
+      }
+    >
   | Tagged<
       "AbilityUpdate",
       { ability: AbilityKind; cooldown: number; active: number }
@@ -586,7 +601,17 @@ export type S2C =
   | Tagged<"MarketResult", { ok: boolean; error: string | null }>
   | Tagged<
       "VendorState",
-      { vendor: number; kind: EntityKind; offers: VendorOffer[]; wallet: number }
+      {
+        vendor: number;
+        kind: EntityKind;
+        offers: VendorOffer[];
+        wallet: number;
+        bank: number;
+        shards: number;
+        bank_shards: number;
+        energy: number;
+        bank_energy: number;
+      }
     >
   | Tagged<"VendorResult", { ok: boolean; error: string | null }>
   | Tagged<

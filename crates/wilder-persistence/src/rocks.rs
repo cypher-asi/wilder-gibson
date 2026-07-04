@@ -102,7 +102,9 @@ impl CharacterStore for RocksStore {
             wallet: 0,
             bank: 0,
             shards: 0,
+            bank_shards: 0,
             energy: 0,
+            bank_energy: 0,
         };
         self.put_json(CF_ACCOUNTS, account.id.as_bytes(), &account)?;
         self.put_json(CF_USERNAME_INDEX, key.as_bytes(), &account.id)?;
@@ -138,6 +140,18 @@ impl CharacterStore for RocksStore {
         let mut account = self.account_by_id(id)?;
         account.shards = shards;
         account.energy = energy;
+        self.put_json(CF_ACCOUNTS, id.as_bytes(), &account)
+    }
+
+    fn update_bank_currencies(
+        &self,
+        id: AccountId,
+        bank_shards: u32,
+        bank_energy: u32,
+    ) -> StoreResult<()> {
+        let mut account = self.account_by_id(id)?;
+        account.bank_shards = bank_shards;
+        account.bank_energy = bank_energy;
         self.put_json(CF_ACCOUNTS, id.as_bytes(), &account)
     }
 
@@ -255,6 +269,22 @@ mod tests {
             s.create_account("NEO", "other"),
             Err(StoreError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn banked_balances_roundtrip() {
+        let (_dir, s) = store();
+        let a = s.create_account("Vault", "h").unwrap();
+        assert_eq!((a.bank, a.bank_shards, a.bank_energy), (0, 0, 0));
+        s.update_wallet(a.id, 900).unwrap();
+        s.update_bank(a.id, 400).unwrap();
+        s.update_currencies(a.id, 12, 7).unwrap();
+        s.update_bank_currencies(a.id, 3, 5).unwrap();
+        let got = s.account_by_id(a.id).unwrap();
+        assert_eq!(got.wallet, 900);
+        assert_eq!(got.bank, 400);
+        assert_eq!((got.shards, got.energy), (12, 7));
+        assert_eq!((got.bank_shards, got.bank_energy), (3, 5));
     }
 
     #[test]

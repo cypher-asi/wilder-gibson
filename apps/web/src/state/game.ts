@@ -482,8 +482,18 @@ interface UiState {
   districts: DistrictInfo[];
   /** Latest leaderboard snapshot (Phase 4 emits). */
   leaderboard: LeaderboardData | null;
-  /** Latest vendor snapshot (offers + wallet) from the server. */
-  vendor: { id: number; kind: EntityKind; offers: VendorOffer[]; wallet: number } | null;
+  /** Latest vendor snapshot (offers + carried/banked balances) from the server. */
+  vendor: {
+    id: number;
+    kind: EntityKind;
+    offers: VendorOffer[];
+    wallet: number;
+    bank: number;
+    shards: number;
+    bank_shards: number;
+    energy: number;
+    bank_energy: number;
+  } | null;
   /** Nearest vendor building in interact range, if any. */
   nearVendor: { kind: EntityKind; id: number } | null;
   /** Vendor panel visibility (auto-closes when leaving the vendor). */
@@ -503,8 +513,16 @@ interface UiState {
   musicOn: boolean;
   /** Left-side pickup feed entries (newest last); expired by the HUD. */
   pickupFeed: PickupFeedEntry[];
-  /** Currency balances (MILD / Shards / Energy) shown under the vitals. */
-  wallet: { wild: number; shards: number; energy: number } | null;
+  /** Currency balances shown under the vitals. For each currency the plain
+   * field is the at-risk carried amount and `bank*` is death-safe banked. */
+  wallet: {
+    wild: number;
+    bank: number;
+    shards: number;
+    bank_shards: number;
+    energy: number;
+    bank_energy: number;
+  } | null;
   /** Active level-up celebration; cleared by the banner after it plays. */
   levelUp: LevelUpEvent | null;
   /** Bouncy currency toasts ("+N MILD"); self-expire in the HUD. */

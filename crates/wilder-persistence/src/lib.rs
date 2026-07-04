@@ -35,12 +35,18 @@ pub struct Account {
     /// Banked MILD: safe from death (deposited/withdrawn at a Bank).
     #[serde(default)]
     pub bank: u32,
-    /// Salvage currency (earned by destroying items).
+    /// Salvage currency (earned by destroying items). At-risk: burns on death.
     #[serde(default)]
     pub shards: u32,
-    /// Charge currency (earned from extractions and ammo caches).
+    /// Banked (death-safe) Shards.
+    #[serde(default)]
+    pub bank_shards: u32,
+    /// Charge currency (earned from extractions and ammo caches). At-risk.
     #[serde(default)]
     pub energy: u32,
+    /// Banked (death-safe) Energy.
+    #[serde(default)]
+    pub bank_energy: u32,
 }
 
 /// Persistent stash (home storage), one per character.
@@ -67,6 +73,9 @@ pub trait CharacterStore: Send + Sync {
     fn update_bank(&self, id: AccountId, bank: u32) -> StoreResult<()>;
     /// Persist the secondary currencies (Shards + Energy).
     fn update_currencies(&self, id: AccountId, shards: u32, energy: u32) -> StoreResult<()>;
+    /// Persist the banked (death-safe) secondary currencies.
+    fn update_bank_currencies(&self, id: AccountId, bank_shards: u32, bank_energy: u32)
+        -> StoreResult<()>;
 
     fn create_character(&self, character: &Character) -> StoreResult<()>;
     fn character(&self, id: CharacterId) -> StoreResult<Character>;

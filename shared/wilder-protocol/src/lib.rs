@@ -93,12 +93,21 @@ pub enum VendorAction {
     Sell { kind: ItemKind, count: u32 },
     /// Bank only: convert carried Cash into wallet MILD (minus the fee).
     Convert { count: u32 },
-    /// Bank only: move `amount` MILD from the at-risk wallet into the
-    /// death-safe bank balance.
-    Deposit { amount: u32 },
-    /// Bank only: move `amount` MILD from the bank back into the wallet.
-    Withdraw { amount: u32 },
+    /// Bank only: move `amount` of `currency` from the at-risk carried balance
+    /// into the death-safe bank vault.
+    Deposit { currency: Currency, amount: u32 },
+    /// Bank only: move `amount` of `currency` from the bank vault back into
+    /// the carried balance.
+    Withdraw { currency: Currency, amount: u32 },
     Refresh,
+}
+
+/// A bankable currency (all three are at-risk when carried, safe when banked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Currency {
+    Mild,
+    Shards,
+    Energy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,9 +148,18 @@ pub enum S2C {
     /// XP/level progression changed (kills grant XP; sent on join too).
     XpUpdate { xp: u32, level: u32, next_level_xp: u32, gained: u32 },
     /// The receiving player's currency balances (sent on join and whenever
-    /// any of them change). `bank` is the death-safe stored MILD; `wild` is
-    /// the at-risk carried wallet.
-    WalletUpdate { wild: u32, bank: u32, shards: u32, energy: u32 },
+    /// any of them change). For each currency the first field is the at-risk
+    /// carried amount and the `bank_*` field is the death-safe banked amount.
+    WalletUpdate {
+        wild: u32,
+        bank: u32,
+        shards: u32,
+        #[serde(default)]
+        bank_shards: u32,
+        energy: u32,
+        #[serde(default)]
+        bank_energy: u32,
+    },
     /// Authoritative ability state for the receiving player (on use + join).
     AbilityUpdate { ability: AbilityKind, cooldown: f32, active: f32 },
     Died { by: Option<String>, lost_items: bool },
@@ -163,9 +181,17 @@ pub enum S2C {
         kind: EntityKind,
         offers: Vec<VendorOffer>,
         wallet: u32,
-        /// Death-safe banked MILD (relevant for the Bank deposit/withdraw UI).
+        /// Death-safe banked balances (for the Bank deposit/withdraw UI).
         #[serde(default)]
         bank: u32,
+        #[serde(default)]
+        shards: u32,
+        #[serde(default)]
+        bank_shards: u32,
+        #[serde(default)]
+        energy: u32,
+        #[serde(default)]
+        bank_energy: u32,
     },
     VendorResult { ok: bool, error: Option<String> },
     /// Persistent points of interest (service buildings) and named resource

@@ -606,6 +606,11 @@ export class GameConnection {
             kind: msg.d.kind,
             offers: msg.d.offers,
             wallet: msg.d.wallet,
+            bank: msg.d.bank,
+            shards: msg.d.shards,
+            bank_shards: msg.d.bank_shards,
+            energy: msg.d.energy,
+            bank_energy: msg.d.bank_energy,
           },
         });
         if (prevWallet !== undefined && msg.d.wallet > prevWallet) {
