@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
-use wilder_protocol::{decode, encode, C2S, S2C};
+use wilder_protocol::{decode, encode, encode_binary, C2S, S2C};
 use wilder_types::EntityId;
 use wilder_world::WorldCmd;
 
@@ -26,8 +26,13 @@ async fn handle_socket(socket: WebSocket, state: SharedState) {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<S2C>();
     let send_task = tokio::spawn(async move {
         while let Some(msg) = out_rx.recv().await {
-            let text = encode(&msg);
-            if sink.send(Message::Text(text.into())).await.is_err() {
+            // Hot per-tick messages (Snapshot, MapIntel) go as compact binary
+            // frames; everything else stays JSON text.
+            let frame = match encode_binary(&msg) {
+                Some(bytes) => Message::Binary(bytes.into()),
+                None => Message::Text(encode(&msg).into()),
+            };
+            if sink.send(frame).await.is_err() {
                 break;
             }
         }

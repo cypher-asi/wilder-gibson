@@ -28,7 +28,7 @@ import {
 } from "../state/game";
 import { ITEM_INFO, itemLabel } from "../ui/ItemIcon";
 import { RED_HEX } from "../ui/colors";
-import { C2S, decode, encode, S2C } from "./protocol";
+import { C2S, decode, decodeBinary, encode, S2C } from "./protocol";
 
 /**
  * Entity ids the local player has damaged recently, with the ms timestamp of
@@ -94,6 +94,8 @@ export class GameConnection {
   connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    // Hot messages (Snapshot/MapIntel) arrive as binary frames.
+    ws.binaryType = "arraybuffer";
     this.ws = ws;
 
     ws.onopen = () => {
@@ -102,7 +104,12 @@ export class GameConnection {
       this.send({ t: "Authenticate", d: { token: this.token } });
     };
     ws.onmessage = (event) => {
-      this.handle(decode(event.data as string));
+      if (typeof event.data === "string") {
+        this.handle(decode(event.data));
+      } else {
+        const msg = decodeBinary(event.data as ArrayBuffer);
+        if (msg) this.handle(msg);
+      }
     };
     ws.onclose = () => {
       useGame.getState().set({ connected: false, joined: false });

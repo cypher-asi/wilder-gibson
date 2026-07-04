@@ -373,6 +373,168 @@ pub fn decode<'a, T: Deserialize<'a>>(text: &'a str) -> Result<T, serde_json::Er
     serde_json::from_str(text)
 }
 
+// ---------------------------------------------------------------------------
+// Binary frames for the hot per-tick messages
+// ---------------------------------------------------------------------------
+//
+// Snapshot (20 Hz per player) and MapIntel (~1 Hz whole map) dominate wire
+// bandwidth, so they ship as compact little-endian binary WebSocket frames
+// instead of JSON. Everything else stays JSON text (debuggable, rare).
+// The TypeScript decoder in `apps/web/src/net/connection.ts` mirrors these
+// layouts exactly and must stay in sync.
+
+/// Frame tags (first byte of a binary frame).
+const BIN_SNAPSHOT: u8 = 1;
+const BIN_MAP_INTEL: u8 = 2;
+
+/// Bytes per entity in a binary Snapshot: u64 id, i32 cm x/y/z, i16 centirad
+/// yaw, u8 anim, u8 health, u8 shield.
+const SNAP_ENTITY_BYTES: usize = 8 + 12 + 2 + 3;
+/// Bytes per blip in a binary MapIntel: u64 id, u8 faction, u8 kind,
+/// i16 x/z (meters), u16 count.
+const INTEL_BLIP_BYTES: usize = 8 + 1 + 1 + 4 + 2;
+
+/// Stable wire code for an animation state (append-only; the client maps
+/// codes back by index).
+fn anim_code(a: AnimState) -> u8 {
+    match a {
+        AnimState::Idle => 0,
+        AnimState::Walk => 1,
+        AnimState::Run => 2,
+        AnimState::Attack => 3,
+        AnimState::Hit => 4,
+        AnimState::Death => 5,
+        AnimState::Gather => 6,
+        AnimState::Roll => 7,
+        AnimState::Crouch => 8,
+        AnimState::CrouchWalk => 9,
+    }
+}
+
+fn anim_from_code(c: u8) -> AnimState {
+    match c {
+        1 => AnimState::Walk,
+        2 => AnimState::Run,
+        3 => AnimState::Attack,
+        4 => AnimState::Hit,
+        5 => AnimState::Death,
+        6 => AnimState::Gather,
+        7 => AnimState::Roll,
+        8 => AnimState::Crouch,
+        9 => AnimState::CrouchWalk,
+        _ => AnimState::Idle,
+    }
+}
+
+/// Binary-encode a hot message; `None` means "not a hot message, send JSON".
+/// Positions quantize to centimeters (i32) and yaw to centiradians (i16),
+/// matching the server's delta-replication quantization, so the binary path
+/// loses no precision over what JSON carried.
+pub fn encode_binary(msg: &S2C) -> Option<Vec<u8>> {
+    let q32 = |v: f32| (v * 100.0).round() as i32;
+    match msg {
+        S2C::Snapshot { server_tick, last_input_seq, entities } => {
+            let mut buf = Vec::with_capacity(1 + 8 + 4 + 4 + entities.len() * SNAP_ENTITY_BYTES);
+            buf.push(BIN_SNAPSHOT);
+            buf.extend_from_slice(&server_tick.to_le_bytes());
+            buf.extend_from_slice(&last_input_seq.to_le_bytes());
+            buf.extend_from_slice(&(entities.len() as u32).to_le_bytes());
+            for e in entities {
+                buf.extend_from_slice(&e.id.to_le_bytes());
+                buf.extend_from_slice(&q32(e.position.x).to_le_bytes());
+                buf.extend_from_slice(&q32(e.position.y).to_le_bytes());
+                buf.extend_from_slice(&q32(e.position.z).to_le_bytes());
+                buf.extend_from_slice(&((e.yaw * 100.0).round() as i16).to_le_bytes());
+                buf.push(anim_code(e.anim));
+                buf.push((e.health_pct.clamp(0.0, 1.0) * 255.0).round() as u8);
+                buf.push((e.shield_pct.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+            Some(buf)
+        }
+        S2C::MapIntel { blips } => {
+            let mut buf = Vec::with_capacity(1 + 4 + blips.len() * INTEL_BLIP_BYTES);
+            buf.push(BIN_MAP_INTEL);
+            buf.extend_from_slice(&(blips.len() as u32).to_le_bytes());
+            for b in blips {
+                buf.extend_from_slice(&b.id.to_le_bytes());
+                buf.push(b.faction);
+                buf.push(b.kind);
+                buf.extend_from_slice(&b.x.to_le_bytes());
+                buf.extend_from_slice(&b.z.to_le_bytes());
+                buf.extend_from_slice(&b.count.to_le_bytes());
+            }
+            Some(buf)
+        }
+        _ => None,
+    }
+}
+
+/// Decode a binary frame produced by [`encode_binary`]. Used by tests and
+/// native tooling; the browser client has its own TypeScript decoder.
+pub fn decode_binary(buf: &[u8]) -> Option<S2C> {
+    let (&tag, rest) = buf.split_first()?;
+    let rd_u16 = |b: &[u8], o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+    let rd_i16 = |b: &[u8], o: usize| i16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+    let rd_u32 = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let rd_i32 = |b: &[u8], o: usize| i32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let rd_u64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    match tag {
+        BIN_SNAPSHOT => {
+            if rest.len() < 16 {
+                return None;
+            }
+            let server_tick = rd_u64(rest, 0);
+            let last_input_seq = rd_u32(rest, 8);
+            let count = rd_u32(rest, 12) as usize;
+            let body = &rest[16..];
+            if body.len() != count * SNAP_ENTITY_BYTES {
+                return None;
+            }
+            let mut entities = Vec::with_capacity(count);
+            for i in 0..count {
+                let o = i * SNAP_ENTITY_BYTES;
+                entities.push(EntitySnapshot {
+                    id: rd_u64(body, o),
+                    position: Vec3::new(
+                        rd_i32(body, o + 8) as f32 / 100.0,
+                        rd_i32(body, o + 12) as f32 / 100.0,
+                        rd_i32(body, o + 16) as f32 / 100.0,
+                    ),
+                    yaw: rd_i16(body, o + 20) as f32 / 100.0,
+                    anim: anim_from_code(body[o + 22]),
+                    health_pct: body[o + 23] as f32 / 255.0,
+                    shield_pct: body[o + 24] as f32 / 255.0,
+                });
+            }
+            Some(S2C::Snapshot { server_tick, last_input_seq, entities })
+        }
+        BIN_MAP_INTEL => {
+            if rest.len() < 4 {
+                return None;
+            }
+            let count = rd_u32(rest, 0) as usize;
+            let body = &rest[4..];
+            if body.len() != count * INTEL_BLIP_BYTES {
+                return None;
+            }
+            let mut blips = Vec::with_capacity(count);
+            for i in 0..count {
+                let o = i * INTEL_BLIP_BYTES;
+                blips.push(AgentBlip {
+                    id: rd_u64(body, o),
+                    faction: body[o + 8],
+                    kind: body[o + 9],
+                    x: rd_i16(body, o + 10),
+                    z: rd_i16(body, o + 12),
+                    count: rd_u16(body, o + 14),
+                });
+            }
+            Some(S2C::MapIntel { blips })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,6 +579,63 @@ mod tests {
             C2S::MapIntelSub { on } => assert!(on),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn binary_roundtrip_snapshot_and_map_intel() {
+        let snap = S2C::Snapshot {
+            server_tick: 123_456_789_012,
+            last_input_seq: 4242,
+            entities: vec![EntitySnapshot {
+                id: 77,
+                position: Vec3::new(12.34, 0.0, -567.89),
+                yaw: -3.14,
+                anim: AnimState::Run,
+                health_pct: 0.5,
+                shield_pct: 1.0,
+            }],
+        };
+        let buf = encode_binary(&snap).expect("snapshot is a hot message");
+        match decode_binary(&buf).unwrap() {
+            S2C::Snapshot { server_tick, last_input_seq, entities } => {
+                assert_eq!(server_tick, 123_456_789_012);
+                assert_eq!(last_input_seq, 4242);
+                assert_eq!(entities.len(), 1);
+                let e = &entities[0];
+                assert_eq!(e.id, 77);
+                assert!((e.position.x - 12.34).abs() < 0.01);
+                assert!((e.position.z + 567.89).abs() < 0.01);
+                assert!((e.yaw + 3.14).abs() < 0.01);
+                assert_eq!(e.anim, AnimState::Run);
+                assert!((e.health_pct - 0.5).abs() < 0.005);
+                assert!((e.shield_pct - 1.0).abs() < 0.005);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let intel = S2C::MapIntel {
+            blips: vec![AgentBlip {
+                id: (1 << 63) | 5,
+                faction: FACTION_FORUM,
+                kind: 1,
+                x: -120,
+                z: 512,
+                count: 340,
+            }],
+        };
+        let buf = encode_binary(&intel).expect("map intel is a hot message");
+        match decode_binary(&buf).unwrap() {
+            S2C::MapIntel { blips } => {
+                assert_eq!(blips.len(), 1);
+                assert_eq!(blips[0].id, (1 << 63) | 5);
+                assert_eq!(blips[0].count, 340);
+                assert_eq!(blips[0].x, -120);
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        // Cold messages stay JSON.
+        assert!(encode_binary(&S2C::Ping { nonce: 1 }).is_none());
     }
 
     #[test]

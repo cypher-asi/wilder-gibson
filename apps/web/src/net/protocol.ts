@@ -579,3 +579,89 @@ export function encode(msg: C2S): string {
 export function decode(text: string): S2C {
   return JSON.parse(text) as S2C;
 }
+
+// ---------------------------------------------------------------------------
+// Binary frames for the hot per-tick messages
+// ---------------------------------------------------------------------------
+//
+// Snapshot (20 Hz) and MapIntel (~1 Hz whole map) arrive as compact
+// little-endian binary WebSocket frames; everything else stays JSON text.
+// Layouts mirror `encode_binary` in `shared/wilder-protocol/src/lib.rs` and
+// must stay in sync with it.
+
+/** Animation states by wire code (must match `anim_code` on the server). */
+const BIN_ANIMS: AnimState[] = [
+  "Idle",
+  "Walk",
+  "Run",
+  "Attack",
+  "Hit",
+  "Death",
+  "Gather",
+  "Roll",
+  "Crouch",
+  "CrouchWalk",
+];
+
+/** Bytes per entity in a binary Snapshot. */
+const SNAP_ENTITY_BYTES = 25;
+/** Bytes per blip in a binary MapIntel. */
+const INTEL_BLIP_BYTES = 16;
+
+/** Entity/blip ids fit in 2^53, so two u32 reads beat BigInt conversion. */
+function readId(view: DataView, offset: number): number {
+  return view.getUint32(offset + 4, true) * 0x1_0000_0000 + view.getUint32(offset, true);
+}
+
+/**
+ * Decode a binary server frame into the same message shape as the JSON
+ * path, or null for an unknown tag. Positions arrive as centimeter i32s and
+ * yaw as centiradian i16 (the server quantizes to that anyway).
+ */
+export function decodeBinary(buf: ArrayBuffer): S2C | null {
+  const view = new DataView(buf);
+  const tag = view.getUint8(0);
+  if (tag === 1) {
+    // Snapshot: u64 tick, u32 input ack, u32 count, then packed entities.
+    const server_tick = Number(view.getBigUint64(1, true));
+    const last_input_seq = view.getUint32(9, true);
+    const count = view.getUint32(13, true);
+    const entities: EntitySnapshot[] = new Array(count);
+    let o = 17;
+    for (let i = 0; i < count; i++) {
+      entities[i] = {
+        id: readId(view, o),
+        position: [
+          view.getInt32(o + 8, true) / 100,
+          view.getInt32(o + 12, true) / 100,
+          view.getInt32(o + 16, true) / 100,
+        ],
+        yaw: view.getInt16(o + 20, true) / 100,
+        anim: BIN_ANIMS[view.getUint8(o + 22)] ?? "Idle",
+        health_pct: view.getUint8(o + 23) / 255,
+        shield_pct: view.getUint8(o + 24) / 255,
+      };
+      o += SNAP_ENTITY_BYTES;
+    }
+    return { t: "Snapshot", d: { server_tick, last_input_seq, entities } };
+  }
+  if (tag === 2) {
+    // MapIntel: u32 count, then packed blips.
+    const count = view.getUint32(1, true);
+    const blips: AgentBlip[] = new Array(count);
+    let o = 5;
+    for (let i = 0; i < count; i++) {
+      blips[i] = {
+        id: readId(view, o),
+        faction: view.getUint8(o + 8),
+        kind: view.getUint8(o + 9),
+        x: view.getInt16(o + 10, true),
+        z: view.getInt16(o + 12, true),
+        count: view.getUint16(o + 14, true),
+      };
+      o += INTEL_BLIP_BYTES;
+    }
+    return { t: "MapIntel", d: { blips } };
+  }
+  return null;
+}

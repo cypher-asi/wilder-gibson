@@ -5957,12 +5957,14 @@ impl World {
                 blips.push(AgentBlip {
                     // Synthetic id, stable per (cell, faction), so client
                     // blip tracks interpolate cluster drift between
-                    // snapshots instead of respawning dots. Bit 63 keeps it
-                    // clear of real entity ids.
-                    id: (1u64 << 63)
-                        | ((faction as u64) << 48)
-                        | (((cx as u32 as u64) & 0xff_ffff) << 24)
-                        | ((cz as u32 as u64) & 0xff_ffff),
+                    // snapshots instead of respawning dots. Bit 52 keeps it
+                    // clear of real entity ids while staying inside
+                    // JavaScript's 2^53 safe-integer range (blip ids become
+                    // JS numbers client-side).
+                    id: (1u64 << 52)
+                        | ((faction as u64) << 44)
+                        | (((cx as u32 as u64) & 0x3f_ffff) << 22)
+                        | ((cz as u32 as u64) & 0x3f_ffff),
                     faction,
                     kind: 1,
                     x: q((sx / n as f64) as f32),
@@ -6738,7 +6740,12 @@ pub mod bench {
                 while let Ok(msg) = prx.try_recv() {
                     msgs += 1;
                     if pi == 0 {
-                        p0_bytes += encode(&msg).len() as u64;
+                        // Hot messages ship binary in production; count the
+                        // frame size the gateway would actually send.
+                        p0_bytes += match wilder_protocol::encode_binary(&msg) {
+                            Some(bytes) => bytes.len() as u64,
+                            None => encode(&msg).len() as u64,
+                        };
                     }
                 }
             }
