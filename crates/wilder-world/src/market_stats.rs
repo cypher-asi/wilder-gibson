@@ -120,6 +120,13 @@ impl MarketStats {
         self.items.get(&kind)
     }
 
+    /// Lifetime `(fills, units, wild)` across every item kind (bench/debug).
+    pub fn totals(&self) -> (u64, u64, u64) {
+        self.items.values().fold((0, 0, 0), |(f, u, w), h| {
+            (f + h.total_fills, u + h.total_units, w + h.total_wild)
+        })
+    }
+
     /// The most recent fill price for a kind, if it has ever traded.
     pub fn last_price(&self, kind: ItemKind) -> Option<u32> {
         self.items.get(&kind).filter(|h| h.total_fills > 0).map(|h| h.last_price)

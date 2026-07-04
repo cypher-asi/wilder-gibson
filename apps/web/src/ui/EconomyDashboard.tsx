@@ -210,6 +210,7 @@ function SupplyPanel({ onSelect }: { onSelect: (kind: ItemKind) => void }) {
           <div
             key={r.kind}
             className="econ-supply-row econ-supply-row-link"
+            role="button"
             onClick={() => onSelect(r.kind)}
             title={`View the ${itemLabel(r.kind)} market`}
           >
@@ -651,7 +652,7 @@ function ItemMarketView({ kind, onBack }: { kind: ItemKind; onBack: () => void }
   return (
     <div className="econ-item">
       <div className="econ-item-head">
-        <div className="econ-tab econ-item-back" onClick={onBack}>
+        <div className="econ-tab econ-item-back" role="button" onClick={onBack}>
           ◀ ALL ITEMS
         </div>
         <span

@@ -158,6 +158,16 @@ impl Traits {
         (TRAIT_FLOOR + (1.0 - n * TRAIT_FLOOR) * w) * n
     }
 
+    /// Whether this agent leans toward `activity`: it's the agent's dominant
+    /// (best-earning) activity, or a strong learned specialization. Gates that
+    /// used a raw `mult >= 1.2` threshold were unreachable for fresh/seeded
+    /// populations — softmax multipliers barely clear 1.15 on random priors —
+    /// which silently disabled every trader/crafter behavior they guarded.
+    /// Dominance is self-normalizing: any population splits into leanings.
+    pub fn leans(&self, activity: Activity) -> bool {
+        self.dominant() == activity || self.mult(activity) >= 1.2
+    }
+
     /// The activity this agent currently earns best at.
     pub fn dominant(&self) -> Activity {
         let mut best = Activity::Gather;

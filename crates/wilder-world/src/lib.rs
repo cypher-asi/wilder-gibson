@@ -4719,11 +4719,11 @@ impl World {
         use rand::Rng;
         let wallet = self.rng.random_range(40..120u32);
         let traits = self.agents[idx].traits;
-        let kit: &[(ItemKind, u32)] = if traits.mult(Activity::Fight) >= 1.2
-            || traits.mult(Activity::Capture) >= 1.2
+        let kit: &[(ItemKind, u32)] = if traits.leans(Activity::Fight)
+            || traits.leans(Activity::Capture)
         {
             &[(ItemKind::Pipe, 1), (ItemKind::Medkit, 1)]
-        } else if traits.mult(Activity::Craft) >= 1.2 {
+        } else if traits.leans(Activity::Craft) {
             &[(ItemKind::Iron, 8), (ItemKind::Copper, 6)]
         } else {
             &[]
@@ -4955,25 +4955,30 @@ impl World {
         }
 
         // --- Sell: price the errand by what the counter actually PAYS ---
-        // Traders list on the market book (any non-kit valuables); everyone
-        // else vendors at a Bodega, which only buys raw resources. Raw
-        // carried value is the wrong signal here: it counts the agent's own
+        // The channel choice is economic: list on the market book when its
+        // expected net proceeds (live floating price minus the market fee)
+        // beat the Bodega's fixed floor, or when the agent's learned Trade
+        // leaning says the book has been paying it — that leaning is the
+        // exploration path that discovers a market the raw comparison still
+        // prices below the vendor at bootstrap. Raw carried value is the
+        // wrong signal on either channel: it counts the agent's own
         // weapons/meds, which no counter accepts, so a kit-only agent would
         // march to the Bodega, sell nothing, and re-pick Sell forever — a
         // permanent statue crowd at the door. Destinations come from the
         // congestion-aware router so packed storefronts price themselves out.
         let sell_mult = traits.mult(Activity::Haul);
-        let want_market =
-            traits.mult(Activity::Trade) >= 1.2 && self.market.len() < MARKET_BOOK_CAP;
+        let market_pay = self.market_sell_value(idx);
+        let vendor_pay = vendor_sell_value(&self.agents[idx], EntityKind::Bodega);
+        let want_market = (market_pay > vendor_pay || traits.leans(Activity::Trade))
+            && self.market.len() < MARKET_BOOK_CAP;
         let sell_plan = if want_market {
             self.route_service(pos, EntityKind::MarketTerminal)
-                .map(|r| (true, market_list_value(&self.agents[idx]), r))
+                .map(|r| (true, market_pay.max(market_list_value(&self.agents[idx])), r))
         } else {
             None
         }
         .or_else(|| {
-            self.route_service(pos, EntityKind::Bodega)
-                .map(|r| (false, vendor_sell_value(&self.agents[idx], EntityKind::Bodega), r))
+            self.route_service(pos, EntityKind::Bodega).map(|r| (false, vendor_pay, r))
         });
         if let Some((list_on_market, payable, (store, store_pos, appeal))) = sell_plan {
             if payable >= 30 {
@@ -5076,7 +5081,11 @@ impl World {
                 _ => EntityKind::Factory,
             };
             if let Some((station, station_pos, appeal)) = self.route_service(pos, station_kind) {
-                let score = margin * craft_mult * appeal;
+                // Same 2.0 errand weight as gathering: value-added work at a
+                // station competes on equal footing with pulling raw drops,
+                // so craft-leaning agents actually consume resources — that
+                // consumption is the demand side of the market book.
+                let score = margin * 2.0 * craft_mult * appeal;
                 if score > best.0 {
                     best = (
                         score,
@@ -5093,7 +5102,7 @@ impl World {
         }
         // Craft-leaning agents missing inputs restock off the market book
         // when a fair listing exists.
-        if traits.mult(Activity::Craft) >= 1.2 && best_recipe.is_none() && wallet >= 30 {
+        if traits.leans(Activity::Craft) && best_recipe.is_none() && wallet >= 30 {
             let wanted = [ItemKind::Iron, ItemKind::Copper, ItemKind::Chemicals, ItemKind::Biomass];
             let listing = self.market.iter().find(|l| {
                 wanted.contains(&l.kind)
@@ -5600,7 +5609,9 @@ impl World {
     /// demand instead of sitting on a static markup: with live competition on
     /// the book the new seller undercuts the cheapest ask by ~5%; on an empty
     /// book (demand just cleared the supply) it marks up ~10% over the last
-    /// fill. Clamped to [base/2, base*3] so the loop can't run away.
+    /// fill — rounded *up*, or cheap items (iron at 2 MILD) would floor the
+    /// markup away and the price could never float off its base. Clamped to
+    /// [base/2, base*3] so the loop can't run away.
     fn agent_ask_price(&self, kind: ItemKind) -> u32 {
         let base = base_value(kind).max(1);
         let floor = (base / 2).max(1);
@@ -5613,9 +5624,22 @@ impl World {
             .min();
         let anchor = match best_ask {
             Some(ask) => ask.saturating_mul(95) / 100,
-            None => self.market_ref_price(kind).saturating_mul(11) / 10,
+            None => self.market_ref_price(kind).saturating_mul(11).div_ceil(10),
         };
         anchor.clamp(floor, ceil)
+    }
+
+    /// Expected net MILD (after the market fee) from listing the agent's
+    /// listable cargo at today's floating ask. The Sell scorer compares this
+    /// against the Bodega's fixed floor to pick the errand's channel.
+    fn market_sell_value(&self, idx: usize) -> u32 {
+        let gross: u32 = self.agents[idx]
+            .inventory
+            .iter()
+            .filter(|s| market_listable(s.kind))
+            .map(|s| self.agent_ask_price(s.kind).saturating_mul(s.count))
+            .sum();
+        gross.saturating_mul(100 - MARKET_FEE_PCT) / 100
     }
 
     /// Evict one floor-priced agent listing to make room on a full book (the
@@ -5779,6 +5803,9 @@ impl World {
         }
         if let Some(agent) = self.agents.iter_mut().find(|a| a.agent_id == seller) {
             agent.wallet += proceeds;
+            // Reinforce the channel: realized market proceeds teach Trade,
+            // so sellers whose listings actually fill keep working the book.
+            agent.learn(Activity::Trade, proceeds as f32);
             return agent.party();
         }
         if let Ok(ch) = self.store.character(seller) {
@@ -7339,6 +7366,41 @@ pub mod bench {
             per_tick_us.len(),
             over as f64 / per_tick_us.len().max(1) as f64 * 100.0
         );
+
+        // Economy pulse: is the emergent market loop alive at this scale?
+        let traders =
+            world.agents.iter().filter(|a| a.traits.leans(Activity::Trade)).count();
+        let (fills, units, wild) = world.market_stats.totals();
+        let mut goal_counts: HashMap<&'static str, usize> = HashMap::new();
+        for a in &world.agents {
+            let label = match a.goal {
+                Goal::Idle => "idle",
+                Goal::Patrol { .. } => "patrol",
+                Goal::Gather { .. } => "gather",
+                Goal::Sell { list_on_market: true, .. } => "sell-market",
+                Goal::Sell { .. } => "sell-vendor",
+                Goal::Buy { .. } => "buy-vendor",
+                Goal::BuyMarket { .. } => "buy-market",
+                Goal::Trade { .. } => "trade",
+                Goal::Craft { .. } => "craft",
+                Goal::Loot { .. } => "loot",
+                Goal::Hunt { .. } => "hunt",
+                Goal::Capture { .. } => "capture",
+                Goal::Defend { .. } => "defend",
+                Goal::Retreat { .. } => "retreat",
+            };
+            *goal_counts.entry(label).or_insert(0) += 1;
+        }
+        let mut goals: Vec<_> = goal_counts.into_iter().collect();
+        goals.sort_by(|a, b| b.1.cmp(&a.1));
+        let goals =
+            goals.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+        println!("econ: trade-leaning agents: {traders} / {}", world.agents.len());
+        println!(
+            "econ: market book listings={} fills={fills} units={units} wild={wild}",
+            world.market.len()
+        );
+        println!("econ: goals {goals}");
     }
 }
 
@@ -8280,8 +8342,9 @@ mod tests {
         let (mut world, _dir) = test_world();
         let base = base_value(ItemKind::Iron).max(1);
 
-        // Virgin market: list at ~110% of base value.
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), (base * 11 / 10).max(1));
+        // Virgin market: list at ~110% of base value, rounded up so cheap
+        // items still leave the floor (iron: ceil(2.2) = 3).
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), (base * 11).div_ceil(10));
 
         // Competition on the book: undercut the cheapest ask by ~5%.
         world.market.push(wilder_market::Listing {
@@ -8303,7 +8366,7 @@ mod tests {
         // clamped to the [base/2, base*3] band.
         world.market_stats.record_fill(ItemKind::Iron, 5, 10);
         assert_eq!(world.market_ref_price(ItemKind::Iron), 5);
-        assert_eq!(world.agent_ask_price(ItemKind::Iron), (5 * 11 / 10).max(1).min(base * 3));
+        assert_eq!(world.agent_ask_price(ItemKind::Iron), (5u32 * 11).div_ceil(10).min(base * 3));
         // A pathological fill price is clamped before it steers pricing.
         world.market_stats.record_fill(ItemKind::Iron, 10_000, 1);
         assert_eq!(world.market_ref_price(ItemKind::Iron), base * 3);
