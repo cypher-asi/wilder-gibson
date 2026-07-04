@@ -12,6 +12,7 @@
 import { useMemo, useRef, useSyncExternalStore } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { playDoor } from "../assets/audio";
 import { openServicePanel } from "../game/interact";
 import { interiorRegistry, InteriorDeco, InteriorSpec } from "../game/interiors";
 import { POI_STYLES } from "../game/poi";
@@ -41,6 +42,8 @@ interface DoorState {
   /** 0 closed .. 1 open, animated. */
   openT: number;
   forcedUntil: number;
+  /** Latched open/closed state for edge-triggering the whoosh SFX. */
+  wasOpen: boolean;
 }
 
 const doorStates = new Map<string, DoorState>();
@@ -48,7 +51,7 @@ const doorStates = new Map<string, DoorState>();
 function doorState(key: string): DoorState {
   let s = doorStates.get(key);
   if (!s) {
-    s = { openT: 0, forcedUntil: 0 };
+    s = { openT: 0, forcedUntil: 0, wasOpen: false };
     doorStates.set(key, s);
   }
   return s;
@@ -333,9 +336,19 @@ function SlidingDoor({
       0,
       1,
     );
+    // Edge-trigger the whoosh as the door crosses the halfway point. Only
+    // doors near the player animate at all, so this stays local.
+    if (s.openT > 0.5 && !s.wasOpen) {
+      s.wasOpen = true;
+      playDoor(true);
+    } else if (s.openT < 0.5 && s.wasOpen) {
+      s.wasOpen = false;
+      playDoor(false);
+    }
     const t = THREE.MathUtils.smoothstep(s.openT, 0, 1);
     if (panel.current) {
-      panel.current.position.y = 1.32 - t * 2.5;
+      // Panel retracts UP into the lintel, clearing the 2.9 m opening.
+      panel.current.position.y = DOOR_CLOSED_Y + t * 2.9;
       panel.current.visible = t < 0.99;
     }
     if (glowRef.current) {
@@ -367,16 +380,16 @@ function SlidingDoor({
       <mesh position={[0.975, DOOR_HOLE_VIS_H / 2 - 0.08, z]} material={glowMat(accent, 1.5)}>
         <boxGeometry args={[0.02, DOOR_HOLE_VIS_H - 0.16, 0.36]} />
       </mesh>
-      {/* Sliding panel (sinks into the floor). */}
-      <group ref={panel} position={[0, 1.32, z]}>
+      {/* Sliding panel: fills the opening floor-to-header, retracts upward. */}
+      <group ref={panel} position={[0, DOOR_CLOSED_Y, z]}>
         <mesh material={doorPanelMat} castShadow>
-          <boxGeometry args={[1.93, 2.6, 0.09]} />
+          <boxGeometry args={[2.02, 2.74, 0.09]} />
         </mesh>
         <mesh ref={glowRef} material={glowMat(accent, 1.8)}>
-          <boxGeometry args={[0.035, 2.5, 0.11]} />
+          <boxGeometry args={[0.035, 2.64, 0.11]} />
         </mesh>
-        <mesh position={[0, -1.24, 0]} material={glowMat(accent, 1.8)}>
-          <boxGeometry args={[1.85, 0.03, 0.11]} />
+        <mesh position={[0, -1.37, 0]} material={glowMat(accent, 1.8)}>
+          <boxGeometry args={[1.94, 0.03, 0.11]} />
         </mesh>
       </group>
     </group>
@@ -385,6 +398,8 @@ function SlidingDoor({
 
 /** Matches DOOR_HOLE_H in building.ts (the shell's carved opening). */
 const DOOR_HOLE_VIS_H = 2.9;
+/** Closed-panel centre: bottom on the floor, top meeting the header. */
+const DOOR_CLOSED_Y = 1.37;
 
 function InteriorRoom({ spec }: { spec: InteriorSpec }) {
   const [x0, z0, x1, z1] = spec.bounds;

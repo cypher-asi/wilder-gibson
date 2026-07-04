@@ -248,6 +248,59 @@ export function playPickup(volume = 0.2) {
   };
 }
 
+/**
+ * Sci-fi pneumatic door whoosh. A band-passed noise hiss (the pressurized
+ * air) swept together with a tonal sweep for a Tron-ish hydraulic slide —
+ * pitch/filter sweep UP for opening, DOWN for closing. Fully synthesized.
+ */
+export function playDoor(open: boolean, volume = 0.3) {
+  const ctx = getBlipCtx();
+  if (!ctx) return;
+  const t0 = ctx.currentTime;
+  const dur = 0.42;
+
+  // Air hiss: white noise through a resonant bandpass whose centre sweeps.
+  const src = ctx.createBufferSource();
+  src.buffer = getNoiseBuffer(ctx);
+  src.loop = true;
+  const bp = ctx.createBiquadFilter();
+  bp.type = "bandpass";
+  bp.Q.value = 1.4;
+  const [f0, f1] = open ? [420, 2600] : [2600, 420];
+  bp.frequency.setValueAtTime(f0, t0);
+  bp.frequency.exponentialRampToValueAtTime(f1, t0 + dur);
+  const nGain = ctx.createGain();
+  nGain.gain.setValueAtTime(0.0001, t0);
+  nGain.gain.linearRampToValueAtTime(volume, t0 + 0.05);
+  nGain.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+  src.connect(bp).connect(nGain).connect(ctx.destination);
+  src.start(t0);
+  src.stop(t0 + dur + 0.05);
+  src.onended = () => {
+    src.disconnect();
+    bp.disconnect();
+    nGain.disconnect();
+  };
+
+  // Tonal body: sawtooth sweep that reinforces the direction of travel.
+  const osc = ctx.createOscillator();
+  osc.type = "sawtooth";
+  const [p0, p1] = open ? [180, 620] : [620, 180];
+  osc.frequency.setValueAtTime(p0, t0);
+  osc.frequency.exponentialRampToValueAtTime(p1, t0 + dur);
+  const oGain = ctx.createGain();
+  oGain.gain.setValueAtTime(0.0001, t0);
+  oGain.gain.linearRampToValueAtTime(volume * 0.4, t0 + 0.04);
+  oGain.gain.exponentialRampToValueAtTime(0.0006, t0 + dur);
+  osc.connect(oGain).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.05);
+  osc.onended = () => {
+    osc.disconnect();
+    oGain.disconnect();
+  };
+}
+
 /** Low double-buzz for refused actions (backpack full). */
 export function playDeny(volume = 0.18) {
   const ctx = getBlipCtx();
