@@ -787,6 +787,8 @@ const PLAYER_BLIP_COLOR = new THREE.Color(0.7, 2.2, 2.6);
 interface BlipTrack {
   kind: number;
   faction: FactionId;
+  /** Actors behind this dot (>1 = server-side density cluster). */
+  count: number;
   sx: number;
   sz: number;
   tx: number;
@@ -795,6 +797,9 @@ interface BlipTrack {
   dur: number;
   lastSeen: number;
 }
+
+/** Scratch color for per-blip brightness scaling (no per-frame allocs). */
+const blipScratchColor = new THREE.Color();
 
 /** Whole-map actor blips from the MapIntel stream, as one point cloud.
  * Players read bright cyan-white, agents their faction color, and wild Wapes
@@ -874,11 +879,13 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
         t.dur = dur;
         t.kind = b.kind;
         t.faction = b.faction;
+        t.count = b.count ?? 1;
         t.lastSeen = now;
       } else {
         m.set(b.id, {
           kind: b.kind,
           faction: b.faction,
+          count: b.count ?? 1,
           sx: b.x,
           sz: b.z,
           tx: b.x,
@@ -917,10 +924,16 @@ function BlipLayer({ filters }: { filters: MapFilters }) {
       const x = t.sx + (t.tx - t.sx) * k;
       const z = t.sz + (t.tz - t.sz) * k;
       p!.setXYZ(i, x, 12, z);
-      const c =
+      let c =
         t.kind === 0
           ? PLAYER_BLIP_COLOR
           : ((t.kind === 2 ? pal.wild : pal.agents).get(t.faction) ?? pal.fallback);
+      if (t.count > 1) {
+        // Density clusters glow hotter with population (additive blending
+        // turns the brightness into apparent heat on the map).
+        const heat = 1 + Math.min(3, Math.log2(t.count) * 0.5);
+        c = blipScratchColor.copy(c).multiplyScalar(heat);
+      }
       co!.setXYZ(i, c.r, c.g, c.b);
       i++;
     }

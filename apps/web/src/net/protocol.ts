@@ -351,6 +351,11 @@ export interface AgentBlip {
   kind: number;
   x: number;
   z: number;
+  /**
+   * Actors this blip stands for: omitted/1 for an individual, >1 for a
+   * density cluster (large agent populations are aggregated server-side).
+   */
+  count?: number;
 }
 
 /** One leaderboard category (e.g. "Wealth", "Kills") with its ranked rows. */

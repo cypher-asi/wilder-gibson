@@ -714,6 +714,15 @@ struct Player {
     dirty: bool,
 }
 
+/// Above this many living agents, whole-map intel stops shipping one blip
+/// per agent and aggregates them into per-cell per-faction density clusters
+/// (players and Wapes stay individual). Keeps the ~1 Hz map stream a few KB
+/// at 50k agents instead of megabytes.
+const MAP_INTEL_BLIP_CAP: usize = 2048;
+/// Cell size (meters) for aggregated intel clusters. Matches the intel map's
+/// useful resolution: a dot every ~64 m reads as a density field.
+const INTEL_CLUSTER_CELL: f32 = 64.0;
+
 /// Max hot faction agents replicated to one player per tick. The client only
 /// draws ~24 full rigs plus a few hundred instanced silhouettes, so shipping
 /// every hot agent in view past that is pure wire cost. Nearest-first.
@@ -5726,10 +5735,14 @@ impl World {
 
     /// Every living actor on the map as a quantized blip: players (kind 0),
     /// faction agents hot or cold (kind 1) and wild Wapes (kind 2).
+    ///
+    /// Above `MAP_INTEL_BLIP_CAP` living agents, the per-agent blips are
+    /// replaced by per-cell per-faction density clusters (`count` > 1) so the
+    /// ~1 Hz whole-map stream stays a few KB no matter how big the sim gets.
+    /// Players and Wapes always stay individual.
     fn map_intel_blips(&self) -> Vec<AgentBlip> {
         let q = |v: f32| v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        let mut blips: Vec<AgentBlip> =
-            Vec::with_capacity(self.players.len() + self.agents.len() + self.npcs.len());
+        let mut blips: Vec<AgentBlip> = Vec::new();
         for p in self.players.values() {
             if p.character.health <= 0.0 {
                 continue;
@@ -5740,19 +5753,58 @@ impl World {
                 kind: 0,
                 x: q(p.character.position.x),
                 z: q(p.character.position.z),
+                count: 1,
             });
         }
-        for a in &self.agents {
-            if !a.alive() {
-                continue;
+        let living_agents = self.agents.iter().filter(|a| a.alive()).count();
+        if living_agents <= MAP_INTEL_BLIP_CAP {
+            blips.reserve(living_agents);
+            for a in &self.agents {
+                if !a.alive() {
+                    continue;
+                }
+                blips.push(AgentBlip {
+                    id: a.entity,
+                    faction: a.faction,
+                    kind: 1,
+                    x: q(a.position.x),
+                    z: q(a.position.z),
+                    count: 1,
+                });
             }
-            blips.push(AgentBlip {
-                id: a.entity,
-                faction: a.faction,
-                kind: 1,
-                x: q(a.position.x),
-                z: q(a.position.z),
-            });
+        } else {
+            // (cell x, cell z, faction) -> (count, sum x, sum z); the blip
+            // sits at the members' centroid, not the cell corner.
+            let mut cells: HashMap<(i32, i32, FactionId), (u32, f64, f64)> = HashMap::new();
+            for a in &self.agents {
+                if !a.alive() {
+                    continue;
+                }
+                let cx = (a.position.x / INTEL_CLUSTER_CELL).floor() as i32;
+                let cz = (a.position.z / INTEL_CLUSTER_CELL).floor() as i32;
+                let e = cells.entry((cx, cz, a.faction)).or_insert((0, 0.0, 0.0));
+                e.0 += 1;
+                e.1 += a.position.x as f64;
+                e.2 += a.position.z as f64;
+            }
+            blips.reserve(cells.len());
+            for ((cx, cz, faction), (n, sx, sz)) in cells {
+                blips.push(AgentBlip {
+                    // Synthetic id, stable per (cell, faction), so client
+                    // blip tracks interpolate cluster drift between
+                    // snapshots instead of respawning dots. Bit 63 keeps it
+                    // clear of real entity ids.
+                    id: (1u64 << 63)
+                        | ((faction as u64) << 48)
+                        | (((cx as u32 as u64) & 0xff_ffff) << 24)
+                        | ((cz as u32 as u64) & 0xff_ffff),
+                    faction,
+                    kind: 1,
+                    x: q((sx / n as f64) as f32),
+                    z: q((sz / n as f64) as f32),
+                    count: n.min(u16::MAX as u32) as u16,
+                });
+            }
         }
         for n in self.npcs.values() {
             if !n.alive() {
@@ -5764,6 +5816,7 @@ impl World {
                 kind: 2,
                 x: q(n.position.x),
                 z: q(n.position.z),
+                count: 1,
             });
         }
         blips

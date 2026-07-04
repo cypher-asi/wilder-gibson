@@ -258,6 +258,20 @@ pub struct AgentBlip {
     pub kind: u8,
     pub x: i16,
     pub z: i16,
+    /// Actors this blip stands for: 1 = an individual, >1 = a density
+    /// cluster (agent populations above the blip cap are aggregated per map
+    /// cell per faction instead of shipping one blip each). Omitted from the
+    /// wire when 1.
+    #[serde(default = "one_u16", skip_serializing_if = "is_one_u16")]
+    pub count: u16,
+}
+
+fn one_u16() -> u16 {
+    1
+}
+
+fn is_one_u16(v: &u16) -> bool {
+    *v == 1
 }
 
 /// Leaderboards payload: per-category top-N boards plus rolled-up faction and
@@ -375,7 +389,7 @@ mod tests {
     #[test]
     fn roundtrip_map_intel() {
         let msg = S2C::MapIntel {
-            blips: vec![AgentBlip { id: 9, faction: FACTION_FORUM, kind: 1, x: -120, z: 512 }],
+            blips: vec![AgentBlip { id: 9, faction: FACTION_FORUM, kind: 1, x: -120, z: 512, count: 1 }],
         };
         let text = encode(&msg);
         match decode::<S2C>(&text).unwrap() {
