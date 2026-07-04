@@ -473,13 +473,13 @@ export class GameConnection {
         // (skip the initial balance push right after joining).
         if (prev) {
           if (msg.d.wild > prev.wild) {
-            ui.pushPickup({ kind: null, text: `+${msg.d.wild - prev.wild} WILD` });
+            ui.pushPickup({ kind: null, icon: "wild", text: `+${msg.d.wild - prev.wild} WILD` });
           }
           if (msg.d.shards > prev.shards) {
-            ui.pushPickup({ kind: null, text: `+${msg.d.shards - prev.shards} SHARDS` });
+            ui.pushPickup({ kind: null, icon: "shards", text: `+${msg.d.shards - prev.shards} SHARDS` });
           }
           if (msg.d.energy > prev.energy) {
-            ui.pushPickup({ kind: null, text: `+${msg.d.energy - prev.energy} ENERGY` });
+            ui.pushPickup({ kind: null, icon: "energy", text: `+${msg.d.energy - prev.energy} ENERGY` });
           }
         }
         break;
@@ -546,7 +546,7 @@ export class GameConnection {
       case "GatherResult": {
         if (msg.d.denied) {
           playDeny();
-          ui.pushPickup({ kind: null, text: "Backpack full", alert: true });
+          ui.pushPickup({ kind: null, icon: "alert", text: "Backpack full", alert: true });
         }
         if (msg.d.gained.length > 0) {
           // One cue per pickup, by item category: ammo gets a cartridge clack,
@@ -727,7 +727,7 @@ export class GameConnection {
           if (seen.has(name)) continue;
           seen.add(name);
           gained++;
-          ui.pushPickup({ kind: null, text: `ZONE SECURED — ${name}` });
+          ui.pushPickup({ kind: null, icon: "zone", text: `ZONE SECURED — ${name}` });
           if (seen.size >= 3) break;
         }
         // Neighborhood losses stay at district granularity (a bigger event).
@@ -736,7 +736,7 @@ export class GameConnection {
           if (d.from === MY_FACTION && d.to !== MY_FACTION) {
             const name = (ui.districts[d.index]?.name ?? "ZONE").toUpperCase();
             lost++;
-            ui.pushPickup({ kind: null, text: `ZONE LOST — ${name}`, alert: true });
+            ui.pushPickup({ kind: null, icon: "zone", text: `ZONE LOST — ${name}`, alert: true });
           }
         }
         if (gained > 0) playZoneCapture();

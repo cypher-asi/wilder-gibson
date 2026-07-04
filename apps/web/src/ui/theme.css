@@ -1768,6 +1768,16 @@ body {
   filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.5));
 }
 
+/* Currency/zone/alert glyphs inherit the line color via currentColor so they
+   match the text (incl. red on alert lines). */
+.pickup-line .feed-glyph {
+  color: inherit;
+}
+
+.pickup-line.alert .feed-glyph {
+  filter: drop-shadow(0 0 6px var(--red-glow, rgba(255, 106, 124, 0.6)));
+}
+
 @keyframes pickup-pop {
   0% {
     opacity: 0;

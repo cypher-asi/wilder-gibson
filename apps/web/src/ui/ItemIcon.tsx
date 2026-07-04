@@ -29,29 +29,148 @@ export const CATEGORY_TICK: Record<ItemCategory, string> = {
   gadget: "#e8879b",
 };
 
-export const ITEM_INFO: Record<ItemKind, { label: string; category: ItemCategory }> = {
-  Medkit: { label: "Medkit", category: "consumable" },
-  Flashlight: { label: "Flashlight", category: "gadget" },
-  Pipe: { label: "Steel Pipe", category: "weapon" },
-  Knife: { label: "Combat Knife", category: "weapon" },
-  Pistol: { label: "P9 Pistol", category: "weapon" },
-  Smg: { label: "K-11 SMG", category: "weapon" },
-  JacketArmor: { label: "Padded Jacket", category: "armor" },
-  PlateArmor: { label: "Plate Carrier", category: "armor" },
-  Ammo9mm: { label: "9mm Ammo", category: "ammo" },
-  Iron: { label: "Iron", category: "resource" },
-  Copper: { label: "Copper", category: "resource" },
-  Chemicals: { label: "Chemicals", category: "resource" },
-  Electronics: { label: "Electronics", category: "resource" },
-  Biomass: { label: "Biomass", category: "resource" },
-  SteelPlate: { label: "Steel Plate", category: "material" },
-  CopperWire: { label: "Copper Wire", category: "material" },
-  Polymer: { label: "Polymer", category: "material" },
-  CircuitBoard: { label: "Circuit Board", category: "material" },
-  BioGel: { label: "Bio-Gel", category: "material" },
-  BlueprintFragment: { label: "Blueprint Fragment", category: "material" },
-  PowerCell: { label: "Power Cell", category: "material" },
-  Cash: { label: "Cash", category: "currency" },
+export interface ItemInfo {
+  label: string;
+  category: ItemCategory;
+  /** Short market ticker (economy dashboard drill-in header). */
+  ticker: string;
+  /** One-line flavor/utility description for the item market page. */
+  desc: string;
+}
+
+export const ITEM_INFO: Record<ItemKind, ItemInfo> = {
+  Medkit: {
+    label: "Medkit",
+    category: "consumable",
+    ticker: "MEDK",
+    desc: "Field trauma kit. Restores health on use; the only thing standing between a runner and the respawn queue.",
+  },
+  Flashlight: {
+    label: "Flashlight",
+    category: "gadget",
+    ticker: "LITE",
+    desc: "Cheap handheld torch. Low value, but somebody always needs one.",
+  },
+  Pipe: {
+    label: "Steel Pipe",
+    category: "weapon",
+    ticker: "PIPE",
+    desc: "Salvaged length of pipe. Entry-level melee; swings hard, sells cheap.",
+  },
+  Knife: {
+    label: "Combat Knife",
+    category: "weapon",
+    ticker: "KNFE",
+    desc: "Quick melee blade. Faster than a pipe, favored by scavengers who travel light.",
+  },
+  Pistol: {
+    label: "P9 Pistol",
+    category: "weapon",
+    ticker: "P9",
+    desc: "Standard 9mm sidearm. The city's workhorse firearm — steady demand keeps its market liquid.",
+  },
+  Smg: {
+    label: "K-11 SMG",
+    category: "weapon",
+    ticker: "K11",
+    desc: "Full-auto 9mm bullet hose. Top-shelf street hardware; scarce and priced like it.",
+  },
+  JacketArmor: {
+    label: "Padded Jacket",
+    category: "armor",
+    ticker: "JCKT",
+    desc: "Padded street jacket with a light energy shield weave.",
+  },
+  PlateArmor: {
+    label: "Plate Carrier",
+    category: "armor",
+    ticker: "PLTE",
+    desc: "Ballistic plate carrier with a heavy shield cell. Serious protection for serious WILD.",
+  },
+  Ammo9mm: {
+    label: "9mm Ammo",
+    category: "ammo",
+    ticker: "9MM",
+    desc: "Universal 9mm rounds. Burned constantly by every gun in the city — the closest thing to a consumable currency.",
+  },
+  Iron: {
+    label: "Iron",
+    category: "resource",
+    ticker: "IRON",
+    desc: "Raw scrap iron pulled from mining zones and scrapyards. Feedstock for steel plate.",
+  },
+  Copper: {
+    label: "Copper",
+    category: "resource",
+    ticker: "CU",
+    desc: "Stripped copper salvage. Refines into wire for everything electronic.",
+  },
+  Chemicals: {
+    label: "Chemicals",
+    category: "resource",
+    ticker: "CHEM",
+    desc: "Unstable industrial chemicals from plants and blown-up blocks. Polymer and bio-gel precursor.",
+  },
+  Electronics: {
+    label: "Electronics",
+    category: "resource",
+    ticker: "ELEC",
+    desc: "Scavenged boards and components from the tech ruins. Circuit board feedstock.",
+  },
+  Biomass: {
+    label: "Biomass",
+    category: "resource",
+    ticker: "BIO",
+    desc: "Organic sludge harvested from the overgrowth. Cheap, plentiful, and quietly essential to bio-gel.",
+  },
+  SteelPlate: {
+    label: "Steel Plate",
+    category: "material",
+    ticker: "STL",
+    desc: "Refined structural steel. The backbone of weapons and plate armor manufacturing.",
+  },
+  CopperWire: {
+    label: "Copper Wire",
+    category: "material",
+    ticker: "WIRE",
+    desc: "Drawn copper wiring. Every powered recipe in the city runs through it.",
+  },
+  Polymer: {
+    label: "Polymer",
+    category: "material",
+    ticker: "PLMR",
+    desc: "Synthesized polymer stock. Molds into grips, casings and armor backing.",
+  },
+  CircuitBoard: {
+    label: "Circuit Board",
+    category: "material",
+    ticker: "CRCT",
+    desc: "Assembled logic board. High-value refined component for top-tier gear.",
+  },
+  BioGel: {
+    label: "Bio-Gel",
+    category: "material",
+    ticker: "BGEL",
+    desc: "Medical-grade regenerative gel. The active ingredient in every medkit.",
+  },
+  BlueprintFragment: {
+    label: "Blueprint Fragment",
+    category: "material",
+    ticker: "BPF",
+    desc: "Corrupted schematic shard. Enough of them unlock lost crafting knowledge at a lab.",
+  },
+  PowerCell: {
+    label: "Power Cell",
+    category: "material",
+    ticker: "PWR",
+    desc: "Charged industrial power cell. Keeps production lines running when the grid can't.",
+  },
+  Cash: {
+    label: "Cash",
+    category: "currency",
+    ticker: "CASH",
+    desc: "Looted street currency. Worthless paper until a Bank converts it to WILD (minus their cut).",
+  },
 };
 
 export function itemLabel(kind: ItemKind): string {
@@ -259,6 +378,93 @@ export function ItemIcon({ kind, size = 34 }: { kind: ItemKind; size?: number })
       aria-label={itemLabel(kind)}
     >
       {GLYPHS[kind] ?? <rect x="12" y="12" width="24" height="24" rx="3" fill={FILL} />}
+    </svg>
+  );
+}
+
+/**
+ * Non-item notification glyphs for the left pickup feed (currency gains, zone
+ * flips, denials). Item pickups use {@link ItemIcon}; these cover the lines
+ * that carry no ItemKind so every feed entry still gets a consistent icon.
+ */
+export type FeedIconKind = "wild" | "shards" | "energy" | "zone" | "alert";
+
+/** Inner SVG per feed icon (20x20 viewBox, currentColor so it inherits the
+ * line color — including red for alert lines). WILD/SHARDS/ENERGY mirror the
+ * HUD currency chips (Hud.tsx CurrencyPanel) for visual consistency. */
+const FEED_GLYPHS: Record<FeedIconKind, JSX.Element> = {
+  wild: (
+    <>
+      <path
+        d="M10 1.5 L17.5 6 v8 L10 18.5 L2.5 14 v-8 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <path
+        d="M6 7 l1.5 6 L10 9.5 L12.5 13 L14 7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </>
+  ),
+  shards: (
+    <>
+      <path d="M10 1.5 L14.5 8 L10 18.5 L5.5 8 Z" fill="currentColor" opacity="0.85" />
+      <path d="M10 1.5 L14.5 8 L10 10.5 L5.5 8 Z" fill="currentColor" />
+    </>
+  ),
+  energy: (
+    <path d="M11.5 1.5 L4.5 11.5 h4 L8 18.5 L15.5 8.5 h-4 Z" fill="currentColor" />
+  ),
+  zone: (
+    <>
+      <path
+        d="M10 1.5 L16.5 4 v6 c0 4 -3 6.5 -6.5 8 C6 16.5 3.5 14 3.5 10 V4 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M7 9.5 L9 11.5 L13 6.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </>
+  ),
+  alert: (
+    <>
+      <path
+        d="M10 2 L18.5 17 H1.5 Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <rect x="9.1" y="7" width="1.8" height="5" rx="0.9" fill="currentColor" />
+      <circle cx="10" cy="14.4" r="1" fill="currentColor" />
+    </>
+  ),
+};
+
+/** Feed notification glyph, sized to match the item glyph in a pickup line. */
+export function FeedIcon({ kind, size = 22 }: { kind: FeedIconKind; size?: number }) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      width={size}
+      height={size}
+      className="item-icon feed-glyph"
+      aria-hidden="true"
+    >
+      {FEED_GLYPHS[kind]}
     </svg>
   );
 }

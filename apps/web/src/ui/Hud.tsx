@@ -16,7 +16,7 @@ import { EconomyDashboard } from "./EconomyDashboard";
 import { GameMenu } from "./GameMenu";
 import { HoloMap, prefetchHoloMapAssets } from "./HoloMap";
 import { InventoryScreen } from "./InventoryScreen";
-import { ItemIcon, itemLabel, usedVolume } from "./ItemIcon";
+import { FeedIcon, ItemIcon, itemLabel, usedVolume } from "./ItemIcon";
 import { Minimap } from "./Minimap";
 import { PerfPanel } from "./PerfPanel";
 
@@ -1300,7 +1300,11 @@ function PickupFeedLine({
   }, [entry.id]);
   return (
     <div className={`pickup-line${entry.alert ? " alert" : ""}`}>
-      {entry.kind && <ItemIcon kind={entry.kind} size={22} />}
+      {entry.kind ? (
+        <ItemIcon kind={entry.kind} size={22} />
+      ) : entry.icon ? (
+        <FeedIcon kind={entry.icon} size={22} />
+      ) : null}
       <span>{entry.text}</span>
     </div>
   );

@@ -21,6 +21,7 @@ import {
   FactionInfo,
   Inventory,
   ItemKind,
+  ItemMarketState,
   ItemStack,
   LeaderboardData,
   MarketListing,
@@ -309,8 +310,10 @@ export interface ChatLine {
 /** One line in the left-side pickup feed ("+3 Iron", "Backpack full"). */
 export interface PickupFeedEntry {
   id: number;
-  /** Item glyph to show; null for text-only notices (e.g. denial). */
+  /** Item glyph to show; null for non-item notices (currency, zone, denial). */
   kind: import("../net/protocol").ItemKind | null;
+  /** Non-item glyph (currency/zone/alert) used when `kind` is null. */
+  icon?: import("../ui/ItemIcon").FeedIconKind;
   text: string;
   /** Alert styling + deny semantics (red, no glyph pop). */
   alert?: boolean;
@@ -480,6 +483,8 @@ interface UiState {
   vendorOpen: boolean;
   /** Live ledger snapshot: aggregate stats + tx feed (newest first). */
   economy: { stats: EconomyStats; feed: EconTx[] } | null;
+  /** Watched item's market detail (economy dashboard drill-in). */
+  itemMarket: ItemMarketState | null;
   /** Central full-screen game menu (Escape). Hosts every full-screen section
    * (map, leaderboard, economy, inventory, settings, exit) as a tab. */
   menuOpen: boolean;
@@ -584,6 +589,7 @@ export const useGame: import("zustand").UseBoundStore<
   nearVendor: null,
   vendorOpen: false,
   economy: null,
+  itemMarket: null,
   menuOpen: false,
   menuTab: "map",
   visualStyle: loadVisualStyle(),
