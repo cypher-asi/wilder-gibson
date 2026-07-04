@@ -259,8 +259,9 @@ pub enum Tier {
 #[derive(Debug, Clone, Copy)]
 pub enum Goal {
     Idle,
-    /// Work a gather spot: arrive, then pull resources on a timer.
-    Gather { spot: Vec3, pulls_left: u32, timer: f32 },
+    /// Work a resource node: arrive at its spot, then pull off it on a
+    /// timer through the same `gather_node` rules players use.
+    Gather { node: EntityId, spot: Vec3, pulls_left: u32, timer: f32 },
     /// Haul to a store and sell carried goods (traders list on the market).
     Sell { store: EntityId, store_pos: Vec3, list_on_market: bool },
     /// Buy `count` of `kind` from a vendor.
@@ -911,7 +912,7 @@ impl FactionAgent {
                     AgentEvent::None
                 }
             }
-            Goal::Gather { spot, timer, pulls_left } => {
+            Goal::Gather { spot, timer, pulls_left, .. } => {
                 if pulls_left == 0 {
                     return AgentEvent::NeedsGoal;
                 }
@@ -1285,7 +1286,8 @@ mod tests {
         // 3.4 m = 10 full 0.325 m steps + 0.15 m: an unclamped fixed-length
         // step overshoots the spot into the far side of the 0.1 m arrival
         // radius and ping-pongs (180° yaw flip per tick) forever.
-        a.goal = Goal::Gather { spot: Vec3::new(3.4, 0.0, 0.0), pulls_left: 10, timer: 100.0 };
+        a.goal =
+            Goal::Gather { node: 1, spot: Vec3::new(3.4, 0.0, 0.0), pulls_left: 10, timer: 100.0 };
         a.decision_timer = 1000.0;
         let dt = 0.05;
         for _ in 0..200 {

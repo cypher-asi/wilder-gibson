@@ -105,9 +105,20 @@ const AMMO_CACHE_ROUNDS: u32 = 12;
 /// pickup only works with a free cursor, which mouse-look play never has.
 const LOOT_PICKUP_RADIUS: f32 = 2.0;
 /// Resource node: gathers before depletion, respawn delay, per-gather cooldown.
+/// Compiled defaults; charge count, respawn and density read optional env
+/// overrides once at world init (see [`NodeTuning::from_env`]).
 const NODE_CHARGES: u32 = 5;
 const NODE_RESPAWN_SECONDS: f32 = 60.0;
 const NODE_GATHER_COOLDOWN: f32 = 1.2;
+/// Resource nodes per hostile chunk (env `WILDER_NODES_PER_CHUNK`); one node
+/// per ~2 chunks couldn't feed the agent population now that agents mine the
+/// same real nodes players do.
+const NODES_PER_HOSTILE_CHUNK: usize = 3;
+/// Chebyshev chunk radius `best_gather_node` searches around an agent.
+const NODE_SEARCH_CHUNKS: i32 = 2;
+/// Max agents claiming one node at a time, so a cohort spreads across the
+/// local deposits instead of queueing on whichever looked closest.
+const NODE_CLAIM_CAP: u32 = 2;
 /// Chance for a blueprint fragment to drop from NPC kills / node gathers.
 const FRAGMENT_CHANCE: f64 = 0.10;
 /// Global hub power budget (kW) shared by all production jobs.
@@ -193,7 +204,6 @@ enum TickPhase {
     Agents,
     Separation,
     Loot,
-    Nodes,
     Production,
     Territory,
     Regen,
@@ -205,7 +215,7 @@ enum TickPhase {
 }
 
 impl TickPhase {
-    const COUNT: usize = 14;
+    const COUNT: usize = 13;
 
     const ALL: [TickPhase; TickPhase::COUNT] = [
         TickPhase::Movement,
@@ -213,7 +223,6 @@ impl TickPhase {
         TickPhase::Agents,
         TickPhase::Separation,
         TickPhase::Loot,
-        TickPhase::Nodes,
         TickPhase::Production,
         TickPhase::Territory,
         TickPhase::Regen,
@@ -231,7 +240,6 @@ impl TickPhase {
             TickPhase::Agents => "agents",
             TickPhase::Separation => "separation",
             TickPhase::Loot => "loot",
-            TickPhase::Nodes => "nodes",
             TickPhase::Production => "production",
             TickPhase::Territory => "territory",
             TickPhase::Regen => "regen",
@@ -628,14 +636,16 @@ pub fn is_safe_chunk(coord: ChunkCoord) -> bool {
 }
 
 /// Service entity an agent's goal is queued at, if any. These are the errands
-/// that physically crowd a storefront (vendor sell/buy, craft station), so
-/// they feed the congestion counter that spreads agents across services.
+/// that physically crowd a storefront (vendor sell/buy, craft station) or a
+/// resource deposit, so they feed the congestion counter that spreads agents
+/// across services and nodes.
 fn goal_service_target(goal: Goal) -> Option<EntityId> {
     match goal {
         Goal::Sell { store, .. } | Goal::Buy { store, .. } | Goal::Bank { store, .. } => {
             Some(store)
         }
         Goal::Craft { station, .. } => Some(station),
+        Goal::Gather { node, .. } => Some(node),
         _ => None,
     }
 }
@@ -1138,16 +1148,76 @@ struct ResourceNode {
     /// Resource variant (indexes wilder_economy::RESOURCES).
     variant: u32,
     charges: u32,
-    /// Seconds until the node respawns once depleted (0 = active).
-    respawn_in: f32,
-    /// Seconds until it can be gathered again.
-    cooldown: f32,
+    /// World-clock seconds of the last successful pull; drives the lazy
+    /// per-gather cooldown (NEG_INFINITY = never gathered).
+    last_gather: f64,
+    /// World-clock seconds when charges hit zero; drives the lazy respawn.
+    /// Meaningless while `charges > 0`.
+    depleted_at: f64,
 }
 
+/// Node timers are lazy timestamps instead of per-tick countdowns: state is
+/// computed on access (gather, targeting, replication), so a world's worth of
+/// agent-materialized nodes costs nothing at rest.
 impl ResourceNode {
-    fn active(&self) -> bool {
-        self.charges > 0
+    /// Effective charges at `now` under the lazy respawn rule.
+    fn charges_at(&self, now: f64, full: u32, respawn_seconds: f32) -> u32 {
+        if self.charges == 0 && now - self.depleted_at >= respawn_seconds as f64 {
+            full
+        } else {
+            self.charges
+        }
     }
+
+    /// Apply the lazy respawn in place (call before mutating `charges`).
+    fn refresh(&mut self, now: f64, full: u32, respawn_seconds: f32) {
+        self.charges = self.charges_at(now, full, respawn_seconds);
+    }
+
+    /// Whether the per-gather cooldown has elapsed at `now`.
+    fn cooldown_ready(&self, now: f64) -> bool {
+        now - self.last_gather >= NODE_GATHER_COOLDOWN as f64
+    }
+}
+
+/// Resource-node tunables, read from the environment once at world init.
+#[derive(Clone, Copy)]
+struct NodeTuning {
+    per_chunk: usize,
+    charges: u32,
+    respawn_seconds: f32,
+}
+
+impl Default for NodeTuning {
+    fn default() -> Self {
+        Self {
+            per_chunk: NODES_PER_HOSTILE_CHUNK,
+            charges: NODE_CHARGES,
+            respawn_seconds: NODE_RESPAWN_SECONDS,
+        }
+    }
+}
+
+impl NodeTuning {
+    fn from_env() -> Self {
+        fn env<T: std::str::FromStr>(key: &str, default: T) -> T {
+            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+        }
+        let d = Self::default();
+        Self {
+            per_chunk: env("WILDER_NODES_PER_CHUNK", d.per_chunk),
+            charges: env("WILDER_NODE_CHARGES", d.charges).max(1),
+            respawn_seconds: env("WILDER_NODE_RESPAWN", d.respawn_seconds),
+        }
+    }
+}
+
+/// Result of one successful gather pull (a node charge was consumed).
+struct GatherOutcome {
+    /// Stacks that actually entered the actor's pack (yield + any fragment).
+    gained: Vec<ItemStack>,
+    /// The pull yielded items but none fit (they spilled to ground loot).
+    denied: bool,
 }
 
 pub struct World {
@@ -1171,6 +1241,14 @@ pub struct World {
     /// Interacting from anywhere inside the room is allowed.
     interior_bounds: HashMap<EntityId, [f32; 4]>,
     nodes: HashMap<EntityId, ResourceNode>,
+    /// Node ids bucketed by chunk (nodes never move); agent gather targeting
+    /// and node replication walk chunks instead of the whole node map.
+    nodes_by_chunk: HashMap<ChunkCoord, SmallVec<[EntityId; 4]>>,
+    /// Chunks whose nodes have been materialized (by player streaming or
+    /// agent targeting — see `ensure_nodes`). Nodes are never evicted.
+    node_seeded_chunks: HashSet<ChunkCoord>,
+    /// Node density/charge/respawn tunables, read from env once at init.
+    node_tuning: NodeTuning,
     static_seeded_chunks: HashSet<ChunkCoord>,
     next_entity: EntityId,
     tick: u64,
@@ -1300,6 +1378,9 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         services_by_kind: HashMap::new(),
         interior_bounds: HashMap::new(),
         nodes: HashMap::new(),
+        nodes_by_chunk: HashMap::new(),
+        node_seeded_chunks: HashSet::new(),
+        node_tuning: NodeTuning::from_env(),
         static_seeded_chunks: HashSet::new(),
         next_entity: 1,
         tick: 0,
@@ -2347,6 +2428,7 @@ impl World {
             .statics
             .get(&target)
             .map(|s| s.position)
+            .or_else(|| self.nodes.get(&target).map(|n| n.position))
             .or_else(|| self.entity_position(target));
         if target_pos.is_some_and(|t| (t - pos).length() <= range) {
             return true;
@@ -2404,6 +2486,98 @@ impl World {
                 let _ = p.tx.send(msg);
             }
         }
+    }
+
+    /// World clock in seconds (the tick counter scaled by the fixed dt);
+    /// basis for the lazy node cooldown/respawn timestamps.
+    fn world_seconds(&self) -> f64 {
+        self.tick as f64 * TICK_DT as f64
+    }
+
+    /// One gather pull off a resource node under the shared rulebook —
+    /// identical for players and agents: 3 m range, charge + 1.2 s cooldown
+    /// (lazy timestamps), a 2-5 yield roll with the warzone +50% risk
+    /// premium, territory tax, 10% blueprint-fragment chance, and a ledger
+    /// Mint attributed to the actor. Yield that doesn't fit the pack spills
+    /// as ground loot at the node. Returns None when no charge was consumed
+    /// (missing/depleted/cooling node, out of range).
+    fn gather_node(&mut self, actor: EconActor, node_id: EntityId) -> Option<GatherOutcome> {
+        use rand::Rng;
+        let now = self.world_seconds();
+        let tuning = self.node_tuning;
+        let node = self.nodes.get_mut(&node_id)?;
+        node.refresh(now, tuning.charges, tuning.respawn_seconds);
+        if node.charges == 0 || !node.cooldown_ready(now) {
+            return None;
+        }
+        let (node_pos, variant) = (node.position, node.variant);
+        if !self.actor_in_range(actor, node_id, 3.0) {
+            return None;
+        }
+        let party = self.actor_party(actor)?;
+        let node = self.nodes.get_mut(&node_id).expect("node checked above");
+        node.last_gather = now;
+        node.charges -= 1;
+        if node.charges == 0 {
+            node.depleted_at = now;
+        }
+        let kind = wilder_economy::node_yield(variant);
+        let mut rolled = self.rng.random_range(2..=5u32);
+        // Warzone risk premium applies to anyone working dangerous ground.
+        if districts::danger_at(node_pos) == DangerLevel::Warzone {
+            rolled += rolled / 2;
+        }
+        // Hostile-held ground taxes what you carry out of it.
+        let count = self.actor_taxed_yield(actor, node_pos, rolled);
+        let leftover = self.actor_add_items(actor, kind, count);
+        let gained = count - leftover;
+        if count > 0 {
+            // Everything extracted is minted: overflow lands on the ground
+            // below the node, it doesn't vanish.
+            self.ledger.record(
+                TxKind::Mint,
+                TxParty::Mint,
+                party.clone(),
+                TxAmount::Item { kind, count },
+                0,
+            );
+        }
+        if leftover > 0 {
+            self.spawn_loot(
+                node_pos,
+                vec![ItemStack { kind, count: leftover }],
+                Some(party.clone()),
+                false,
+            );
+        }
+        if gained > 0 {
+            let gatherer = match actor {
+                EconActor::Player(id) => self.players.get(&id).map(player_actor),
+                EconActor::Agent(idx) => Some(self.agent_actor_ref(idx)),
+            };
+            if let Some(gatherer) = gatherer {
+                self.stats.add_resources(&gatherer, gained as u64);
+            }
+        }
+        let mut gained_stacks = Vec::new();
+        if gained > 0 {
+            gained_stacks.push(ItemStack { kind, count: gained });
+        }
+        // Rare blueprint fragments feed Laboratory research (kept only when
+        // they fit — a fragment never spills).
+        if self.rng.random_bool(FRAGMENT_CHANCE)
+            && self.actor_add_items(actor, ItemKind::BlueprintFragment, 1) == 0
+        {
+            self.ledger.record(
+                TxKind::Mint,
+                TxParty::Mint,
+                party,
+                TxAmount::Item { kind: ItemKind::BlueprintFragment, count: 1 },
+                0,
+            );
+            gained_stacks.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
+        }
+        Some(GatherOutcome { denied: gained_stacks.is_empty() && count > 0, gained: gained_stacks })
     }
 
     /// Write the actor's purse through to durable storage. Players write
@@ -2470,67 +2644,22 @@ impl World {
             return;
         }
 
-        // Resource node?
-        if let Some(node) = self.nodes.get(&target) {
-            let (node_pos, node_variant, node_active, node_cooldown) =
-                (node.position, node.variant, node.active(), node.cooldown);
-            let Some(player) = self.players.get(&entity) else { return };
-            if !node_active {
-                return;
-            }
-            if (node_pos - player.character.position).length() > 3.0 {
-                let _ = player.tx.send(S2C::Error { message: "too far away".into() });
-                return;
-            }
-            if node_cooldown > 0.0 {
-                return;
-            }
-            if let Some(node) = self.nodes.get_mut(&target) {
-                node.cooldown = NODE_GATHER_COOLDOWN;
-                node.charges -= 1;
-                if node.charges == 0 {
-                    node.respawn_in = NODE_RESPAWN_SECONDS;
+        // Resource node? Players pull through the same shared `gather_node`
+        // rulebook agents use; the only player-specific part is the UI echo.
+        if self.nodes.contains_key(&target) {
+            let actor = EconActor::Player(entity);
+            if !self.actor_in_range(actor, target, 3.0) {
+                if let Some(player) = self.players.get(&entity) {
+                    let _ = player.tx.send(S2C::Error { message: "too far away".into() });
                 }
+                return;
             }
-            use rand::Rng;
-            let kind = wilder_economy::node_yield(node_variant);
-            let rolled = self.rng.random_range(2..=5u32);
-            // Hostile-held ground taxes what you can carry out of it —
-            // players and agents run through the same actor helpers here.
-            let count = self.actor_taxed_yield(EconActor::Player(entity), node_pos, rolled);
-            let leftover = self.actor_add_items(EconActor::Player(entity), kind, count);
-            let gained = count - leftover;
+            // None = depleted or still cooling: silent, like today.
+            let Some(outcome) = self.gather_node(actor, target) else { return };
             let Some(player) = self.players.get_mut(&entity) else { return };
-            if gained > 0 {
-                self.ledger.record(
-                    TxKind::Mint,
-                    TxParty::Mint,
-                    player_party(player),
-                    TxAmount::Item { kind, count: gained },
-                    0,
-                );
-                self.stats.add_resources(&player_actor(player), gained as u64);
-            }
-            let mut gained_stacks = Vec::new();
-            if gained > 0 {
-                gained_stacks.push(ItemStack { kind, count: gained });
-            }
-            // Rare blueprint fragments feed Laboratory research (Phase 3).
-            if self.rng.random_bool(FRAGMENT_CHANCE)
-                && inv::add_items(&mut player.inventory.slots, ItemKind::BlueprintFragment, 1) == 0
-            {
-                self.ledger.record(
-                    TxKind::Mint,
-                    TxParty::Mint,
-                    player_party(player),
-                    TxAmount::Item { kind: ItemKind::BlueprintFragment, count: 1 },
-                    0,
-                );
-                gained_stacks.push(ItemStack { kind: ItemKind::BlueprintFragment, count: 1 });
-            }
-            player.dirty = true;
-            let denied = gained_stacks.is_empty() && count > 0;
-            let _ = player.tx.send(S2C::GatherResult { gained: gained_stacks, denied });
+            let _ = player
+                .tx
+                .send(S2C::GatherResult { gained: outcome.gained, denied: outcome.denied });
             let _ = player.tx.send(S2C::InventoryUpdate(player.inventory.clone()));
             return;
         }
@@ -3939,7 +4068,8 @@ impl World {
         self.timed(TickPhase::Agents, |w| w.tick_agents());
         self.timed(TickPhase::Separation, |w| w.separate_characters());
         self.timed(TickPhase::Loot, |w| w.tick_loot());
-        self.timed(TickPhase::Nodes, |w| w.tick_nodes());
+        // Nodes have no per-tick phase: cooldown/respawn are lazy timestamps
+        // evaluated on access (gather, targeting, replication).
         self.timed(TickPhase::Production, |w| w.tick_production());
         self.timed(TickPhase::Territory, |w| w.tick_territory());
         self.timed(TickPhase::Regen, |w| w.tick_regen());
@@ -5137,6 +5267,39 @@ impl World {
         best
     }
 
+    /// Nearest workable resource node around `pos`: materializes node state
+    /// for the surrounding chunks (a set-membership check per chunk once
+    /// seeded, so the decision hot path stays cheap), then picks the closest
+    /// active node that isn't already claimed by `NODE_CLAIM_CAP` gatherers
+    /// (claims ride the same congestion map storefronts use).
+    fn best_gather_node(&mut self, pos: Vec3) -> Option<(EntityId, Vec3)> {
+        let center = ChunkCoord::from_world(pos);
+        let now = self.world_seconds();
+        let tuning = self.node_tuning;
+        let mut best: Option<(EntityId, Vec3, f32)> = None;
+        for dz in -NODE_SEARCH_CHUNKS..=NODE_SEARCH_CHUNKS {
+            for dx in -NODE_SEARCH_CHUNKS..=NODE_SEARCH_CHUNKS {
+                let coord = ChunkCoord::new(center.x + dx, center.z + dz);
+                self.ensure_nodes(coord);
+                let Some(ids) = self.nodes_by_chunk.get(&coord) else { continue };
+                for &id in ids {
+                    let Some(node) = self.nodes.get(&id) else { continue };
+                    if node.charges_at(now, tuning.charges, tuning.respawn_seconds) == 0 {
+                        continue;
+                    }
+                    if self.service_load.get(&id).copied().unwrap_or(0) >= NODE_CLAIM_CAP {
+                        continue;
+                    }
+                    let d = (node.position - pos).length();
+                    if best.map_or(true, |(_, _, bd)| d < bd) {
+                        best = Some((id, node.position, d));
+                    }
+                }
+            }
+        }
+        best.map(|(id, p, _)| (id, p))
+    }
+
     /// Recount agents committed to each congestible service. Run once per tick
     /// before the decision batch; `decide_agent` then keeps it live as agents
     /// re-choose, so within-tick deciders see each other's fresh commitments
@@ -5246,12 +5409,20 @@ impl World {
             self.agents[idx].capacity().saturating_sub(self.agents[idx].used_volume());
         if free_volume > 4 {
             let score = ev * danger_mult * tax_mult * gather_mult * 2.0;
+            // Gathering needs a real deposit now: no active node in reach
+            // (after materializing the neighborhood) means Gather scores 0.
             if score > best.0 {
-                let spot = self.walkable_spot_near(pos, 30.0);
-                best = (
-                    score,
-                    Goal::Gather { spot, pulls_left: self.rng.random_range(3..6), timer: 0.0 },
-                );
+                if let Some((node, spot)) = self.best_gather_node(pos) {
+                    best = (
+                        score,
+                        Goal::Gather {
+                            node,
+                            spot,
+                            pulls_left: self.rng.random_range(3..6),
+                            timer: 0.0,
+                        },
+                    );
+                }
             }
         }
 
@@ -5826,42 +5997,43 @@ impl World {
         }
     }
 
-    /// One gather pull: mint zone-weighted resources to the agent.
+    /// One gather pull at the agent's target node, through the same
+    /// `gather_node` rulebook players use (no more virtual minting). The
+    /// node can be racing other actors: a pull that finds it cooling just
+    /// waits for the next timer tick; a dry or missing node ends the goal
+    /// so the brain re-picks. One charge per act, so the cold tier's larger
+    /// dt slices can never over-draw a node.
     fn agent_gather_pull(&mut self, idx: usize) {
-        use rand::Rng;
-        let pos = self.agents[idx].position;
-        let zone = zone_of_chunk(ChunkCoord::from_world(pos));
-        let roll: u32 = self.rng.random();
-        let kind = wilder_economy::RESOURCES[wilder_economy::zone_resource_index(zone, roll)];
-        let base: u32 = self.rng.random_range(2..=4);
-        let count = if districts::danger_at(pos) == DangerLevel::Warzone {
-            base + base / 2 // warzone yield premium
-        } else {
-            base
-        };
-        // Hostile-held ground taxes agents exactly like players.
-        let count = self.actor_taxed_yield(EconActor::Agent(idx), pos, count);
-        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, count);
-        let gained = count - leftover;
-        if gained == 0 {
+        let Goal::Gather { node, .. } = self.agents[idx].goal else { return };
+        let now = self.world_seconds();
+        let tuning = self.node_tuning;
+        let available = self.nodes.get_mut(&node).is_some_and(|n| {
+            n.refresh(now, tuning.charges, tuning.respawn_seconds);
+            n.charges > 0
+        });
+        if !available {
+            // Someone drained it under us: re-decide (usually another node).
             self.agents[idx].goal = Goal::Idle;
             return;
         }
-        let party = self.agents[idx].party();
-        self.ledger.record(
-            TxKind::Mint,
-            TxParty::Mint,
-            party,
-            TxAmount::Item { kind, count: gained },
-            0,
-        );
-        let gatherer = self.agent_actor_ref(idx);
-        self.stats.add_resources(&gatherer, gained as u64);
+        let Some(outcome) = self.gather_node(EconActor::Agent(idx), node) else {
+            // On the 1.2 s cooldown (another actor just pulled): the 4 s
+            // pull timer retries on its own.
+            return;
+        };
+        if outcome.denied {
+            // Pack full — gathering more is pointless, go haul instead.
+            self.agents[idx].goal = Goal::Idle;
+            return;
+        }
         // Learning: each pull is a completed unit of gathering work (travel
         // included the first time); the clock restarts per pull so the rate
         // reflects steady-state yield, not the whole trip averaged down.
-        let value = base_value(kind).saturating_mul(gained);
-        self.agents[idx].learn(Activity::Gather, value as f32);
+        let value: u32 =
+            outcome.gained.iter().map(|s| base_value(s.kind).saturating_mul(s.count)).sum();
+        if value > 0 {
+            self.agents[idx].learn(Activity::Gather, value as f32);
+        }
         self.agents[idx].goal_age = 0.0;
         if let Goal::Gather { pulls_left, .. } = &mut self.agents[idx].goal {
             *pulls_left = pulls_left.saturating_sub(1);
@@ -6617,19 +6789,6 @@ impl World {
         }
     }
 
-    fn tick_nodes(&mut self) {
-        for node in self.nodes.values_mut() {
-            node.cooldown = (node.cooldown - TICK_DT).max(0.0);
-            if !node.active() {
-                node.respawn_in -= TICK_DT;
-                if node.respawn_in <= 0.0 {
-                    node.charges = NODE_CHARGES;
-                    node.respawn_in = 0.0;
-                }
-            }
-        }
-    }
-
     fn tick_regen(&mut self) {
         let safehouses = self.safehouse_positions();
         for player in self.players.values_mut() {
@@ -7130,47 +7289,86 @@ impl World {
                 self.npcs.insert(entity, npc);
             }
         }
-        // Per-chunk world content: resource nodes and ammo caches (service
-        // buildings are seeded eagerly by `seed_district` at world start).
+        // Resource nodes materialize through the view-independent path (the
+        // same one agent gather targeting uses).
+        self.ensure_nodes(coord);
+        // Per-chunk world content: ammo caches (service buildings are seeded
+        // eagerly by `seed_district` at world start).
         if !self.static_seeded_chunks.contains(&coord) {
             self.static_seeded_chunks.insert(coord);
-            // Resource nodes: roughly every other hostile chunk gets one,
-            // yielding whatever its zone favors (mining ground -> metals...).
-            let nh = (coord.x.wrapping_mul(198491317) ^ coord.z.wrapping_mul(6542989)) as u32;
-            if !is_safe_chunk(coord) && nh % 2 == 0 {
-                let chunk = self.chunks.get(coord);
-                let variant = wilder_economy::zone_resource_index(zone_of_chunk(coord), nh >> 8) as u32;
-                // Deterministic walkable spot.
-                'node: for tz in (3..TILES_PER_CHUNK).step_by(2) {
-                    for tx in (4..TILES_PER_CHUNK).step_by(2) {
-                        if chunk.tile(tx, tz).walkable() {
-                            let entity = self.alloc_entity();
-                            self.nodes.insert(
-                                entity,
-                                ResourceNode {
-                                    entity,
-                                    position: Vec3::new(
-                                        coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
-                                        0.0,
-                                        coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
-                                    ),
-                                    variant,
-                                    charges: NODE_CHARGES,
-                                    respawn_in: 0.0,
-                                    cooldown: 0.0,
-                                },
-                            );
-                            break 'node;
-                        }
-                    }
-                }
-            }
             // Ammo caches everywhere (including the safe hub) so ammo is easy
             // to find and obvious. Persistent until looted.
             let chunk = self.chunks.get(coord);
             for pos in ammo_cache_spots(&chunk, coord, AMMO_CACHE_COUNT) {
                 self.spawn_ammo_cache(pos, AMMO_CACHE_ROUNDS);
             }
+        }
+    }
+
+    /// Materialize the chunk's resource nodes on first access from ANY path —
+    /// player chunk streaming or agent gather targeting — so mining works the
+    /// same across the whole map, not just where players have looked.
+    /// Placement is a pure function of the chunk coord (hash + deterministic
+    /// walkable-tile scan), so whichever actor arrives first creates the
+    /// identical nodes. Materialized chunks are tracked forever (nodes stay
+    /// resident once created, they are never evicted); the set check keeps
+    /// repeat calls nearly free on the agent decision hot path. The world is
+    /// never materialized eagerly — only chunks someone actually reaches.
+    fn ensure_nodes(&mut self, coord: ChunkCoord) {
+        if !self.node_seeded_chunks.insert(coord) {
+            return;
+        }
+        if is_safe_chunk(coord) {
+            return;
+        }
+        let per_chunk = self.node_tuning.per_chunk;
+        if per_chunk == 0 {
+            return;
+        }
+        let chunk = self.chunks.get(coord);
+        let zone = zone_of_chunk(coord);
+        let nh = (coord.x.wrapping_mul(198491317) ^ coord.z.wrapping_mul(6542989)) as u32;
+        // Each node scans its own z-band of the chunk for the first walkable
+        // tile, spreading the deposits across the chunk deterministically
+        // (bands with no walkable ground simply host no node).
+        let band = ((TILES_PER_CHUNK - 3) / per_chunk).max(1);
+        for i in 0..per_chunk {
+            let z0 = 3 + i * band;
+            let z1 =
+                if i + 1 == per_chunk { TILES_PER_CHUNK } else { (z0 + band).min(TILES_PER_CHUNK) };
+            let mut placed = None;
+            'scan: for tz in (z0..z1).step_by(2) {
+                for tx in (4..TILES_PER_CHUNK).step_by(2) {
+                    if chunk.tile(tx, tz).walkable() {
+                        placed = Some((tx, tz));
+                        break 'scan;
+                    }
+                }
+            }
+            let Some((tx, tz)) = placed else { continue };
+            // Zone-weighted resource, varied per node so a chunk's deposits
+            // aren't all clones of each other.
+            let variant = wilder_economy::zone_resource_index(
+                zone,
+                (nh >> 8).wrapping_add(i as u32).wrapping_mul(0x9E37_79B9),
+            ) as u32;
+            let entity = self.alloc_entity();
+            self.nodes.insert(
+                entity,
+                ResourceNode {
+                    entity,
+                    position: Vec3::new(
+                        coord.x as f32 * CHUNK_SIZE + (tx as f32 + 0.5) * TILE_SIZE,
+                        0.0,
+                        coord.z as f32 * CHUNK_SIZE + (tz as f32 + 0.5) * TILE_SIZE,
+                    ),
+                    variant,
+                    charges: self.node_tuning.charges,
+                    last_gather: f64::NEG_INFINITY,
+                    depleted_at: 0.0,
+                },
+            );
+            self.nodes_by_chunk.entry(coord).or_default().push(entity);
         }
     }
 
@@ -7316,38 +7514,55 @@ impl World {
                 is_agent: false,
             });
         }
-        for node in self.nodes.values() {
-            if !node.active() {
-                continue;
+        // Nodes: only chunks in some player's view are walked, so this costs
+        // nothing per node the agent population has materialized elsewhere.
+        // The lazy respawn is evaluated in passing (read-only), so a node
+        // that came back while untouched pops in for approaching players;
+        // depleted nodes despawn until their respawn clock runs out.
+        {
+            let now = self.world_seconds();
+            let tuning = self.node_tuning;
+            let mut viewed: HashSet<ChunkCoord> = HashSet::new();
+            for p in self.players.values() {
+                viewed.extend(p.view.iter().copied());
             }
-            let kind = wilder_economy::node_yield(node.variant);
-            let health = node.charges as f32 / NODE_CHARGES as f32;
-            all.push(Replicated {
-                id: node.entity,
-                chunk: ChunkCoord::from_world(node.position),
-                spawn: EntitySpawnData {
-                    id: node.entity,
-                    kind: EntityKind::ResourceNode,
-                    name: format!("{} Deposit", kind.display_name()),
-                    appearance: Appearance::default(),
-                    position: node.position,
-                    yaw: 0.0,
-                    anim: AnimState::Idle,
-                    health_pct: health,
-                    variant: node.variant,
-                    item: None,
-                    faction: FACTION_NEUTRAL,
-                },
-                snap: EntitySnapshot {
-                    id: node.entity,
-                    position: node.position,
-                    yaw: 0.0,
-                    anim: AnimState::Idle,
-                    health_pct: health,
-                    shield_pct: 0.0,
-                },
-                is_agent: false,
-            });
+            for coord in viewed {
+                for &id in self.nodes_by_chunk.get(&coord).into_iter().flatten() {
+                    let Some(node) = self.nodes.get(&id) else { continue };
+                    let charges = node.charges_at(now, tuning.charges, tuning.respawn_seconds);
+                    if charges == 0 {
+                        continue;
+                    }
+                    let kind = wilder_economy::node_yield(node.variant);
+                    let health = charges as f32 / tuning.charges as f32;
+                    all.push(Replicated {
+                        id: node.entity,
+                        chunk: coord,
+                        spawn: EntitySpawnData {
+                            id: node.entity,
+                            kind: EntityKind::ResourceNode,
+                            name: format!("{} Deposit", kind.display_name()),
+                            appearance: Appearance::default(),
+                            position: node.position,
+                            yaw: 0.0,
+                            anim: AnimState::Idle,
+                            health_pct: health,
+                            variant: node.variant,
+                            item: None,
+                            faction: FACTION_NEUTRAL,
+                        },
+                        snap: EntitySnapshot {
+                            id: node.entity,
+                            position: node.position,
+                            yaw: 0.0,
+                            anim: AnimState::Idle,
+                            health_pct: health,
+                            shield_pct: 0.0,
+                        },
+                        is_agent: false,
+                    });
+                }
+            }
         }
         for s in self.statics.values() {
             all.push(Replicated {
@@ -7929,6 +8144,9 @@ mod tests {
             services_by_kind: HashMap::new(),
             interior_bounds: HashMap::new(),
             nodes: HashMap::new(),
+            nodes_by_chunk: HashMap::new(),
+            node_seeded_chunks: HashSet::new(),
+            node_tuning: NodeTuning::default(),
             static_seeded_chunks: HashSet::new(),
             next_entity: 1,
             tick: 0,
@@ -8707,6 +8925,220 @@ mod tests {
         world.agent_vendor_buy(idx, armory, ItemKind::Knife, 1);
         assert_eq!(world.agents[idx].wallet(), wallet - 45);
         assert_eq!(world.agents[idx].count_item(ItemKind::Knife), 1);
+    }
+
+    /// A connected player standing at `position` (throwaway channel).
+    fn spawn_test_player(world: &mut World, position: Vec3) -> EntityId {
+        let entity = world.alloc_entity();
+        let (tx, rx) = mpsc::unbounded_channel();
+        std::mem::forget(rx); // keep sends alive without a runtime
+        let character = Character {
+            id: uuid::Uuid::new_v4(),
+            account_id: uuid::Uuid::new_v4(),
+            name: "TESTER".into(),
+            appearance: Appearance::default(),
+            position,
+            yaw: 0.0,
+            level: 1,
+            xp: 0,
+            health: 100.0,
+            max_health: 100.0,
+            shield: 0.0,
+            max_shield: 0.0,
+            faction: FACTION_REBELS,
+        };
+        world.players.insert(
+            entity,
+            Player {
+                entity,
+                character,
+                inventory: Inventory::new(),
+                stash: Stash::default(),
+                tx,
+                pending_inputs: Vec::new(),
+                last_input_seq: 0,
+                path: Vec::new(),
+                view: HashSet::new(),
+                known_entities: HashSet::new(),
+                moved_this_tick: false,
+                ran_this_tick: false,
+                attacked_this_tick: false,
+                attack_cooldown: 0.0,
+                crouching: false,
+                roll_time: 0.0,
+                roll_dir: (1.0, 0.0),
+                roll_cooldown: 0.0,
+                shield_delay: 0.0,
+                ability_cooldowns: [0.0; 3],
+                stim_heal_left: 0.0,
+                stim_speed_time: 0.0,
+                overcharge_time: 0.0,
+                blueprints: HashSet::new(),
+                production: HashMap::new(),
+                purse: Purse::default(),
+                wallet_sent: None,
+                sent_snaps: HashMap::new(),
+                map_intel: false,
+                dirty: true,
+            },
+        );
+        entity
+    }
+
+    /// A fresh, gatherable node at `position` (bypasses chunk placement).
+    fn plant_test_node(world: &mut World, position: Vec3, variant: u32) -> EntityId {
+        let entity = world.alloc_entity();
+        world.nodes.insert(
+            entity,
+            ResourceNode {
+                entity,
+                position,
+                variant,
+                charges: world.node_tuning.charges,
+                last_gather: f64::NEG_INFINITY,
+                depleted_at: 0.0,
+            },
+        );
+        world.nodes_by_chunk.entry(ChunkCoord::from_world(position)).or_default().push(entity);
+        entity
+    }
+
+    #[test]
+    fn node_placement_is_deterministic_and_spread() {
+        let (mut w1, _d1) = test_world();
+        let (mut w2, _d2) = test_world();
+        // A hostile chunk well outside the safe hub.
+        let coord = ChunkCoord::new(4, 3);
+        w1.ensure_nodes(coord);
+        w2.ensure_nodes(coord);
+        let snap = |w: &World| -> Vec<(i32, i32, u32)> {
+            let mut v: Vec<_> = w
+                .nodes
+                .values()
+                .map(|n| ((n.position.x * 10.0) as i32, (n.position.z * 10.0) as i32, n.variant))
+                .collect();
+            v.sort();
+            v
+        };
+        let nodes = snap(&w1);
+        assert!(!nodes.is_empty(), "a hostile chunk should host resource nodes");
+        assert_eq!(nodes, snap(&w2), "same coord must materialize identical nodes");
+        // Distinct tiles per node.
+        let spots: HashSet<(i32, i32)> = nodes.iter().map(|&(x, z, _)| (x, z)).collect();
+        assert_eq!(spots.len(), nodes.len(), "nodes must land on distinct tiles");
+        // Re-ensuring is idempotent, and safe chunks never host nodes.
+        let before = w1.nodes.len();
+        w1.ensure_nodes(coord);
+        w1.ensure_nodes(ChunkCoord::new(0, 0));
+        assert_eq!(w1.nodes.len(), before);
+    }
+
+    #[test]
+    fn gather_node_depletes_cools_and_respawns_lazily() {
+        let (mut world, _dir) = test_world();
+        let pos = world.nearest_walkable(district_anchor("NEXUS"));
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), pos);
+        let node = plant_test_node(&mut world, pos, 0);
+        let actor = EconActor::Agent(idx);
+        let cooldown_ticks = (NODE_GATHER_COOLDOWN / TICK_DT).ceil() as u64 + 1;
+
+        assert!(world.gather_node(actor, node).is_some(), "fresh node should yield");
+        assert!(
+            world.gather_node(actor, node).is_none(),
+            "the 1.2 s cooldown must block back-to-back pulls"
+        );
+        world.tick += cooldown_ticks;
+        assert!(world.gather_node(actor, node).is_some(), "ready again after the cooldown");
+        // Drain whatever charges remain (over-pulling is harmless).
+        for _ in 0..world.node_tuning.charges {
+            world.tick += cooldown_ticks;
+            let _ = world.gather_node(actor, node);
+        }
+        assert_eq!(world.nodes[&node].charges, 0, "node should be drained");
+        world.tick += cooldown_ticks;
+        assert!(world.gather_node(actor, node).is_none(), "depleted node yields nothing");
+        // Nobody ticks node timers anymore: enough world clock passes and
+        // the next access refills it.
+        world.tick += (world.node_tuning.respawn_seconds / TICK_DT) as u64 + 1;
+        assert!(world.gather_node(actor, node).is_some(), "node must respawn lazily on access");
+        assert_eq!(world.nodes[&node].charges, world.node_tuning.charges - 1);
+    }
+
+    #[test]
+    fn gather_rules_are_shared_by_players_and_agents() {
+        let (mut world, _dir) = test_world();
+        let pos = world.nearest_walkable(district_anchor("NEXUS"));
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), pos);
+        let player = spawn_test_player(&mut world, pos + Vec3::new(2.0, 0.0, 0.0));
+        let agent_node = plant_test_node(&mut world, pos, 0);
+        let player_node = plant_test_node(&mut world, pos + Vec3::new(2.0, 0.0, 0.0), 0);
+
+        let agent_pull =
+            world.gather_node(EconActor::Agent(idx), agent_node).expect("agent pull succeeds");
+        let player_pull = world
+            .gather_node(EconActor::Player(player), player_node)
+            .expect("player pull succeeds");
+        // Same rulebook, same bounds: 2-5 roll, +50% warzone premium at
+        // most, territory tax at most 25% — for BOTH actor kinds.
+        for outcome in [&agent_pull, &player_pull] {
+            let yielded = outcome
+                .gained
+                .iter()
+                .find(|s| s.kind == ItemKind::Iron)
+                .expect("the node's resource should be yielded");
+            assert!(
+                (1..=7).contains(&yielded.count),
+                "yield outside the shared roll bounds: {}",
+                yielded.count
+            );
+        }
+        assert_eq!(
+            inv::count_items(&world.players[&player].inventory.slots, ItemKind::Iron),
+            player_pull.gained.iter().find(|s| s.kind == ItemKind::Iron).unwrap().count,
+            "player yield must land in the shared slotted inventory"
+        );
+        // Out of range is refused for everyone (both nodes already cooled
+        // by moving the clock, so range is the only gate).
+        world.tick += (NODE_GATHER_COOLDOWN / TICK_DT).ceil() as u64 + 1;
+        let far = plant_test_node(&mut world, pos + Vec3::new(50.0, 0.0, 0.0), 0);
+        assert!(world.gather_node(EconActor::Agent(idx), far).is_none());
+        assert!(world.gather_node(EconActor::Player(player), far).is_none());
+    }
+
+    #[test]
+    fn agent_gather_requires_a_real_node() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let pos = world.nearest_walkable(district_anchor("NEXUS"));
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), pos);
+        // A gather goal pointed at a node that doesn't exist mints nothing
+        // (the old virtual mint is gone) and ends so the brain re-picks.
+        let before = world.agents[idx].used_volume();
+        world.agents[idx].goal =
+            Goal::Gather { node: 999_999_999, spot: pos, pulls_left: 3, timer: 0.0 };
+        world.agent_gather_pull(idx);
+        assert_eq!(world.agents[idx].used_volume(), before, "no node, no yield");
+        assert!(matches!(world.agents[idx].goal, Goal::Idle));
+        // The decision path only ever commits Gather against a live
+        // materialized node.
+        world.decide_agent(idx);
+        if let Goal::Gather { node, spot, .. } = world.agents[idx].goal {
+            let n = world.nodes.get(&node).expect("gather goals must target real nodes");
+            assert_eq!(n.position, spot, "the walk target is the node itself");
+            assert!(n.charges > 0);
+        }
+        // A pull at a planted node yields through the shared path.
+        let node = plant_test_node(&mut world, pos, 0);
+        world.agents[idx].goal = Goal::Gather { node, spot: pos, pulls_left: 3, timer: 0.0 };
+        world.agent_gather_pull(idx);
+        assert!(
+            world.agents[idx].count_item(ItemKind::Iron) > 0,
+            "agent pull should yield the node's resource"
+        );
+        assert_eq!(world.nodes[&node].charges, world.node_tuning.charges - 1);
+        if let Goal::Gather { pulls_left, .. } = world.agents[idx].goal {
+            assert_eq!(pulls_left, 2, "one pull per act");
+        }
     }
 
     #[test]
