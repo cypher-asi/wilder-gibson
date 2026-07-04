@@ -6,6 +6,7 @@
 pub mod agents;
 mod chunks;
 pub mod districts;
+pub mod econ;
 pub mod factions;
 pub mod interiors;
 mod ledger;
@@ -43,6 +44,7 @@ use agents::{
     FactionAgent, Goal, TargetInfo, Tier, Traits, AGENT_RESPAWN_SECONDS, COLD_BUCKETS,
     COLD_TICK_BUDGET, HOT_RADIUS_CHUNKS, RETALIATION_SECONDS, RETREAT_HEALTH_PCT, WEALTH_RETREAT,
 };
+use econ::{Currency, EconActor, Purse};
 use factions::{are_hostile, faction_registry};
 use ledger::{Ledger, LedgerSave, SupplyEffect};
 use market_stats::{MarketStats, MarketStatsSave};
@@ -73,7 +75,7 @@ const HUB_STAGE_REBELS: Vec3 = Vec3::new(180.0, 0.0, 180.0);
 const HUB_STAGE_FORUM: Vec3 = Vec3::new(-180.0, 0.0, -180.0);
 /// Version stamp for the seeded agent distribution. Bump when the seeding
 /// layout changes so persisted worlds discard the old population and reseed.
-const AGENT_SEED_LAYOUT: u32 = 4;
+const AGENT_SEED_LAYOUT: u32 = 5;
 /// Chunks with |x|<=SAFE_RADIUS and |z|<=SAFE_RADIUS are the safe hub.
 const SAFE_RADIUS: i32 = 1;
 /// Congestion model for service routing (Bodega/Armory/craft stations).
@@ -665,7 +667,7 @@ fn market_listable(kind: ItemKind) -> bool {
 /// an agent never sells itself defenseless.
 fn market_surplus(agent: &FactionAgent) -> Vec<(ItemKind, u32)> {
     let mut totals: Vec<(ItemKind, u32)> = Vec::new();
-    for s in &agent.inventory {
+    for s in agent.inventory.slots.iter().flatten() {
         if !market_listable(s.kind) {
             continue;
         }
@@ -931,20 +933,9 @@ struct Player {
     blueprints: HashSet<String>,
     /// Production queues per building entity (personal queues, Phase 3).
     production: HashMap<EntityId, Vec<ProductionJobState>>,
-    /// Cached account wallet (write-through to the store). At-risk: burns on
-    /// death, same as faction agents.
-    wallet: u32,
-    /// Cached death-safe banked MILD (write-through to the store). Deposited
-    /// and withdrawn at a Bank; never lost on death.
-    bank: u32,
-    /// Cached salvage currency (write-through to the store). At-risk on death.
-    shards: u32,
-    /// Cached death-safe banked Shards.
-    bank_shards: u32,
-    /// Cached charge currency (write-through to the store). At-risk on death.
-    energy: u32,
-    /// Cached death-safe banked Energy.
-    bank_energy: u32,
+    /// Cached account currency balances (write-through to the store).
+    /// Carried burns on death, same as faction agents; banked is death-safe.
+    purse: Purse,
     /// Last (wild, bank, shards, bank_shards, energy, bank_energy) sent as a
     /// WalletUpdate; None forces the initial send. Checked in replicate().
     wallet_sent: Option<(u32, u32, u32, u32, u32, u32)>,
@@ -1119,25 +1110,6 @@ struct LootContainer {
     /// death drops (burned when the player died) and world-seeded ammo caches
     /// (issued on pickup), so pickups from those re-mint instead of transfer.
     in_supply: bool,
-}
-
-/// A minted currency that can drop as a loose, collectible pickup.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Currency {
-    Wild,
-    Shards,
-    Energy,
-}
-
-impl Currency {
-    /// Replicated `variant` index the client uses to pick the pickup's look.
-    fn variant(self) -> u32 {
-        match self {
-            Currency::Wild => 0,
-            Currency::Shards => 1,
-            Currency::Energy => 2,
-        }
-    }
 }
 
 /// Loose currency scattered on death; grants its amount when a player walks
@@ -1474,16 +1446,19 @@ impl World {
         }
 
         // One-time MILD grant per account (tracked in world meta).
-        let (mut wallet, bank, shards, bank_shards, energy, bank_energy) = self
+        let mut purse = self
             .store
             .account_by_id(account)
-            .map(|a| (a.wallet, a.bank, a.shards, a.bank_shards, a.energy, a.bank_energy))
-            .unwrap_or((0, 0, 0, 0, 0, 0));
+            .map(|a| Purse {
+                carried: [a.wallet, a.shards, a.energy],
+                banked: [a.bank, a.bank_shards, a.bank_energy],
+            })
+            .unwrap_or_default();
         let grant_key = format!("wallet_granted_{account}");
         let granted: bool = self.store.meta(&grant_key).ok().flatten().unwrap_or(false);
         if !granted {
-            wallet += WALLET_GRANT;
-            let _ = self.store.update_wallet(account, wallet);
+            purse.credit(Currency::Wild, WALLET_GRANT);
+            let _ = self.store.update_wallet(account, purse.carried(Currency::Wild));
             let _ = self.store.save_meta(&grant_key, &true);
             self.ledger.record(
                 TxKind::Mint,
@@ -1530,12 +1505,7 @@ impl World {
             overcharge_time: 0.0,
             blueprints,
             production: HashMap::new(),
-            wallet,
-            bank,
-            shards,
-            bank_shards,
-            energy,
-            bank_energy,
+            purse,
             wallet_sent: None,
             sent_snaps: HashMap::new(),
             map_intel: false,
@@ -2224,10 +2194,11 @@ impl World {
             return;
         }
         let Some(player) = self.players.get_mut(&entity) else { return };
-        player.shards += amount;
+        player.purse.credit(Currency::Shards, amount);
         let to = player_party(player);
         let account = player.character.account_id;
-        let (shards, energy) = (player.shards, player.energy);
+        let (shards, energy) =
+            (player.purse.carried(Currency::Shards), player.purse.carried(Currency::Energy));
         self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Shards { amount }, 0);
         let _ = self.store.update_currencies(account, shards, energy);
     }
@@ -2238,10 +2209,11 @@ impl World {
             return;
         }
         let Some(player) = self.players.get_mut(&entity) else { return };
-        player.energy += amount;
+        player.purse.credit(Currency::Energy, amount);
         let to = player_party(player);
         let account = player.character.account_id;
-        let (shards, energy) = (player.shards, player.energy);
+        let (shards, energy) =
+            (player.purse.carried(Currency::Shards), player.purse.carried(Currency::Energy));
         self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Energy { amount }, 0);
         let _ = self.store.update_currencies(account, shards, energy);
     }
@@ -2253,10 +2225,10 @@ impl World {
             return;
         }
         let Some(player) = self.players.get_mut(&entity) else { return };
-        player.wallet += amount;
+        player.purse.credit(Currency::Wild, amount);
         let to = player_party(player);
         let account = player.character.account_id;
-        let wallet = player.wallet;
+        let wallet = player.purse.carried(Currency::Wild);
         self.ledger.record(TxKind::Mint, TxParty::Mint, to, TxAmount::Wild { amount }, 0);
         let _ = self.store.update_wallet(account, wallet);
     }
@@ -2293,6 +2265,169 @@ impl World {
                 ttl: CURRENCY_PICKUP_TTL,
             },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // EconActor: shared player/agent accessors for the economy entry points
+    // -----------------------------------------------------------------------
+
+    /// Current position of an economic actor (None = not in the world).
+    fn actor_position(&self, actor: EconActor) -> Option<Vec3> {
+        match actor {
+            EconActor::Player(id) => self.players.get(&id).map(|p| p.character.position),
+            EconActor::Agent(idx) => self.agents.get(idx).map(|a| a.position),
+        }
+    }
+
+    /// Faction an actor trades/fights under (players are Rebels for now).
+    fn actor_faction(&self, actor: EconActor) -> FactionId {
+        match actor {
+            EconActor::Player(_) => FACTION_REBELS,
+            EconActor::Agent(idx) => self.agents.get(idx).map_or(FACTION_NEUTRAL, |a| a.faction),
+        }
+    }
+
+    /// Ledger party for an actor.
+    fn actor_party(&self, actor: EconActor) -> Option<TxParty> {
+        match actor {
+            EconActor::Player(id) => self.players.get(&id).map(player_party),
+            EconActor::Agent(idx) => self.agents.get(idx).map(|a| a.party()),
+        }
+    }
+
+    /// Read access to an actor's currency balances.
+    fn actor_purse(&self, actor: EconActor) -> Option<&Purse> {
+        match actor {
+            EconActor::Player(id) => self.players.get(&id).map(|p| &p.purse),
+            EconActor::Agent(idx) => self.agents.get(idx).map(|a| &a.purse),
+        }
+    }
+
+    /// Mutable access to an actor's currency balances.
+    fn actor_purse_mut(&mut self, actor: EconActor) -> Option<&mut Purse> {
+        match actor {
+            EconActor::Player(id) => self.players.get_mut(&id).map(|p| &mut p.purse),
+            EconActor::Agent(idx) => self.agents.get_mut(idx).map(|a| &mut a.purse),
+        }
+    }
+
+    /// Mutable access to an actor's backpack slots (players and agents run
+    /// the same slotted model; equip slots stay actor-specific). Callers
+    /// mutate, so players are marked dirty for the persistence sweep.
+    fn actor_slots_mut(&mut self, actor: EconActor) -> Option<&mut [Option<ItemStack>]> {
+        match actor {
+            EconActor::Player(id) => self.players.get_mut(&id).map(|p| {
+                p.dirty = true;
+                p.inventory.slots.as_mut_slice()
+            }),
+            EconActor::Agent(idx) => {
+                self.agents.get_mut(idx).map(|a| a.inventory.slots.as_mut_slice())
+            }
+        }
+    }
+
+    /// The recipes an actor may craft. Players research theirs; agents run
+    /// on the starter set until they get a real learned field (Phase 3).
+    #[allow(dead_code)]
+    fn actor_knows_blueprint(&self, actor: EconActor, recipe_id: &str) -> bool {
+        match actor {
+            EconActor::Player(id) => {
+                self.players.get(&id).is_some_and(|p| p.blueprints.contains(recipe_id))
+            }
+            EconActor::Agent(_) => DEFAULT_BLUEPRINTS.contains(&recipe_id),
+        }
+    }
+
+    /// Whether an actor can reach `target`: within `range` metres of the
+    /// entity, or anywhere inside its walk-in room (service counters sit
+    /// well past the door's interaction ring).
+    fn actor_in_range(&self, actor: EconActor, target: EntityId, range: f32) -> bool {
+        let Some(pos) = self.actor_position(actor) else { return false };
+        let target_pos = self
+            .statics
+            .get(&target)
+            .map(|s| s.position)
+            .or_else(|| self.entity_position(target));
+        if target_pos.is_some_and(|t| (t - pos).length() <= range) {
+            return true;
+        }
+        self.interior_bounds.get(&target).is_some_and(|[x0, z0, x1, z1]| {
+            pos.x >= x0 - 0.5 && pos.x <= x1 + 0.5 && pos.z >= z0 - 0.5 && pos.z <= z1 + 0.5
+        })
+    }
+
+    /// Yield after the territory tax for whatever ground the pull happens
+    /// on: hostile-held regions tax players and agents identically.
+    fn actor_taxed_yield(&self, actor: EconActor, pos: Vec3, count: u32) -> u32 {
+        apply_territory_tax(count, self.region_hostile_to(pos, self.actor_faction(actor)))
+    }
+
+    /// Add items to an actor's backpack under the shared slotted rules;
+    /// returns the leftover that did NOT fit. Callers must spill leftovers
+    /// to ground loot or deny the action — never drop them silently. Agents
+    /// wear acquired upgrades immediately (players manage their own slots).
+    fn actor_add_items(&mut self, actor: EconActor, kind: ItemKind, count: u32) -> u32 {
+        let leftover = match self.actor_slots_mut(actor) {
+            Some(slots) => inv::add_items(slots, kind, count),
+            None => return count,
+        };
+        if let EconActor::Agent(idx) = actor {
+            self.agents[idx].equip_best_gear();
+        }
+        leftover
+    }
+
+    /// Remove up to `count` items from an actor's backpack; returns how many
+    /// were actually removed.
+    fn actor_remove_items(&mut self, actor: EconActor, kind: ItemKind, count: u32) -> u32 {
+        match self.actor_slots_mut(actor) {
+            Some(slots) => inv::remove_items(slots, kind, count),
+            None => 0,
+        }
+    }
+
+    fn actor_count_items(&self, actor: EconActor, kind: ItemKind) -> u32 {
+        match actor {
+            EconActor::Player(id) => self
+                .players
+                .get(&id)
+                .map_or(0, |p| inv::count_items(&p.inventory.slots, kind)),
+            EconActor::Agent(idx) => self.agents.get(idx).map_or(0, |a| a.count_item(kind)),
+        }
+    }
+
+    /// Send a client message when the actor has a client; agents silently
+    /// skip (their feedback loop is utility scoring, not UI).
+    fn actor_notify(&self, actor: EconActor, msg: S2C) {
+        if let EconActor::Player(id) = actor {
+            if let Some(p) = self.players.get(&id) {
+                let _ = p.tx.send(msg);
+            }
+        }
+    }
+
+    /// Write the actor's purse through to durable storage. Players write
+    /// through to the account store (same four balance calls the store has
+    /// always exposed); agents persist through the sharded population saves,
+    /// so there is nothing to do here.
+    fn persist_actor_purse(&mut self, actor: EconActor) {
+        if let EconActor::Player(id) = actor {
+            let Some(p) = self.players.get(&id) else { return };
+            let account = p.character.account_id;
+            let purse = p.purse;
+            let _ = self.store.update_wallet(account, purse.carried(Currency::Wild));
+            let _ = self.store.update_bank(account, purse.banked(Currency::Wild));
+            let _ = self.store.update_currencies(
+                account,
+                purse.carried(Currency::Shards),
+                purse.carried(Currency::Energy),
+            );
+            let _ = self.store.update_bank_currencies(
+                account,
+                purse.banked(Currency::Shards),
+                purse.banked(Currency::Energy),
+            );
+        }
     }
 
     fn interact(&mut self, entity: EntityId, target: EntityId) {
@@ -2336,35 +2471,36 @@ impl World {
         }
 
         // Resource node?
-        if let Some(node) = self.nodes.get_mut(&target) {
-            let Some(player) = self.players.get_mut(&entity) else { return };
-            if !node.active() {
+        if let Some(node) = self.nodes.get(&target) {
+            let (node_pos, node_variant, node_active, node_cooldown) =
+                (node.position, node.variant, node.active(), node.cooldown);
+            let Some(player) = self.players.get(&entity) else { return };
+            if !node_active {
                 return;
             }
-            if (node.position - player.character.position).length() > 3.0 {
+            if (node_pos - player.character.position).length() > 3.0 {
                 let _ = player.tx.send(S2C::Error { message: "too far away".into() });
                 return;
             }
-            if node.cooldown > 0.0 {
+            if node_cooldown > 0.0 {
                 return;
             }
-            node.cooldown = NODE_GATHER_COOLDOWN;
-            node.charges -= 1;
-            if node.charges == 0 {
-                node.respawn_in = NODE_RESPAWN_SECONDS;
+            if let Some(node) = self.nodes.get_mut(&target) {
+                node.cooldown = NODE_GATHER_COOLDOWN;
+                node.charges -= 1;
+                if node.charges == 0 {
+                    node.respawn_in = NODE_RESPAWN_SECONDS;
+                }
             }
             use rand::Rng;
-            let kind = wilder_economy::node_yield(node.variant);
+            let kind = wilder_economy::node_yield(node_variant);
             let rolled = self.rng.random_range(2..=5u32);
-            // Hostile-held ground taxes what you can carry out of it.
-            // (Field access, not the helper: `node` holds a &mut borrow.)
-            let enemy = self
-                .territory
-                .get(&region_of(node.position))
-                .is_some_and(|&h| are_hostile(h, FACTION_REBELS));
-            let count = apply_territory_tax(rolled, enemy);
-            let leftover = inv::add_items(&mut player.inventory.slots, kind, count);
+            // Hostile-held ground taxes what you can carry out of it —
+            // players and agents run through the same actor helpers here.
+            let count = self.actor_taxed_yield(EconActor::Player(entity), node_pos, rolled);
+            let leftover = self.actor_add_items(EconActor::Player(entity), kind, count);
             let gained = count - leftover;
+            let Some(player) = self.players.get_mut(&entity) else { return };
             if gained > 0 {
                 self.ledger.record(
                     TxKind::Mint,
@@ -2402,18 +2538,12 @@ impl World {
         // Static entity (stash terminal / service building)?
         let Some(static_entity) = self.statics.get(&target) else { return };
         let kind = static_entity.kind;
-        let pos = static_entity.position;
-        let room = self.interior_bounds.get(&target).copied();
-        let Some(player) = self.players.get_mut(&entity) else { return };
         // Service buildings are interactable from their street side (the
         // entity stands on the sidewalk by the door) or from anywhere inside
         // their walk-in room, whose counter sits well past the 5 m ring.
-        let p = player.character.position;
-        let near = (pos - p).length() <= 5.0;
-        let inside = room.map_or(false, |[x0, z0, x1, z1]| {
-            p.x >= x0 - 0.5 && p.x <= x1 + 0.5 && p.z >= z0 - 0.5 && p.z <= z1 + 0.5
-        });
-        if !near && !inside {
+        let in_range = self.actor_in_range(EconActor::Player(entity), target, 5.0);
+        let Some(player) = self.players.get_mut(&entity) else { return };
+        if !in_range {
             let _ = player.tx.send(S2C::Error { message: "too far away".into() });
             return;
         }
@@ -3108,7 +3238,9 @@ impl World {
                 price_each: l.price_each,
             })
             .collect();
-        let _ = player.tx.send(S2C::MarketState { listings, wallet: player.wallet });
+        let _ = player
+            .tx
+            .send(S2C::MarketState { listings, wallet: player.purse.carried(Currency::Wild) });
     }
 
     fn market_action(&mut self, entity: EntityId, action: MarketAction) {
@@ -3187,16 +3319,20 @@ impl World {
                 let count = count.min(available).max(1);
                 let cost = price_each.saturating_mul(count);
                 let buyer = self.players.get_mut(&entity).ok_or("not in world")?;
-                if buyer.wallet < cost {
-                    return Err(format!("need {cost} MILD, have {}", buyer.wallet));
+                if !buyer.purse.debit(Currency::Wild, cost) {
+                    return Err(format!(
+                        "need {cost} MILD, have {}",
+                        buyer.purse.carried(Currency::Wild)
+                    ));
                 }
-                buyer.wallet -= cost;
                 let buyer_account = buyer.character.account_id;
                 let buyer_pos = buyer.character.position;
                 let buyer_party = player_party(buyer);
                 let leftover = inv::add_items(&mut buyer.inventory.slots, kind, count);
                 buyer.dirty = true;
-                let _ = self.store.update_wallet(buyer_account, self.players[&entity].wallet);
+                let _ = self
+                    .store
+                    .update_wallet(buyer_account, self.players[&entity].purse.carried(Currency::Wild));
                 if leftover > 0 {
                     self.spawn_loot(
                         buyer_pos,
@@ -3331,16 +3467,17 @@ impl World {
             .iter()
             .map(|e| VendorOffer { kind: e.kind, buy: e.buy, sell: e.sell })
             .collect();
+        let purse = &player.purse;
         let _ = player.tx.send(S2C::VendorState {
             vendor,
             kind: station.kind,
             offers,
-            wallet: player.wallet,
-            bank: player.bank,
-            shards: player.shards,
-            bank_shards: player.bank_shards,
-            energy: player.energy,
-            bank_energy: player.bank_energy,
+            wallet: purse.carried(Currency::Wild),
+            bank: purse.banked(Currency::Wild),
+            shards: purse.carried(Currency::Shards),
+            bank_shards: purse.banked(Currency::Shards),
+            energy: purse.carried(Currency::Energy),
+            bank_energy: purse.banked(Currency::Energy),
         });
     }
 
@@ -3376,97 +3513,10 @@ impl World {
         match action {
             VendorAction::Refresh => Ok(()),
             VendorAction::Buy { kind: item, count } => {
-                let offer = wilder_economy::vendor_offers(kind)
-                    .iter()
-                    .find(|e| e.kind == item && e.buy > 0)
-                    .ok_or("not sold here")?;
-                let count = count.clamp(1, 100);
-                let cost = offer.buy.saturating_mul(count);
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                if player.wallet < cost {
-                    return Err(format!("need {cost} MILD, have {}", player.wallet));
-                }
-                player.wallet -= cost;
-                let account = player.character.account_id;
-                let wallet = player.wallet;
-                let player_pos = player.character.position;
-                let buyer = player_party(player);
-                let leftover = inv::add_items(&mut player.inventory.slots, item, count);
-                player.dirty = true;
-                let _ = self.store.update_wallet(account, wallet);
-                // Ledger: MILD moves onto the vendor agent; the stock the
-                // vendor hands over is fresh issuance (bottomless shelves).
-                self.ledger.record(
-                    TxKind::VendorBuy,
-                    buyer.clone(),
-                    vendor_agent.clone(),
-                    TxAmount::Wild { amount: cost },
-                    0,
-                );
-                self.ledger.record_ex(
-                    TxKind::VendorBuy,
-                    vendor_agent.clone(),
-                    buyer.clone(),
-                    TxAmount::Item { kind: item, count },
-                    0,
-                    SupplyEffect::Mint,
-                );
-                if leftover > 0 {
-                    self.spawn_loot(
-                        player_pos,
-                        vec![ItemStack { kind: item, count: leftover }],
-                        Some(buyer),
-                        true,
-                    );
-                }
-                // Whoever holds this ground skims a cut; the rest burns.
-                self.distribute_commerce(
-                    pos,
-                    cost * wilder_economy::COMMERCE_CUT_PCT / 100,
-                    vendor_agent,
-                    false,
-                );
-                Ok(())
+                self.vendor_buy(EconActor::Player(entity), vendor, item, count.clamp(1, 100))
             }
             VendorAction::Sell { kind: item, count } => {
-                let offer = wilder_economy::vendor_offers(kind)
-                    .iter()
-                    .find(|e| e.kind == item && e.sell > 0)
-                    .ok_or("not bought here")?;
-                let player = self.players.get_mut(&entity).ok_or("not in world")?;
-                let have = inv::count_items(&player.inventory.slots, item);
-                if have == 0 {
-                    return Err(format!("no {} to sell", item.display_name()));
-                }
-                let count = count.clamp(1, have);
-                inv::remove_items(&mut player.inventory.slots, item, count);
-                let gross = offer.sell.saturating_mul(count);
-                let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
-                player.wallet += gross - cut;
-                let account = player.character.account_id;
-                let wallet = player.wallet;
-                let seller = player_party(player);
-                player.dirty = true;
-                let _ = self.store.update_wallet(account, wallet);
-                // Ledger: sold items are absorbed out of supply; the payout
-                // comes off the vendor agent's balance.
-                self.ledger.record_ex(
-                    TxKind::VendorSell,
-                    seller.clone(),
-                    vendor_agent.clone(),
-                    TxAmount::Item { kind: item, count },
-                    0,
-                    SupplyEffect::Burn,
-                );
-                self.ledger.record(
-                    TxKind::VendorSell,
-                    vendor_agent.clone(),
-                    seller,
-                    TxAmount::Wild { amount: gross - cut },
-                    cut,
-                );
-                self.distribute_commerce(pos, cut, vendor_agent, false);
-                Ok(())
+                self.vendor_sell(EconActor::Player(entity), vendor, item, count)
             }
             VendorAction::Convert { count } => {
                 if kind != EntityKind::Bank {
@@ -3480,9 +3530,9 @@ impl World {
                 let count = count.clamp(1, have);
                 inv::remove_items(&mut player.inventory.slots, ItemKind::Cash, count);
                 let fee = count * wilder_economy::BANK_FEE_PCT / 100;
-                player.wallet += count - fee;
+                player.purse.credit(Currency::Wild, count - fee);
                 let account = player.character.account_id;
-                let wallet = player.wallet;
+                let wallet = player.purse.carried(Currency::Wild);
                 let converter = player_party(player);
                 player.dirty = true;
                 let _ = self.store.update_wallet(account, wallet);
@@ -3512,64 +3562,157 @@ impl World {
                 if kind != EntityKind::Bank {
                     return Err("only a Bank holds deposits".into());
                 }
-                self.move_to_bank(entity, currency, amount, true)
+                self.move_to_bank(EconActor::Player(entity), currency.into(), amount, true)
             }
             VendorAction::Withdraw { currency, amount } => {
                 if kind != EntityKind::Bank {
                     return Err("only a Bank holds deposits".into());
                 }
-                self.move_to_bank(entity, currency, amount, false)
+                self.move_to_bank(EconActor::Player(entity), currency.into(), amount, false)
             }
         }
     }
 
-    /// Move `amount` of a currency between a player's at-risk carried balance
-    /// and their death-safe bank vault (`deposit` picks the direction). The
+    /// Vendor buy for any economy actor: same rules and ledger legs whether a
+    /// player or a faction agent stands at the counter. Debits the purse,
+    /// hands over the stock (overflow spills as ground loot at the buyer's
+    /// feet — paid for, never silently dropped), and routes the commerce cut.
+    fn vendor_buy(
+        &mut self,
+        actor: EconActor,
+        vendor: EntityId,
+        item: ItemKind,
+        count: u32,
+    ) -> Result<(), String> {
+        let (kind, pos, vendor_agent) = self
+            .statics
+            .get(&vendor)
+            .map(|s| (s.kind, s.position, static_party(s)))
+            .ok_or("no such vendor")?;
+        let offer = wilder_economy::vendor_offers(kind)
+            .iter()
+            .find(|e| e.kind == item && e.buy > 0)
+            .ok_or("not sold here")?;
+        let cost = offer.buy.saturating_mul(count);
+        let buyer = self.actor_party(actor).ok_or("not in world")?;
+        let purse = self.actor_purse_mut(actor).ok_or("not in world")?;
+        if !purse.debit(Currency::Wild, cost) {
+            return Err(format!("need {cost} MILD, have {}", purse.carried(Currency::Wild)));
+        }
+        self.persist_actor_purse(actor);
+        let buyer_pos = self.actor_position(actor).unwrap_or(pos);
+        let leftover = self.actor_add_items(actor, item, count);
+        // Ledger: MILD moves onto the vendor agent; the stock the vendor
+        // hands over is fresh issuance (bottomless shelves).
+        self.ledger.record(
+            TxKind::VendorBuy,
+            buyer.clone(),
+            vendor_agent.clone(),
+            TxAmount::Wild { amount: cost },
+            0,
+        );
+        self.ledger.record_ex(
+            TxKind::VendorBuy,
+            vendor_agent.clone(),
+            buyer.clone(),
+            TxAmount::Item { kind: item, count },
+            0,
+            SupplyEffect::Mint,
+        );
+        if leftover > 0 {
+            self.spawn_loot(
+                buyer_pos,
+                vec![ItemStack { kind: item, count: leftover }],
+                Some(buyer),
+                true,
+            );
+        }
+        // Whoever holds this ground skims a cut; the rest burns.
+        self.distribute_commerce(
+            pos,
+            cost * wilder_economy::COMMERCE_CUT_PCT / 100,
+            vendor_agent,
+            false,
+        );
+        Ok(())
+    }
+
+    /// Vendor sell for any economy actor: items burn out of supply, the
+    /// payout (minus the commerce cut) lands in the purse, the cut routes to
+    /// whoever holds the ground. Sells up to `count`, clamped to what's held.
+    fn vendor_sell(
+        &mut self,
+        actor: EconActor,
+        vendor: EntityId,
+        item: ItemKind,
+        count: u32,
+    ) -> Result<(), String> {
+        let (kind, pos, vendor_agent) = self
+            .statics
+            .get(&vendor)
+            .map(|s| (s.kind, s.position, static_party(s)))
+            .ok_or("no such vendor")?;
+        let offer = wilder_economy::vendor_offers(kind)
+            .iter()
+            .find(|e| e.kind == item && e.sell > 0)
+            .ok_or("not bought here")?;
+        let have = self.actor_count_items(actor, item);
+        if have == 0 {
+            return Err(format!("no {} to sell", item.display_name()));
+        }
+        let count = count.clamp(1, have);
+        let seller = self.actor_party(actor).ok_or("not in world")?;
+        self.actor_remove_items(actor, item, count);
+        let gross = offer.sell.saturating_mul(count);
+        let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
+        if let Some(purse) = self.actor_purse_mut(actor) {
+            purse.credit(Currency::Wild, gross - cut);
+        }
+        self.persist_actor_purse(actor);
+        // Ledger: sold items are absorbed out of supply; the payout comes
+        // off the vendor agent's balance.
+        self.ledger.record_ex(
+            TxKind::VendorSell,
+            seller.clone(),
+            vendor_agent.clone(),
+            TxAmount::Item { kind: item, count },
+            0,
+            SupplyEffect::Burn,
+        );
+        self.ledger.record(
+            TxKind::VendorSell,
+            vendor_agent.clone(),
+            seller,
+            TxAmount::Wild { amount: gross - cut },
+            cut,
+        );
+        self.distribute_commerce(pos, cut, vendor_agent, false);
+        Ok(())
+    }
+
+    /// Move `amount` of a currency between an actor's at-risk carried balance
+    /// and its death-safe bank vault (`deposit` picks the direction). The
     /// currency never leaves supply — it just changes its exposure to death —
     /// so no ledger leg is recorded. Write-through to the account store.
     fn move_to_bank(
         &mut self,
-        entity: EntityId,
-        currency: wilder_protocol::Currency,
+        actor: EconActor,
+        currency: Currency,
         amount: u32,
         deposit: bool,
     ) -> Result<(), String> {
-        use wilder_protocol::Currency as Cur;
-        let player = self.players.get_mut(&entity).ok_or("not in world")?;
-        // (carried, banked) balance pointers for the chosen currency.
-        let (carried, banked): (&mut u32, &mut u32) = match currency {
-            Cur::Mild => (&mut player.wallet, &mut player.bank),
-            Cur::Shards => (&mut player.shards, &mut player.bank_shards),
-            Cur::Energy => (&mut player.energy, &mut player.bank_energy),
-        };
-        let (src, dst) = if deposit { (carried, banked) } else { (banked, carried) };
-        let amount = amount.min(*src);
-        if amount == 0 {
+        let purse = self.actor_purse_mut(actor).ok_or("not in world")?;
+        let moved =
+            if deposit { purse.deposit(currency, amount) } else { purse.withdraw(currency, amount) };
+        if moved == 0 {
             return Err(if deposit { "nothing to deposit" } else { "nothing banked" }.into());
         }
-        *src -= amount;
-        *dst += amount;
-        let account = player.character.account_id;
-        player.dirty = true;
-        let (wallet, bank, shards, bank_shards, energy, bank_energy) = (
-            player.wallet,
-            player.bank,
-            player.shards,
-            player.bank_shards,
-            player.energy,
-            player.bank_energy,
-        );
-        // Persist whichever pair of balances this currency lives in.
-        match currency {
-            Cur::Mild => {
-                let _ = self.store.update_wallet(account, wallet);
-                let _ = self.store.update_bank(account, bank);
-            }
-            Cur::Shards | Cur::Energy => {
-                let _ = self.store.update_currencies(account, shards, energy);
-                let _ = self.store.update_bank_currencies(account, bank_shards, bank_energy);
+        if let EconActor::Player(id) = actor {
+            if let Some(p) = self.players.get_mut(&id) {
+                p.dirty = true;
             }
         }
+        self.persist_actor_purse(actor);
         Ok(())
     }
 
@@ -3594,7 +3737,9 @@ impl World {
         *self.region_income.entry(region).or_insert(0) += cut;
         let controller = self.territory.get(&region).copied().unwrap_or(FACTION_NEUTRAL);
         if controller != FACTION_NEUTRAL {
-            let holders: Vec<EntityId> = self
+            // One holder list, players and agents alike: everyone standing on
+            // controlled ground splits the cut through the same actor path.
+            let mut holders: Vec<EconActor> = self
                 .players
                 .values()
                 .filter(|p| {
@@ -3602,29 +3747,27 @@ impl World {
                         && p.character.health > 0.0
                         && region_of(p.character.position) == region
                 })
-                .map(|p| p.entity)
+                .map(|p| EconActor::Player(p.entity))
                 .collect();
-            let holder_agents: Vec<usize> = self
-                .agents
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| {
-                    a.alive() && a.faction == controller && region_of(a.position) == region
-                })
-                .map(|(i, _)| i)
-                .collect();
-            let total = holders.len() + holder_agents.len();
-            let share = if total == 0 { 0 } else { cut / total as u32 };
+            holders.extend(
+                self.agents
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.alive() && a.faction == controller && region_of(a.position) == region
+                    })
+                    .map(|(i, _)| EconActor::Agent(i)),
+            );
+            let share = if holders.is_empty() { 0 } else { cut / holders.len() as u32 };
             if share > 0 {
                 let effect = if minted { SupplyEffect::Mint } else { SupplyEffect::Auto };
-                for id in holders {
-                    let Some(player) = self.players.get_mut(&id) else { continue };
-                    player.wallet += share;
+                for actor in holders {
+                    let Some(holder) = self.actor_party(actor) else { continue };
+                    if let Some(purse) = self.actor_purse_mut(actor) {
+                        purse.credit(Currency::Wild, share);
+                    }
                     unrouted -= share;
-                    let account = player.character.account_id;
-                    let wallet = player.wallet;
-                    let holder = player_party(player);
-                    let _ = self.store.update_wallet(account, wallet);
+                    self.persist_actor_purse(actor);
                     self.ledger.record_ex(
                         TxKind::Fee,
                         from.clone(),
@@ -3633,23 +3776,12 @@ impl World {
                         0,
                         effect,
                     );
-                    let _ = player.tx.send(S2C::Chat {
-                        from: "system".into(),
-                        text: format!("+{share} MILD — commerce cut from territory you hold"),
-                    });
-                }
-                for idx in holder_agents {
-                    let agent = &mut self.agents[idx];
-                    agent.wallet += share;
-                    unrouted -= share;
-                    let holder = agent.party();
-                    self.ledger.record_ex(
-                        TxKind::Fee,
-                        from.clone(),
-                        holder,
-                        TxAmount::Wild { amount: share },
-                        0,
-                        effect,
+                    self.actor_notify(
+                        actor,
+                        S2C::Chat {
+                            from: "system".into(),
+                            text: format!("+{share} MILD — commerce cut from territory you hold"),
+                        },
                     );
                 }
             }
@@ -4224,9 +4356,10 @@ impl World {
         // death (only the banked portion is safe). Coin doesn't scatter as
         // loot — it's simply gone from supply.
         let account = player.character.account_id;
-        let lost_wallet = std::mem::take(&mut player.wallet);
-        let lost_shards = std::mem::take(&mut player.shards);
-        let lost_energy = std::mem::take(&mut player.energy);
+        let burned = player.purse.burn_carried_on_death();
+        let lost_wallet = burned[Currency::Wild.index()];
+        let lost_shards = burned[Currency::Shards.index()];
+        let lost_energy = burned[Currency::Energy.index()];
         // Ledger: everything in the backpack burns out of supply on death.
         // The physical drop is salvage — whoever picks it up re-mints it,
         // attributed as a transfer from the dead player.
@@ -4406,8 +4539,7 @@ impl World {
             // A winning fight is the Fight activity's payoff: bounty plus a
             // share of what the victim was carrying (the killer's side can
             // now loot it / hold the ground it defended).
-            let spoils =
-                self.agents[idx].wallet + self.agents[idx].carried_value();
+            let spoils = self.agents[idx].wallet() + self.agents[idx].carried_value();
             if let Some(&killer_idx) = self.agent_by_entity.get(&attacker) {
                 self.agents[killer_idx]
                     .learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
@@ -4423,11 +4555,13 @@ impl World {
 
     /// Kill an agent. Hot deaths (`drop_loot`) leave a loot container and
     /// coin spill where the body fell; cold statistical deaths burn the
-    /// carried goods outright. Either way the wallet burns, the ledger hears
-    /// about everything, and a fresh identity respawns at the faction's
-    /// Guarded home district after the timer.
+    /// carried goods outright. Either way every carried currency burns
+    /// (banked balances survive, like players), the ledger hears about
+    /// everything, and a fresh identity respawns at the faction's Guarded
+    /// home district after the timer. Equipped gear stays on the identity,
+    /// exactly like a player's jacket staying on their back.
     fn kill_agent(&mut self, idx: usize, drop_loot: bool) {
-        let (entity, position, items, wallet, party) = {
+        let (entity, position, items, burned, party) = {
             let agent = &mut self.agents[idx];
             agent.health = 0.0;
             agent.anim = AnimState::Death;
@@ -4435,14 +4569,15 @@ impl World {
             // Dying is the loss signal: charge everything on the body to the
             // activity that got the agent killed, so risky lines of work
             // learn their true (risk-adjusted) return.
-            let lost = agent.wallet + agent.carried_value();
+            let lost = agent.wallet() + agent.carried_value();
             agent.learn(activity_of(agent.goal), -(lost as f32));
             agent.goal = Goal::Idle;
             agent.path.clear();
             agent.path_request = None;
-            let items = std::mem::take(&mut agent.inventory);
-            let wallet = std::mem::take(&mut agent.wallet);
-            (agent.entity, agent.position, items, wallet, agent.party())
+            let items: Vec<ItemStack> =
+                agent.inventory.slots.iter_mut().filter_map(|s| s.take()).collect();
+            let burned = agent.purse.burn_carried_on_death();
+            (agent.entity, agent.position, items, burned, agent.party())
         };
         // Field intel: a body dropped here (danger signal).
         *self.region_casualties.entry(region_of(position)).or_insert(0) += 1;
@@ -4462,14 +4597,17 @@ impl World {
                 0,
             );
         }
-        if wallet > 0 {
-            self.ledger.record(
-                TxKind::Burn,
-                party.clone(),
-                TxParty::Burn,
-                TxAmount::Wild { amount: wallet },
-                0,
-            );
+        for currency in Currency::ALL {
+            let amount = burned[currency.index()];
+            if amount > 0 {
+                self.ledger.record(
+                    TxKind::Burn,
+                    party.clone(),
+                    TxParty::Burn,
+                    currency.tx_amount(amount),
+                    0,
+                );
+            }
         }
         if drop_loot {
             self.broadcast_combat(CombatEvent::EntityDied { id: entity });
@@ -4795,7 +4933,7 @@ impl World {
                     &victim_actor,
                 );
                 // Statistical wins teach Fight the same way embodied ones do.
-                let spoils = self.agents[idx].wallet + self.agents[idx].carried_value();
+                let spoils = self.agents[idx].wallet() + self.agents[idx].carried_value();
                 if self.agents[killer].alive() {
                     self.agents[killer].learn(Activity::Fight, 25.0 + (spoils as f32) * 0.3);
                 }
@@ -4867,7 +5005,7 @@ impl World {
             &[]
         };
         let party = self.agents[idx].party();
-        self.agents[idx].wallet += wallet;
+        self.agents[idx].purse.credit(Currency::Wild, wallet);
         self.ledger.record(
             TxKind::Mint,
             TxParty::Mint,
@@ -4876,6 +5014,8 @@ impl World {
             0,
         );
         for &(kind, count) in kit {
+            // The grubstake kit always fits: it lands in a freshly drained
+            // (or freshly seeded) backpack far below the volume budget.
             self.agents[idx].add_item(kind, count);
             self.ledger.record(
                 TxKind::Mint,
@@ -4885,15 +5025,12 @@ impl World {
                 0,
             );
         }
+        self.agents[idx].equip_best_gear();
         // Accumulated savings survive death: pull a comeback stake from the
         // vault into the fresh wallet so a proven earner returns funded rather
         // than broke. Whatever stays banked keeps riding along, still safe.
         // Internal move (agent-held either way), so no mint/burn is recorded.
-        let comeback = self.agents[idx].bank.min(agents::AGENT_COMEBACK_WITHDRAW);
-        if comeback > 0 {
-            self.agents[idx].bank -= comeback;
-            self.agents[idx].wallet += comeback;
-        }
+        self.agents[idx].purse.withdraw(Currency::Wild, agents::AGENT_COMEBACK_WITHDRAW);
     }
 
     /// Staging position for a district (near its service cluster). Always on
@@ -5040,7 +5177,7 @@ impl World {
                 a.traits,
                 a.faction,
                 a.health / a.max_health,
-                a.wallet,
+                a.wallet(),
                 a.carried_value(),
                 a.entity,
                 a.retreat_cooldown,
@@ -5102,8 +5239,12 @@ impl World {
             1.0
         };
         let gather_mult = traits.mult(Activity::Gather);
-        let stacks = self.agents[idx].inventory.len();
-        if stacks < agents::MAX_STACKS - 4 {
+        // Free-volume capacity gates (the slotted model's version of the old
+        // stack-count checks): keep room for a few more pulls before another
+        // gathering run, a little less for opportunistic loot grabs.
+        let free_volume =
+            self.agents[idx].capacity().saturating_sub(self.agents[idx].used_volume());
+        if free_volume > 4 {
             let score = ev * danger_mult * tax_mult * gather_mult * 2.0;
             if score > best.0 {
                 let spot = self.walkable_spot_near(pos, 30.0);
@@ -5152,7 +5293,7 @@ impl World {
         // --- Loot: grab dropped containers nearby (free value on the ground).
         // Ammo caches (variant 1) are world spawns left for players; agents
         // only chase death drops. ---
-        if stacks < agents::MAX_STACKS - 2 {
+        if free_volume > 2 {
             let loot_mult = traits.mult(Activity::Haul);
             let mut best_loot: Option<(f32, EntityId, Vec3)> = None;
             for c in self.loot.values() {
@@ -5182,9 +5323,10 @@ impl World {
         }
 
         // --- BuyGear: arm up when the wallet allows ---
-        let has_weapon = [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife]
-            .iter()
-            .any(|k| self.agents[idx].count_item(*k) > 0);
+        // Wielded weapons live in the equip slot now; a carried one is just
+        // cargo that hasn't been equipped (or displaced surplus).
+        let has_weapon = self.agents[idx].weapon().damage > FIST.damage
+            || agents::WEAPON_PREFERENCE.iter().any(|k| self.agents[idx].count_item(*k) > 0);
         if !has_weapon && wallet >= 30 {
             if let Some((store, store_pos, appeal)) = self.route_service(pos, EntityKind::Armory) {
                 let kind = if wallet >= 360 {
@@ -5553,13 +5695,17 @@ impl World {
     /// supply — it's still agent-held — so there's no ledger leg; only its
     /// exposure to death changes.
     fn agent_bank_deposit(&mut self, idx: usize) {
-        let agent = &mut self.agents[idx];
-        let deposit = agent.wallet.saturating_sub(agents::AGENT_BANK_KEEP);
+        // Same shared bank flow the player Deposit action routes through;
+        // agents keep an operating float and vault everything above it.
+        let carried = self
+            .actor_purse(EconActor::Agent(idx))
+            .map_or(0, |p| p.carried(Currency::Wild));
+        let deposit = carried.saturating_sub(agents::AGENT_BANK_KEEP);
         if deposit > 0 {
-            agent.wallet -= deposit;
-            agent.bank += deposit;
+            let _ = self.move_to_bank(EconActor::Agent(idx), Currency::Wild, deposit, true);
         }
         // Vaulted: suppress another wealth run for a while, then back to work.
+        let agent = &mut self.agents[idx];
         agent.retreat_cooldown = agents::RETREAT_COOLDOWN;
         agent.goal = Goal::Idle;
     }
@@ -5590,6 +5736,9 @@ impl World {
             container.items = leftovers;
         }
         if !taken.is_empty() {
+            // Looted gear goes straight into the hands/on the back when it
+            // beats what's equipped.
+            self.agents[idx].equip_best_gear();
             let value: u32 = taken.iter().map(|s| base_value(s.kind) * s.count).sum();
             self.agents[idx].learn(Activity::Haul, value as f32);
             let picker = self.agents[idx].party();
@@ -5611,9 +5760,8 @@ impl World {
             base
         };
         // Hostile-held ground taxes agents exactly like players.
-        let count =
-            apply_territory_tax(count, self.region_hostile_to(pos, self.agents[idx].faction));
-        let leftover = self.agents[idx].add_item(kind, count);
+        let count = self.actor_taxed_yield(EconActor::Agent(idx), pos, count);
+        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, count);
         let gained = count - leftover;
         if gained == 0 {
             self.agents[idx].goal = Goal::Idle;
@@ -5644,105 +5792,38 @@ impl World {
     }
 
     /// Sell everything the store buys; traders list surplus resources on the
-    /// market book instead of dumping at vendor floor prices.
+    /// market book instead of dumping at vendor floor prices. Each sale goes
+    /// through the same `vendor_sell` flow the player VendorSell action uses.
     fn agent_sell(&mut self, idx: usize, store: EntityId, list_on_market: bool) {
         if list_on_market {
             self.agent_market_list(idx);
             self.agents[idx].goal = Goal::Idle;
             return;
         }
-        let Some((store_kind, store_pos, vendor_agent)) = self
-            .statics
-            .get(&store)
-            .map(|s| (s.kind, s.position, static_party(s)))
-        else {
+        let Some(store_kind) = self.statics.get(&store).map(|s| s.kind) else {
             self.agents[idx].goal = Goal::Idle;
             return;
         };
-        let offers = wilder_economy::vendor_offers(store_kind);
-        let sellables: Vec<(ItemKind, u32, u32)> = offers
+        let sellables: Vec<(ItemKind, u32)> = wilder_economy::vendor_offers(store_kind)
             .iter()
             .filter(|o| o.sell > 0)
             .filter_map(|o| {
                 let have = self.agents[idx].count_item(o.kind);
-                (have > 0).then_some((o.kind, have, o.sell))
+                (have > 0).then_some((o.kind, have))
             })
             .collect();
-        for (kind, count, sell) in sellables {
-            self.agents[idx].remove_item(kind, count);
-            let gross = sell.saturating_mul(count);
-            let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
-            self.agents[idx].wallet += gross - cut;
-            let seller = self.agents[idx].party();
-            // Same ledger legs as the player vendor-sell flow.
-            self.ledger.record_ex(
-                TxKind::VendorSell,
-                seller.clone(),
-                vendor_agent.clone(),
-                TxAmount::Item { kind, count },
-                0,
-                SupplyEffect::Burn,
-            );
-            self.ledger.record(
-                TxKind::VendorSell,
-                vendor_agent.clone(),
-                seller,
-                TxAmount::Wild { amount: gross - cut },
-                cut,
-            );
-            self.distribute_commerce(store_pos, cut, vendor_agent.clone(), false);
+        for (kind, count) in sellables {
+            let _ = self.vendor_sell(EconActor::Agent(idx), store, kind, count);
         }
         self.agents[idx].goal = Goal::Idle;
     }
 
-    /// Buy `count` of `kind` from a vendor building (agent-side mirror of the
-    /// player VendorBuy flow, identical ledger legs).
+    /// Buy `count` of `kind` from a vendor building through the same
+    /// `vendor_buy` flow the player VendorBuy action uses (identical rules
+    /// and ledger legs; failures just drop the errand).
     fn agent_vendor_buy(&mut self, idx: usize, store: EntityId, kind: ItemKind, count: u32) {
         self.agents[idx].goal = Goal::Idle;
-        let Some((store_kind, store_pos, vendor_agent)) = self
-            .statics
-            .get(&store)
-            .map(|s| (s.kind, s.position, static_party(s)))
-        else {
-            return;
-        };
-        let Some(offer) = wilder_economy::vendor_offers(store_kind)
-            .iter()
-            .find(|e| e.kind == kind && e.buy > 0)
-        else {
-            return;
-        };
-        let cost = offer.buy.saturating_mul(count);
-        if self.agents[idx].wallet < cost {
-            return;
-        }
-        self.agents[idx].wallet -= cost;
-        let leftover = self.agents[idx].add_item(kind, count);
-        let bought = count - leftover;
-        let buyer = self.agents[idx].party();
-        self.ledger.record(
-            TxKind::VendorBuy,
-            buyer.clone(),
-            vendor_agent.clone(),
-            TxAmount::Wild { amount: cost },
-            0,
-        );
-        if bought > 0 {
-            self.ledger.record_ex(
-                TxKind::VendorBuy,
-                vendor_agent.clone(),
-                buyer,
-                TxAmount::Item { kind, count: bought },
-                0,
-                SupplyEffect::Mint,
-            );
-        }
-        self.distribute_commerce(
-            store_pos,
-            cost * wilder_economy::COMMERCE_CUT_PCT / 100,
-            vendor_agent,
-            false,
-        );
+        let _ = self.vendor_buy(EconActor::Agent(idx), store, kind, count);
     }
 
     /// Live market reference price for an item: the most recent fill when the
@@ -5902,24 +5983,23 @@ impl World {
         if listing_seller == self.agents[idx].agent_id {
             return false;
         }
-        let wallet = self.agents[idx].wallet;
+        let wallet = self.agents[idx].wallet();
         let affordable = (wallet / price_each.max(1)).min(count).min(available);
         if affordable == 0 {
             return false;
         }
         let cost = price_each * affordable;
-        self.agents[idx].wallet -= cost;
-        let leftover = self.agents[idx].add_item(kind, affordable);
+        self.agents[idx].purse.debit(Currency::Wild, cost);
+        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, affordable);
         if leftover > 0 {
-            // Couldn't haul it all: burn the overflow (rare; stack caps).
-            self.ledger.record(
-                TxKind::Burn,
-                self.agents[idx].party(),
-                TxParty::Burn,
-                TxAmount::Item { kind, count: leftover },
-                0,
-            );
+            // Couldn't haul it all: the overflow spills to the ground as the
+            // buyer's loot (mirrors the player market-buy path) rather than
+            // silently vanishing from supply.
+            let pos = self.agents[idx].position;
+            let buyer = self.agents[idx].party();
+            self.spawn_loot(pos, vec![ItemStack { kind, count: leftover }], Some(buyer), true);
         }
+        self.agents[idx].equip_best_gear();
         let fee = cost * MARKET_FEE_PCT / 100;
         let proceeds = cost - fee;
         let buyer_party = self.agents[idx].party();
@@ -5965,15 +6045,15 @@ impl World {
     /// player, or agent — and return the ledger party to attribute.
     fn credit_market_seller(&mut self, seller: CharacterId, proceeds: u32) -> TxParty {
         if let Some(sp) = self.players.values_mut().find(|p| p.character.id == seller) {
-            sp.wallet += proceeds;
+            sp.purse.credit(Currency::Wild, proceeds);
             let account = sp.character.account_id;
-            let wallet = sp.wallet;
+            let wallet = sp.purse.carried(Currency::Wild);
             let party = player_party(sp);
             let _ = self.store.update_wallet(account, wallet);
             return party;
         }
         if let Some(agent) = self.agents.iter_mut().find(|a| a.agent_id == seller) {
-            agent.wallet += proceeds;
+            agent.purse.credit(Currency::Wild, proceeds);
             // Reinforce the channel: realized market proceeds teach Trade,
             // so sellers whose listings actually fill keep working the book.
             agent.learn(Activity::Trade, proceeds as f32);
@@ -5992,7 +6072,7 @@ impl World {
     /// then relist it at the floating market price.
     fn agent_trade(&mut self, idx: usize) {
         self.agents[idx].goal = Goal::Idle;
-        let wallet = self.agents[idx].wallet;
+        let wallet = self.agents[idx].wallet();
         let me = self.agents[idx].agent_id;
         // Best bargain: largest absolute discount vs the live market price.
         let pick = self
@@ -6053,16 +6133,23 @@ impl World {
             }
             return;
         }
-        // Timer done: mint the output.
+        // Timer done: mint the output. Output that doesn't fit the pack
+        // spills to the ground at the station (the player craft flow denies
+        // up front; agents already burned their inputs, so spill-not-drop).
         let (kind, count) = recipe.output;
-        self.agents[idx].add_item(kind, count);
+        let leftover = self.actor_add_items(EconActor::Agent(idx), kind, count);
         self.ledger.record(
             TxKind::CraftProduce,
             TxParty::Mint,
-            party,
+            party.clone(),
             TxAmount::Item { kind, count },
             0,
         );
+        if leftover > 0 {
+            let pos = self.agents[idx].position;
+            self.spawn_loot(pos, vec![ItemStack { kind, count: leftover }], Some(party), true);
+        }
+        self.agents[idx].equip_best_gear();
         let crafter = self.agent_actor_ref(idx);
         self.stats.add_crafted(&crafter, count as u64);
         // Learning: the craft's value-added margin over the whole errand.
@@ -6225,9 +6312,8 @@ impl World {
                     traits,
                     home,
                     home_spot,
-                    wallet: 0,
-                    bank: 0,
-                    inventory: Vec::new(),
+                    purse: Purse::default(),
+                    inventory: Inventory::new(),
                     position,
                     health: 100.0,
                     max_health: 100.0,
@@ -6550,7 +6636,8 @@ impl World {
                 name: p.character.name.clone(),
                 faction: FACTION_REBELS,
                 guild: None,
-                wealth: p.wallet as i64 + p.bank as i64,
+                wealth: p.purse.carried(Currency::Wild) as i64
+                    + p.purse.banked(Currency::Wild) as i64,
             });
         }
         for a in &self.agents {
@@ -6562,7 +6649,7 @@ impl World {
                 name: a.name.clone(),
                 faction: a.faction,
                 guild: Some(a.guild.clone()),
-                wealth: a.wallet as i64 + a.bank as i64 + a.carried_value() as i64,
+                wealth: a.wallet() as i64 + a.bank() as i64 + a.carried_value() as i64,
             });
         }
         let mut regions_by_faction: HashMap<FactionId, u32> = HashMap::new();
@@ -7191,12 +7278,12 @@ impl World {
             // Push currency balances whenever any of them changed (join,
             // vendor/market/bank flows, salvage, energy grants).
             let balances = (
-                player.wallet,
-                player.bank,
-                player.shards,
-                player.bank_shards,
-                player.energy,
-                player.bank_energy,
+                player.purse.carried(Currency::Wild),
+                player.purse.banked(Currency::Wild),
+                player.purse.carried(Currency::Shards),
+                player.purse.banked(Currency::Shards),
+                player.purse.carried(Currency::Energy),
+                player.purse.banked(Currency::Energy),
             );
             if player.wallet_sent != Some(balances) {
                 player.wallet_sent = Some(balances);
@@ -7779,7 +7866,7 @@ mod tests {
     ) -> usize {
         let (agent_id, name) = mint_agent_name(faction);
         let entity = world.alloc_entity();
-        let agent = FactionAgent::from_save(
+        let mut agent = FactionAgent::from_save(
             entity,
             AgentSave {
                 agent_id,
@@ -7789,14 +7876,22 @@ mod tests {
                 traits,
                 home: 0,
                 home_spot: None,
-                wallet: 100,
-                bank: 0,
-                inventory: vec![ItemStack { kind: ItemKind::Pipe, count: 1 }],
+                purse: {
+                    let mut p = Purse::default();
+                    p.credit(Currency::Wild, 100);
+                    p
+                },
+                inventory: {
+                    let mut inventory = Inventory::new();
+                    inv::add_items(&mut inventory.slots, ItemKind::Pipe, 1);
+                    inventory
+                },
                 position,
                 health: 100.0,
                 max_health: 100.0,
             },
         );
+        agent.equip_best_gear();
         let idx = world.agents.len();
         world.agent_by_entity.insert(entity, idx);
         world.agents.push(agent);
@@ -7983,12 +8078,7 @@ mod tests {
                 overcharge_time: 0.0,
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
-                wallet: 0,
-                bank: 0,
-                shards: 0,
-                bank_shards: 0,
-                energy: 0,
-                bank_energy: 0,
+                purse: Purse::default(),
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
@@ -8013,10 +8103,13 @@ mod tests {
         let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::gatherer(), contested);
         let old_id = world.agents[idx].agent_id;
         let old_entity = world.agents[idx].entity;
+        // Cargo in the backpack (the spawn Pipe sits in the equip slot and
+        // survives death; only backpack slots drop).
+        world.agents[idx].add_item(ItemKind::Iron, 5);
         world.kill_agent(idx, true);
         assert!(!world.agents[idx].alive());
-        assert_eq!(world.agents[idx].wallet, 0);
-        assert!(world.agents[idx].inventory.is_empty());
+        assert_eq!(world.agents[idx].wallet(), 0);
+        assert_eq!(world.agents[idx].used_volume(), 0, "backpack drops on death");
         // A loot container dropped where the body fell.
         assert!(world
             .loot
@@ -8045,21 +8138,20 @@ mod tests {
         let contested = district_anchor("NEXUS");
         let idx = spawn_test_agent(&mut world, FACTION_FORUM, Traits::gatherer(), contested);
         // Savings in the vault, at-risk MILD in the wallet on top.
-        world.agents[idx].bank = 500;
-        world.agents[idx].wallet = 200;
+        world.agents[idx].purse = Purse { carried: [200, 0, 0], banked: [500, 0, 0] };
         // Death burns the carried wallet but never touches the vault.
         world.kill_agent(idx, false);
-        assert_eq!(world.agents[idx].wallet, 0, "carried wallet burns on death");
-        assert_eq!(world.agents[idx].bank, 500, "banked MILD is safe from death");
+        assert_eq!(world.agents[idx].wallet(), 0, "carried wallet burns on death");
+        assert_eq!(world.agents[idx].bank(), 500, "banked MILD is safe from death");
         // Respawn pulls a comeback stake out of the vault into the fresh wallet.
         world.agents[idx].respawn_in = 0.0;
         world.respawn_agent(idx);
         assert!(
-            world.agents[idx].wallet >= agents::AGENT_COMEBACK_WITHDRAW,
+            world.agents[idx].wallet() >= agents::AGENT_COMEBACK_WITHDRAW,
             "respawn should fund the wallet from the vault"
         );
         assert_eq!(
-            world.agents[idx].bank,
+            world.agents[idx].bank(),
             500 - agents::AGENT_COMEBACK_WITHDRAW,
             "the comeback stake comes out of the vault"
         );
@@ -8077,7 +8169,7 @@ mod tests {
             .map(|&(_, p)| p)
             .expect("a Bank was seeded");
         let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), bank_pos);
-        world.agents[idx].wallet = WEALTH_RETREAT + 400;
+        world.agents[idx].purse = Purse { carried: [WEALTH_RETREAT + 400, 0, 0], banked: [0; 3] };
         world.agents[idx].retreat_cooldown = 0.0;
         world.agents[idx].health = world.agents[idx].max_health;
         // Decide → wealth override routes to the Bank; then execute the deposit.
@@ -8088,12 +8180,12 @@ mod tests {
         );
         world.agent_bank_deposit(idx);
         assert_eq!(
-            world.agents[idx].wallet,
+            world.agents[idx].wallet(),
             agents::AGENT_BANK_KEEP,
             "deposit leaves only the operating float in the wallet"
         );
         assert_eq!(
-            world.agents[idx].bank,
+            world.agents[idx].bank(),
             WEALTH_RETREAT + 400 - agents::AGENT_BANK_KEEP,
             "everything above the float is vaulted"
         );
@@ -8140,9 +8232,12 @@ mod tests {
             traits: Traits::fighter(),
             home: 7, // NORTH STAR
             home_spot: None,
-            wallet: 50,
-            bank: 0,
-            inventory: Vec::new(),
+            purse: {
+                let mut p = Purse::default();
+                p.credit(Currency::Wild, 50);
+                p
+            },
+            inventory: Inventory::new(),
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
             health: 80.0,
@@ -8377,12 +8472,7 @@ mod tests {
                 overcharge_time: 0.0,
                 blueprints: HashSet::new(),
                 production: HashMap::new(),
-                wallet: 0,
-                bank: 0,
-                shards: 0,
-                bank_shards: 0,
-                energy: 0,
-                bank_energy: 0,
+                purse: Purse::default(),
                 wallet_sent: None,
                 sent_snaps: HashMap::new(),
                 map_intel: false,
@@ -8498,20 +8588,20 @@ mod tests {
         let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::gatherer(), contested);
         world.agents[idx].add_item(ItemKind::Iron, 20);
         let (store, _) = world.nearest_service(contested, EntityKind::Bodega).unwrap();
-        let before = world.agents[idx].wallet;
+        let before = world.agents[idx].wallet();
         world.agent_sell(idx, store, false);
         // Bodega pays 2/iron, minus the 10% commerce cut.
         let gross = 40u32;
         let cut = gross * wilder_economy::COMMERCE_CUT_PCT / 100;
-        assert_eq!(world.agents[idx].wallet, before + gross - cut);
+        assert_eq!(world.agents[idx].wallet(), before + gross - cut);
         assert_eq!(world.agents[idx].count_item(ItemKind::Iron), 0);
 
         // Vendor buy round-trips through the wallet (the agent already
         // carries one Pipe from its spawn kit).
         let (armory, _) = world.nearest_service(contested, EntityKind::Armory).unwrap();
-        let wallet = world.agents[idx].wallet;
+        let wallet = world.agents[idx].wallet();
         world.agent_vendor_buy(idx, armory, ItemKind::Knife, 1);
-        assert_eq!(world.agents[idx].wallet, wallet - 45);
+        assert_eq!(world.agents[idx].wallet(), wallet - 45);
         assert_eq!(world.agents[idx].count_item(ItemKind::Knife), 1);
     }
 
@@ -8538,7 +8628,10 @@ mod tests {
         );
         world.agents[idx].goal = Goal::Loot { container, pos: drop_pos };
         world.agent_loot_pickup(idx, container);
-        assert_eq!(world.agents[idx].count_item(ItemKind::Pistol), 1);
+        // The looted upgrade goes straight into the equip slot; the spawn
+        // Pipe it displaced returns to the pack as cargo.
+        assert_eq!(world.agents[idx].inventory.equipped_weapon, Some(ItemKind::Pistol));
+        assert_eq!(world.agents[idx].count_item(ItemKind::Pipe), 1);
         assert!(!world.loot.contains_key(&container), "emptied drop should despawn");
 
         // Ammo caches are for players: agents never target them.
@@ -8567,13 +8660,13 @@ mod tests {
             .find(|l| l.kind == ItemKind::Iron)
             .expect("iron listed")
             .price_each;
-        let seller_wallet = world.agents[seller].wallet;
-        let buyer_wallet = world.agents[buyer].wallet;
+        let seller_wallet = world.agents[seller].wallet();
+        let buyer_wallet = world.agents[buyer].wallet();
         assert!(world.agent_market_buy(buyer, ItemKind::Iron, 10, listing_price));
         let cost = listing_price * 10;
         let fee = cost * MARKET_FEE_PCT / 100;
-        assert_eq!(world.agents[buyer].wallet, buyer_wallet - cost);
-        assert_eq!(world.agents[seller].wallet, seller_wallet + cost - fee);
+        assert_eq!(world.agents[buyer].wallet(), buyer_wallet - cost);
+        assert_eq!(world.agents[seller].wallet(), seller_wallet + cost - fee);
         assert_eq!(world.agents[buyer].count_item(ItemKind::Iron), 10);
         // The fill landed on the per-item price history at the fill price.
         let hist = world.market_stats.history(ItemKind::Iron).expect("iron history");

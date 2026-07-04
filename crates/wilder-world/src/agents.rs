@@ -14,8 +14,11 @@
 
 use serde::{Deserialize, Serialize};
 use wilder_combat::{weapon_stats, WeaponStats, FIST};
+use wilder_inventory as inv;
 use wilder_physics::{step_move_speed, CollisionWorld};
 use wilder_types::*;
+
+use crate::econ::{Currency, Purse};
 
 /// Movement speed, m/s (a brisk jog — fast enough that agents visibly travel
 /// across the map/minimap rather than crawling).
@@ -45,8 +48,6 @@ pub const AGENT_COMEBACK_WITHDRAW: u32 = 300;
 pub const DECISION_SECONDS: (f32, f32) = (1.0, 2.0);
 /// Seconds between gather pulls at a spot.
 pub const GATHER_PULL_SECONDS: f32 = 4.0;
-/// Max stacks an agent hauls before selling.
-pub const MAX_STACKS: usize = 24;
 /// A* is only requested for targets within this range; farther destinations
 /// use straight-line steering (hot: with collision slide, cold: unimpeded).
 pub const PATH_RANGE: f32 = 150.0;
@@ -344,11 +345,13 @@ pub struct AgentSave {
     /// agents). `None` = legacy behavior: stage at the home district's spot.
     #[serde(default)]
     pub home_spot: Option<Vec3>,
-    pub wallet: u32,
-    /// Death-safe banked MILD (survives kills and respawns; funds comebacks).
+    /// Carried + banked currency balances.
     #[serde(default)]
-    pub bank: u32,
-    pub inventory: Vec<ItemStack>,
+    pub purse: Purse,
+    /// Slotted backpack + equipped gear (pre-purse saves are dropped by the
+    /// `AGENT_SEED_LAYOUT` bump, so no flat-stack migration is needed).
+    #[serde(default)]
+    pub inventory: Inventory,
     pub position: Vec3,
     pub health: f32,
     pub max_health: f32,
@@ -420,21 +423,26 @@ pub fn is_kit(kind: ItemKind) -> bool {
 }
 
 /// How many of `kind` this agent keeps for itself; anything above the
-/// reserve is sellable surplus. One copy of the best carried weapon stays
-/// (lesser weapons are cargo — `weapon()` only ever uses the strongest),
-/// plus a working buffer of ammo and medkits. Everything else: no reserve.
-pub fn kit_reserve(agent: &FactionAgent, kind: ItemKind) -> u32 {
-    const WEAPONS: [ItemKind; 4] =
-        [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife];
+/// reserve is sellable surplus. The wielded weapon and armor live in the
+/// equip slots (outside the backpack), so every backpack weapon is cargo;
+/// only a working buffer of ammo and medkits stays reserved.
+pub fn kit_reserve(_agent: &FactionAgent, kind: ItemKind) -> u32 {
     match kind {
         ItemKind::Ammo9mm => 90,
         ItemKind::Medkit => 2,
-        k if WEAPONS.contains(&k) => {
-            let best = WEAPONS.into_iter().find(|&w| agent.count_item(w) > 0);
-            if best == Some(k) { 1 } else { 0 }
-        }
         _ => 0,
     }
+}
+
+/// Weapon kinds in preference order, best first.
+pub const WEAPON_PREFERENCE: [ItemKind; 4] =
+    [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife];
+/// Armor kinds in preference order, best first.
+pub const ARMOR_PREFERENCE: [ItemKind; 2] = [ItemKind::PlateArmor, ItemKind::JacketArmor];
+
+/// Rank of `kind` in a preference table (lower = better; not listed = worst).
+fn gear_rank(kind: ItemKind, table: &[ItemKind]) -> usize {
+    table.iter().position(|&t| t == kind).unwrap_or(usize::MAX)
 }
 
 pub struct FactionAgent {
@@ -451,11 +459,12 @@ pub struct FactionAgent {
     /// Fixed staging position for hub-cohort agents (respawn + patrol
     /// anchor). `None` = stage at the home district's spot.
     pub home_spot: Option<Vec3>,
-    pub wallet: u32,
-    /// Death-safe banked MILD: never burns on death. Deposited during wealth
-    /// runs; partially withdrawn to fund the next life on respawn.
-    pub bank: u32,
-    pub inventory: Vec<ItemStack>,
+    /// Currency balances, carried and banked. Carried burns on death; the
+    /// banked side survives and funds comebacks (see `AGENT_COMEBACK_WITHDRAW`).
+    pub purse: Purse,
+    /// Slotted backpack + equipped gear: the same model players use (36-slot
+    /// volume budget, equip slots outside it). Equipped gear survives death.
+    pub inventory: Inventory,
     pub position: Vec3,
     pub yaw: f32,
     pub health: f32,
@@ -508,19 +517,47 @@ impl FactionAgent {
         ChunkCoord::from_world(self.position)
     }
 
-    /// Best weapon carried (agents don't manage equip slots or ammo; the
-    /// strongest carried weapon defines their combat profile).
+    /// Carried spending money (at-risk MILD). Mutations go through the purse.
+    pub fn wallet(&self) -> u32 {
+        self.purse.carried(Currency::Wild)
+    }
+
+    /// Death-safe banked MILD.
+    pub fn bank(&self) -> u32 {
+        self.purse.banked(Currency::Wild)
+    }
+
+    /// Stats of the equipped weapon. Agents fight with what's in the equip
+    /// slot, like players; carried weapons are cargo until equipped (see
+    /// `equip_best_gear`). Agents only use weapon slot 1.
     pub fn weapon(&self) -> WeaponStats {
-        const PREFERENCE: [ItemKind; 4] =
-            [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife];
-        for kind in PREFERENCE {
-            if self.count_item(kind) > 0 {
-                if let Some(stats) = weapon_stats(kind) {
-                    return stats;
-                }
+        self.inventory.equipped_weapon.and_then(weapon_stats).unwrap_or(FIST)
+    }
+
+    /// Move the best owned weapon and armor into the equip slots (displaced
+    /// gear swaps back into the pack as sellable cargo). Called after any
+    /// acquisition — grubstake, loot, buys, crafting — so agents always
+    /// fight with the best gear they own.
+    pub fn equip_best_gear(&mut self) {
+        for (held, table) in [
+            (self.inventory.equipped_weapon, &WEAPON_PREFERENCE[..]),
+            (self.inventory.equipped_armor, &ARMOR_PREFERENCE[..]),
+        ] {
+            // Each swap strictly improves the equipped rank, so one pass per
+            // slot kind suffices — but the displaced piece changes the pack,
+            // so re-scan until no upgrade remains.
+            let mut held_rank = held.map_or(usize::MAX, |k| gear_rank(k, table));
+            loop {
+                let upgrade = (0..self.inventory.slots.len()).find(|&i| {
+                    self.inventory.slots[i]
+                        .is_some_and(|st| gear_rank(st.kind, table) < held_rank)
+                });
+                let Some(slot) = upgrade else { break };
+                let kind = self.inventory.slots[slot].unwrap().kind;
+                inv::equip(&mut self.inventory, slot, 0);
+                held_rank = gear_rank(kind, table);
             }
         }
-        FIST
     }
 
     /// Relative combat strength for statistical (cold-tier) resolution.
@@ -531,55 +568,44 @@ impl FactionAgent {
     }
 
     pub fn count_item(&self, kind: ItemKind) -> u32 {
-        self.inventory.iter().filter(|s| s.kind == kind).map(|s| s.count).sum()
+        inv::count_items(&self.inventory.slots, kind)
     }
 
-    /// Add items, merging into existing stacks up to `max_stack`. Returns the
-    /// count that didn't fit (stack cap `MAX_STACKS` keeps hauls bounded).
+    /// Add items through the shared slotted-inventory rules (36-slot volume
+    /// budget). Returns the count that did NOT fit — callers must deny the
+    /// action or spill the leftover as ground loot, never drop it silently.
     pub fn add_item(&mut self, kind: ItemKind, count: u32) -> u32 {
-        let mut left = count;
-        for stack in self.inventory.iter_mut().filter(|s| s.kind == kind) {
-            let room = kind.max_stack().saturating_sub(stack.count);
-            let take = room.min(left);
-            stack.count += take;
-            left -= take;
-            if left == 0 {
-                return 0;
-            }
-        }
-        while left > 0 && self.inventory.len() < MAX_STACKS {
-            let take = left.min(kind.max_stack());
-            self.inventory.push(ItemStack { kind, count: take });
-            left -= take;
-        }
-        left
+        inv::add_items(&mut self.inventory.slots, kind, count)
     }
 
     /// Remove up to `count` items; returns how many were actually removed.
     pub fn remove_item(&mut self, kind: ItemKind, count: u32) -> u32 {
-        let mut left = count;
-        for stack in self.inventory.iter_mut().filter(|s| s.kind == kind) {
-            let take = stack.count.min(left);
-            stack.count -= take;
-            left -= take;
-            if left == 0 {
-                break;
-            }
-        }
-        self.inventory.retain(|s| s.count > 0);
-        count - left
+        inv::remove_items(&mut self.inventory.slots, kind, count)
     }
 
-    /// Total reference value of carried goods (drives the Sell utility).
+    /// Backpack volume in use (equip slots live outside the budget).
+    pub fn used_volume(&self) -> u32 {
+        inv::used_volume(&self.inventory.slots)
+    }
+
+    /// Total backpack volume budget.
+    pub fn capacity(&self) -> u32 {
+        self.inventory.slots.len() as u32
+    }
+
+    /// Total reference value of backpack goods (drives the Sell utility).
+    /// Equipped gear is excluded: it survives death and never sells.
     pub fn carried_value(&self) -> u32 {
-        self.inventory.iter().map(|s| base_value(s.kind) * s.count).sum()
+        self.inventory.slots.iter().flatten().map(|s| base_value(s.kind) * s.count).sum()
     }
 
     /// Reference value of the extractable haul: everything except the
-    /// personal kit (weapons/ammo/meds an agent keeps to stay effective).
+    /// personal kit (ammo/meds an agent keeps to stay effective).
     pub fn haul_value(&self) -> u32 {
         self.inventory
+            .slots
             .iter()
+            .flatten()
             .filter(|s| !is_kit(s.kind))
             .map(|s| base_value(s.kind) * s.count)
             .sum()
@@ -653,8 +679,7 @@ impl FactionAgent {
             traits: self.traits,
             home: self.home,
             home_spot: self.home_spot,
-            wallet: self.wallet,
-            bank: self.bank,
+            purse: self.purse,
             inventory: self.inventory.clone(),
             position: self.position,
             health: self.health,
@@ -672,9 +697,12 @@ impl FactionAgent {
             traits: save.traits,
             home: save.home,
             home_spot: save.home_spot,
-            wallet: save.wallet,
-            bank: save.bank,
-            inventory: save.inventory,
+            purse: save.purse,
+            inventory: {
+                let mut inventory = save.inventory;
+                inventory.ensure_slot_count();
+                inventory
+            },
             position: save.position,
             yaw: 0.0,
             health: save.health.max(1.0),
@@ -1025,6 +1053,10 @@ mod tests {
 
     fn sample_agent() -> FactionAgent {
         let (agent_id, name) = mint_agent_name(FACTION_REBELS);
+        let mut purse = Purse::default();
+        purse.credit(Currency::Wild, 80);
+        let mut inventory = Inventory::new();
+        inv::add_items(&mut inventory.slots, ItemKind::Iron, 5);
         FactionAgent::from_save(
             7,
             AgentSave {
@@ -1035,9 +1067,8 @@ mod tests {
                 traits: Traits::default(),
                 home: 4,
                 home_spot: None,
-                wallet: 80,
-                bank: 0,
-                inventory: vec![ItemStack { kind: ItemKind::Iron, count: 5 }],
+                purse,
+                inventory,
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,
                 max_health: 100.0,
@@ -1066,19 +1097,50 @@ mod tests {
     }
 
     #[test]
-    fn best_weapon_prefers_stronger_gear() {
+    fn equip_best_gear_upgrades_the_equip_slots() {
         let mut a = sample_agent();
         assert_eq!(a.weapon().damage, FIST.damage);
         a.add_item(ItemKind::Pipe, 1);
+        a.equip_best_gear();
         assert_eq!(a.weapon().damage, weapon_stats(ItemKind::Pipe).unwrap().damage);
+        assert_eq!(a.count_item(ItemKind::Pipe), 0, "wielded weapon leaves the pack");
+        // A better find displaces the pipe back into the pack as cargo.
         a.add_item(ItemKind::Pistol, 1);
+        a.add_item(ItemKind::JacketArmor, 1);
+        a.equip_best_gear();
         assert_eq!(a.weapon().damage, weapon_stats(ItemKind::Pistol).unwrap().damage);
+        assert_eq!(a.count_item(ItemKind::Pipe), 1);
+        assert_eq!(a.inventory.equipped_armor, Some(ItemKind::JacketArmor));
+        // Equipping a worse weapon never happens.
+        a.add_item(ItemKind::Knife, 1);
+        a.equip_best_gear();
+        assert_eq!(a.inventory.equipped_weapon, Some(ItemKind::Pistol));
+        assert_eq!(a.count_item(ItemKind::Knife), 1);
+    }
+
+    #[test]
+    fn backpack_volume_bounds_the_haul() {
+        let mut a = sample_agent(); // 5 Iron: one slot, volume 1
+        assert_eq!(a.capacity(), 36);
+        // Pistols don't stack and cost 4 volume each: eight fill 33/36.
+        assert_eq!(a.add_item(ItemKind::Pistol, 8), 0);
+        assert_eq!(a.used_volume(), 33);
+        // A ninth needs 4 free volume; only 3 remain — denied, not truncated.
+        assert_eq!(a.add_item(ItemKind::Pistol, 1), 1);
+        assert_eq!(a.count_item(ItemKind::Pistol), 8);
+        // Cheap stackables still fit in the leftover volume.
+        assert_eq!(a.add_item(ItemKind::Copper, 10), 0);
+        assert_eq!(a.used_volume(), 34);
     }
 
     #[test]
     fn save_roundtrip_preserves_identity_and_goods() {
         let mut a = sample_agent();
         a.traits = Traits::fighter();
+        a.purse.credit(Currency::Shards, 3);
+        a.purse.deposit(Currency::Wild, 25);
+        a.add_item(ItemKind::Pistol, 1);
+        a.equip_best_gear();
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
         let b = FactionAgent::from_save(99, back);
@@ -1087,19 +1149,20 @@ mod tests {
         assert_eq!(b.faction, a.faction);
         assert_eq!(b.guild, a.guild);
         assert_eq!(b.traits, a.traits, "learned traits must survive the save");
-        assert_eq!(b.wallet, a.wallet);
+        assert_eq!(b.purse, a.purse, "carried and banked balances must survive");
         assert_eq!(b.count_item(ItemKind::Iron), 5);
+        assert_eq!(b.inventory.equipped_weapon, Some(ItemKind::Pistol));
         assert_eq!(b.entity, 99);
     }
 
     #[test]
-    fn saves_without_traits_load_neutral() {
-        // Pre-traits saves (and the removed `role` field) must still load:
-        // unknown fields are ignored, missing traits default to neutral.
+    fn saves_without_purse_or_pack_load_default() {
+        // Sparse/older blobs must still load: unknown fields (the retired
+        // flat `wallet`) are ignored, missing purse and inventory default.
         let json = r#"{
             "agent_id": "6ec4a03c-4de5-4e56-9d42-6a2c8bbd7c1e",
             "name": "REBEL-6EC4", "faction": 1, "guild": "Dead Signal",
-            "role": "Scavenger", "home": 4, "wallet": 80, "inventory": [],
+            "role": "Scavenger", "home": 4, "wallet": 80,
             "position": [1.0, 0.0, 2.0], "health": 90.0, "max_health": 100.0
         }"#;
         let save: AgentSave = serde_json::from_str(json).unwrap();
@@ -1107,6 +1170,9 @@ mod tests {
         for a in ACTIVITIES {
             assert!((save.traits.mult(a) - 1.0).abs() < 1e-4);
         }
+        assert_eq!(save.purse, Purse::default());
+        let agent = FactionAgent::from_save(1, save);
+        assert_eq!(agent.capacity(), 36, "defaulted pack must have full slots");
     }
 
     #[test]
