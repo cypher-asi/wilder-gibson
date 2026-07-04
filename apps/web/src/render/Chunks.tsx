@@ -44,7 +44,7 @@ function Chunk({ chunk }: { chunk: ChunkData }) {
     <group position={origin}>
       <ChunkGround chunk={chunk} />
       {chunk.buildings.map((b, i) => (
-        <Building key={i} building={b} />
+        <Building key={i} building={b} chunk={chunk} index={i} />
       ))}
       {chunk.props.map((p, i) =>
         isInstancedProp(p.archetype) ? null : <PropMesh key={`p${i}`} prop={p} chunk={chunk} />,

@@ -12,6 +12,8 @@ import {
   ChunkData,
   TILE_SIZE,
 } from "../net/protocol";
+import { chunkKey } from "../game/collision";
+import { interiorRegistry } from "../game/interiors";
 import { mulberry, NEON_COLORS } from "./facade";
 import { getImportedBuilding } from "./importedBuilding";
 import { KitEntry } from "./InstancedKit";
@@ -1214,6 +1216,145 @@ function buildKitTowerFacade(
 }
 
 // ---------------------------------------------------------------------------
+// Host shell: service buildings with a walk-in interior
+// ---------------------------------------------------------------------------
+
+/** One doorway carved into a host building's street face. */
+export interface HostShellDoor {
+  /** Door center x in building-local space (offset from footprint center). */
+  x: number;
+  /** Store accent color (transom strip over the door). */
+  color?: string;
+}
+
+export interface HostShell {
+  doors: HostShellDoor[];
+}
+
+/** Visual doorway size (collision gap is 2 m; the frame fills the rest). */
+export const DOOR_HOLE_W = 2.2;
+export const DOOR_HOLE_H = 2.9;
+/** Ground-floor (storefront band) height, matching the procedural base. */
+const SHELL_BASE_H = 4.5;
+
+/**
+ * Building model for a store that hosts a walk-in interior: the ground floor
+ * is hollow wall slabs with real doorway holes on the street face instead of
+ * a solid box, fronted by a deliberate store facade (piers, glass, fascia,
+ * accent transoms). Upper mass / parapet / roof match the procedural look;
+ * fire escapes, blade signs and kit dressing are dropped — stores read clean.
+ * The interior itself (floor, low walls, counter, furniture, sliding door)
+ * renders separately from the interior spec (render/Interior.tsx).
+ */
+function buildHostShellModel(b: BuildingInstance, host: HostShell): BuildingModel {
+  const w = (b.tx1 - b.tx0) * TILE_SIZE;
+  const d = (b.tz1 - b.tz0) * TILE_SIZE;
+  const height = 4.5 + (b.stories - 1) * 3;
+  const x = b.tx0 * TILE_SIZE + w / 2;
+  const z = b.tz0 * TILE_SIZE + d / 2;
+
+  const p = new Parts();
+  const styleRng = mulberry(b.style ^ 0xa511e9b3);
+  const trimKey = STORE_TRIMS[Math.floor(styleRng() * STORE_TRIMS.length)];
+  const proud = BUILDING_FRONT_PROUD;
+  const doors = [...host.doors].sort((a, b2) => a.x - b2.x);
+
+  // --- Ground floor: hollow wall slabs -------------------------------------
+  // Front wall (thickness = the collision proud band) with a doorway hole
+  // per door: full-height segments between holes, header slabs above them.
+  const frontZ = -d / 2 - proud / 2;
+  let cursor = -w / 2;
+  for (const door of doors) {
+    const holeMin = door.x - DOOR_HOLE_W / 2;
+    if (holeMin > cursor + 0.01) {
+      p.box("facade", holeMin - cursor, SHELL_BASE_H, proud, (cursor + holeMin) / 2, SHELL_BASE_H / 2, frontZ);
+    }
+    p.box(
+      "facade",
+      DOOR_HOLE_W,
+      SHELL_BASE_H - DOOR_HOLE_H,
+      proud,
+      door.x,
+      (SHELL_BASE_H + DOOR_HOLE_H) / 2,
+      frontZ,
+    );
+    cursor = door.x + DOOR_HOLE_W / 2;
+  }
+  if (cursor < w / 2 - 0.01) {
+    p.box("facade", w / 2 - cursor, SHELL_BASE_H, proud, (cursor + w / 2) / 2, SHELL_BASE_H / 2, frontZ);
+  }
+  // Side + back walls at the footprint edges (the interior's own low walls
+  // sit slightly inside these; see Interior.tsx).
+  p.box("facade", 0.3, SHELL_BASE_H, d, -w / 2 + 0.15, SHELL_BASE_H / 2, 0);
+  p.box("facade", 0.3, SHELL_BASE_H, d, w / 2 - 0.15, SHELL_BASE_H / 2, 0);
+  p.box("facade", w, SHELL_BASE_H, 0.3, 0, SHELL_BASE_H / 2, d / 2 - 0.15);
+  // Ceiling over the ground floor (glimpsed through the door from outside).
+  p.box("metalDark", w - 0.2, 0.12, d - 0.2, 0, SHELL_BASE_H - 0.06, 0);
+
+  // --- Store facade dressing on the street face ----------------------------
+  const front: Face = { axis: "z", wall: -d / 2 - proud, sign: -1, len: w, center: 0 };
+  // Fascia band (sign zone — the POI sign board mounts on it).
+  faceBox(p, front, trimKey, w, 1.0, 0.34, 0, 3.95, 0.17);
+  // Corner piers + a pier flanking each doorway.
+  const pierXs = new Set<number>([-w / 2 + 0.175, w / 2 - 0.175]);
+  for (const door of doors) {
+    pierXs.add(door.x - DOOR_HOLE_W / 2 - 0.175);
+    pierXs.add(door.x + DOOR_HOLE_W / 2 + 0.175);
+  }
+  for (const px of pierXs) {
+    if (Math.abs(px) > w / 2 - 0.1) continue;
+    faceBox(p, front, trimKey, 0.35, 3.45, 0.32, px, 1.725, 0.16);
+  }
+  // Display glass between the piers and doors (black glass in tron).
+  const glassStops = [-w / 2 + 0.35, ...doors.flatMap((dr) => [dr.x - DOOR_HOLE_W / 2 - 0.35, dr.x + DOOR_HOLE_W / 2 + 0.35]), w / 2 - 0.35];
+  for (let i = 0; i + 1 < glassStops.length; i += 2) {
+    const g0 = glassStops[i];
+    const g1 = glassStops[i + 1];
+    if (g1 - g0 < 0.6) continue;
+    faceBox(p, front, trimKey, g1 - g0, 0.5, 0.26, (g0 + g1) / 2, 0.25, 0.13);
+    facePlane(p, front, "glowPanel", g1 - g0 - 0.1, 2.55, (g0 + g1) / 2, 1.83, 0.05, DIM_GLASS);
+  }
+  // Doorway trim: step + accent transom strip over each door.
+  for (const door of doors) {
+    faceBox(p, front, "trim", DOOR_HOLE_W + 0.4, 0.09, 0.55, door.x, 0.045, 0.27);
+    const accent = new THREE.Color(door.color ?? "#4fc3ff").multiplyScalar(2.2);
+    facePlane(p, front, "neon", DOOR_HOLE_W - 0.3, 0.16, door.x, DOOR_HOLE_H + 0.18, 0.18, accent);
+  }
+
+  // --- Upper mass / parapet / roof (procedural look, no dressing kit) ------
+  p.box("facade", w, 0.3, d, 0, SHELL_BASE_H + 0.15, 0);
+  p.box("trim", w + 0.3, 0.3, d + proud + 0.3, 0, 4.65, -proud / 2);
+  if (height > 4.8) {
+    p.box("facade", w, height - 4.8, d, 0, (4.8 + height) / 2, 0);
+  }
+  const pt = 0.28;
+  p.box("facade", w + 0.16, 0.95, pt, 0, height + 0.375, -(d / 2 - 0.06));
+  p.box("facade", w + 0.16, 0.95, pt, 0, height + 0.375, d / 2 - 0.06);
+  p.box("facade", pt, 0.95, d + 0.16, -(w / 2 - 0.06), height + 0.375, 0);
+  p.box("facade", pt, 0.95, d + 0.16, w / 2 - 0.06, height + 0.375, 0);
+  p.box("trim", w + 0.3, 0.08, pt + 0.14, 0, height + 0.89, -(d / 2 - 0.06));
+  p.box("trim", w + 0.3, 0.08, pt + 0.14, 0, height + 0.89, d / 2 - 0.06);
+  p.box("trim", pt + 0.14, 0.08, d + 0.3, -(w / 2 - 0.06), height + 0.89, 0);
+  p.box("trim", pt + 0.14, 0.08, d + 0.3, w / 2 - 0.06, height + 0.89, 0);
+  p.box("roof", w - 0.44, 0.08, d - 0.44, 0, height + 0.04, 0);
+
+  return { geoms: p.build(), waterTower: null, kit: [], x, z, width: w, depth: d, height };
+}
+
+// Host models cached per instance + door signature (doors can arrive after
+// the chunk streams in, so the model may rebuild once when they land).
+const hostModelCache = new WeakMap<BuildingInstance, { sig: string; model: BuildingModel }>();
+
+export function getHostBuildingModel(b: BuildingInstance, host: HostShell): BuildingModel {
+  const sig = host.doors.map((dr) => `${dr.x.toFixed(2)}:${dr.color ?? ""}`).join("|");
+  const cached = hostModelCache.get(b);
+  if (cached && cached.sig === sig) return cached.model;
+  const model = buildHostShellModel(b, host);
+  hostModelCache.set(b, { sig, model });
+  return model;
+}
+
+// ---------------------------------------------------------------------------
 // Main entry
 // ---------------------------------------------------------------------------
 
@@ -1406,10 +1547,14 @@ export function collectBuildingKit(chunks: ChunkData[]): KitEntry[] {
   for (const chunk of chunks) {
     const ox = chunk.coord.x * CHUNK_SIZE;
     const oz = chunk.coord.z * CHUNK_SIZE;
-    for (const b of chunk.buildings) {
+    const ints = interiorRegistry.byChunk.get(chunkKey(chunk.coord.x, chunk.coord.z));
+    const hostIdx = new Set(ints?.specs.map((s) => s.building) ?? []);
+    for (let bi = 0; bi < chunk.buildings.length; bi++) {
+      const b = chunk.buildings[bi];
       // Imported buildings are complete authored models; no AC/billboard
-      // dressing (and no procedural geometry) belongs on them.
-      if (getImportedBuilding(b)) continue;
+      // dressing (and no procedural geometry) belongs on them. Host shells
+      // (walk-in stores) render clean, without kit dressing.
+      if (hostIdx.has(bi) || getImportedBuilding(b)) continue;
       const model = getBuildingModel(b);
       for (const pl of model.kit) {
         out.push({

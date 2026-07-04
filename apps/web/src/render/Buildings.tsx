@@ -2,14 +2,24 @@
 // dressed roof. Geometry comes from building.ts (merged per material key);
 // materials are shared across buildings via facade.ts.
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import * as THREE from "three";
+import { useFrame } from "@react-three/fiber";
 import { useAssetModel } from "../assets/catalog";
-import { BuildingInstance } from "../net/protocol";
-import { useGame } from "../state/game";
-import { getBuildingModel, GROUND_Y, WaterTowerPlacement } from "./building";
+import { interiorRegistry, InteriorSpec } from "../game/interiors";
+import { POI_STYLES } from "../game/poi";
+import { BuildingInstance, ChunkData, CHUNK_SIZE, TILE_SIZE } from "../net/protocol";
+import { game, useGame } from "../state/game";
+import {
+  BuildingModel,
+  getBuildingModel,
+  getHostBuildingModel,
+  GROUND_Y,
+  WaterTowerPlacement,
+} from "./building";
 import { getBuildingMaterial, getSharedMaterial } from "./facade";
 import { getImportedBuilding, ImportedBuildingPlacement } from "./importedBuilding";
+import { chunkKey } from "../game/collision";
 import { isTronStyle } from "./styles";
 
 // Material keys whose meshes are emissive/glass overlays, not solid massing.
@@ -92,14 +102,83 @@ function ImportedBuilding({ placement }: { placement: ImportedBuildingPlacement 
   );
 }
 
-export function Building({ building }: { building: BuildingInstance }) {
+/**
+ * The walk-in interior room hosted by this building, if a service entity has
+ * claimed it (see game/interiors.ts). Re-renders when the registry updates —
+ * specs can land after the chunk mounts (entities stream separately).
+ */
+function useHostSpec(chunk: ChunkData | undefined, index: number | undefined): InteriorSpec | null {
+  useSyncExternalStore(interiorRegistry.subscribe, interiorRegistry.getVersion);
+  if (!chunk || index === undefined) return null;
+  const ints = interiorRegistry.byChunk.get(chunkKey(chunk.coord.x, chunk.coord.z));
+  return ints?.specs.find((s) => s.building === index) ?? null;
+}
+
+export function Building({
+  building,
+  chunk,
+  index,
+}: {
+  building: BuildingInstance;
+  chunk?: ChunkData;
+  index?: number;
+}) {
+  const spec = useHostSpec(chunk, index);
+  if (spec && chunk) {
+    return <HostBuilding building={building} chunk={chunk} spec={spec} />;
+  }
   const imported = getImportedBuilding(building);
   if (imported) return <ImportedBuilding placement={imported} />;
   return <ProceduralBuilding building={building} />;
 }
 
+/**
+ * A store shell with a real doorway. The whole exterior hides while the
+ * local player is inside its room (Sims-style cutaway: the interior's low
+ * walls, rendered by Interior.tsx, take over).
+ */
+function HostBuilding({
+  building,
+  chunk,
+  spec,
+}: {
+  building: BuildingInstance;
+  chunk: ChunkData;
+  spec: InteriorSpec;
+}) {
+  const model = useMemo(() => {
+    const ox = chunk.coord.x * CHUNK_SIZE;
+    const centerX = ox + building.tx0 * TILE_SIZE + ((building.tx1 - building.tx0) * TILE_SIZE) / 2;
+    return getHostBuildingModel(building, {
+      doors: spec.doors.map((d) => ({
+        x: d.x - centerX,
+        color: POI_STYLES[d.kind]?.color,
+      })),
+    });
+  }, [building, chunk, spec]);
+  const group = useRef<THREE.Group>(null);
+  useFrame(() => {
+    if (!group.current) return;
+    const room = interiorRegistry.roomAt(game.predicted.x, game.predicted.z, 0.5);
+    group.current.visible = room?.key !== spec.key;
+  });
+  return <BuildingMeshes building={building} model={model} groupRef={group} />;
+}
+
 function ProceduralBuilding({ building }: { building: BuildingInstance }) {
   const model = useMemo(() => getBuildingModel(building), [building]);
+  return <BuildingMeshes building={building} model={model} />;
+}
+
+function BuildingMeshes({
+  building,
+  model,
+  groupRef,
+}: {
+  building: BuildingInstance;
+  model: BuildingModel;
+  groupRef?: React.RefObject<THREE.Group | null>;
+}) {
   // TRON strips decorative "#hide" parts (fire escapes, window glass/mullions,
   // HVAC/vent/pipe/antenna/billboard/awning clutter): the tagged meshes are
   // dropped entirely so neither color nor shadow remains.
@@ -115,7 +194,7 @@ function ProceduralBuilding({ building }: { building: BuildingInstance }) {
   }, [model]);
 
   return (
-    <group position={[model.x, GROUND_Y, model.z]}>
+    <group ref={groupRef} position={[model.x, GROUND_Y, model.z]}>
       {model.geoms.map(([key, geom]) => {
         if (tron && key.endsWith("#hide")) return null;
         const base = key.split("#")[0];
