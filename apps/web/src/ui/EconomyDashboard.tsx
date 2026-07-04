@@ -1137,9 +1137,21 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
     useGame.getState().closeMenu();
   };
 
+  // Live subscription while the screen is up. Keyed on `joined` (flips on
+  // WorldJoined) so the sub is re-sent after a reconnect: the socket must
+  // finish the JoinWorld handshake before the gateway accepts game messages,
+  // so a sub sent while merely `connected` would be dropped.
+  const joined = useGame((s) => s.joined);
+  useEffect(() => {
+    if (!open || !joined) return;
+    connection.send({ t: "EconomySub", d: { on: true } });
+    return () => {
+      connection.send({ t: "EconomySub", d: { on: false } });
+    };
+  }, [open, joined, connection]);
+
   useEffect(() => {
     if (!open) return;
-    connection.send({ t: "EconomySub", d: { on: true } });
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === "INPUT") return;
       // Escape backs out of the current selection first (item detail page /
@@ -1155,22 +1167,19 @@ export function EconomyDashboard({ connection }: { connection: GameConnection })
       }
     };
     window.addEventListener("keydown", onKeyDown);
-    return () => {
-      connection.send({ t: "EconomySub", d: { on: false } });
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open, connection]);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
   // Watch the selected item's market while its detail page is up: the server
   // answers with a full ItemMarketState and re-pushes on new fills.
   useEffect(() => {
-    if (!open || !isLedger || !selected) return;
+    if (!open || !joined || !isLedger || !selected) return;
     connection.send({ t: "ItemMarketSub", d: { kind: selected } });
     return () => {
       connection.send({ t: "ItemMarketSub", d: { kind: null } });
       useGame.getState().set({ itemMarket: null });
     };
-  }, [open, isLedger, selected, connection]);
+  }, [open, joined, isLedger, selected, connection]);
 
   if (!open) return null;
 

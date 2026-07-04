@@ -55,15 +55,22 @@ export function useAgents(connection: GameConnection, open: boolean): UseAgentsA
   const detail = useGame((s) => s.agentDetail);
   const hireOffers = useGame((s) => s.agentHireOffers);
   const result = useGame((s) => s.agentResult);
-  const connected = useGame((s) => s.connected);
+  // Gate on `joined`, not `connected`: on reconnect the socket opens (and
+  // `connected` flips) before the Authenticate/JoinWorld handshake finishes,
+  // and the gateway drops game messages from unjoined connections — a sub
+  // sent in that window would be lost. `joined` flips only after WorldJoined,
+  // so keying the effect on it also resubscribes after every reconnect.
+  const joined = useGame((s) => s.joined);
+  // Off while the app is backgrounded (mobile shell); restored on return.
+  const appVisible = useGame((s) => s.appVisible);
 
   useEffect(() => {
-    if (!open || !connected) return;
+    if (!open || !joined || !appVisible) return;
     connection.send({ t: "AgentSub", d: { on: true } });
     return () => {
       connection.send({ t: "AgentSub", d: { on: false } });
     };
-  }, [open, connected, connection]);
+  }, [open, joined, appVisible, connection]);
 
   const hire = useCallback(
     (agentId: string) => {

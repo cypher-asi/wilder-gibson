@@ -49,7 +49,12 @@ export function GameCanvas({ connection }: { connection: GameConnection }) {
   // cap, no shadows, no postprocessing.
   const mobile = useIsMobile();
   const mobileTab = useGame((s) => s.mobileTab);
-  const paused = mobile ? mobileTab !== "watch" : mapOpen || menuOpen;
+  // Backgrounded PWA (visibilitychange -> hidden): stop the frameloop too.
+  // Only the mobile shell flips this flag; it stays true on desktop.
+  const appVisible = useGame((s) => s.appVisible);
+  const paused = mobile
+    ? mobileTab !== "watch" || !appVisible
+    : mapOpen || menuOpen;
   return (
     <Canvas
       shadows={!mobile}

@@ -31,28 +31,35 @@ const TX_RENDER_CAP = 50;
 type Section = "supply" | "activity";
 
 export function EconomyTab({ connection }: { connection: GameConnection }) {
-  const connected = useGame((s) => s.connected);
+  // Gate on `joined` (not `connected`): after a reconnect the socket opens
+  // before the JoinWorld handshake completes, and the gateway drops game
+  // messages from unjoined connections — a sub sent in that window is lost.
+  // `joined` flips on WorldJoined, so it also re-runs these effects (fresh
+  // subscribe) after every reconnect. `appVisible` pauses the streams while
+  // the app is backgrounded.
+  const joined = useGame((s) => s.joined);
+  const appVisible = useGame((s) => s.appVisible);
   const [selected, setSelected] = useState<ItemKind | null>(null);
   const [section, setSection] = useState<Section>("supply");
 
   // Live ledger stream while the tab is up (snapshot + per-tick batches).
   useEffect(() => {
-    if (!connected) return;
+    if (!joined || !appVisible) return;
     connection.send({ t: "EconomySub", d: { on: true } });
     return () => {
       connection.send({ t: "EconomySub", d: { on: false } });
     };
-  }, [connected, connection]);
+  }, [joined, appVisible, connection]);
 
   // Item drill-in stream follows the open detail page.
   useEffect(() => {
-    if (!selected || !connected) return;
+    if (!selected || !joined || !appVisible) return;
     connection.send({ t: "ItemMarketSub", d: { kind: selected } });
     return () => {
       connection.send({ t: "ItemMarketSub", d: { kind: null } });
       useGame.getState().set({ itemMarket: null });
     };
-  }, [selected, connected, connection]);
+  }, [selected, joined, appVisible, connection]);
 
   if (selected) {
     return <ItemDetailPage kind={selected} onBack={() => setSelected(null)} />;

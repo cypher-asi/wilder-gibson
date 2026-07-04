@@ -449,6 +449,10 @@ export type MobileTab = "agents" | "watch" | "map" | "economy" | "trade";
 interface UiState {
   connected: boolean;
   joined: boolean;
+  /** Document is visible (mirrors visibilitychange; the mobile shell keeps it
+   * in sync — see mobile/lifecycle.ts — so the canvas frameloop and the live
+   * subscriptions pause while backgrounded. Desktop never flips it). */
+  appVisible: boolean;
   /** First chunk reveal flush happened; the world has visible ground. */
   worldReady: boolean;
   characterName: string;
@@ -624,6 +628,7 @@ export const useGame: import("zustand").UseBoundStore<
 > = create<UiState>((set) => ({
   connected: false,
   joined: false,
+  appVisible: true,
   worldReady: false,
   characterName: "",
   health: 100,

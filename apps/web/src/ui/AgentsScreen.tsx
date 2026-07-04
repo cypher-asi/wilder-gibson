@@ -42,11 +42,13 @@ export function AgentsScreen({ connection }: { connection: GameConnection }) {
   }, [open, roster, selectedId]);
 
   // Detail subscription follows the selected agent while the screen is up.
+  // Keyed on `joined` so the detail sub is re-sent after a reconnect.
+  const joined = useGame((s) => s.joined);
   useEffect(() => {
-    if (!open || !selectedId) return;
+    if (!open || !joined || !selectedId) return;
     agents.openDetail(selectedId);
     return () => agents.closeDetail();
-  }, [open, selectedId, agents.openDetail, agents.closeDetail]);
+  }, [open, joined, selectedId, agents.openDetail, agents.closeDetail]);
 
   if (!open) return null;
 

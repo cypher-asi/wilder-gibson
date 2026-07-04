@@ -36,6 +36,9 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
   const roster = agents.roster;
   const watchAgentId = useGame((s) => s.watchAgentId);
   const joined = useGame((s) => s.joined);
+  // Backgrounded (visibilitychange -> hidden): drop the watch anchor and the
+  // detail stream; both re-send when the app returns to the foreground.
+  const appVisible = useGame((s) => s.appVisible);
   const set = useGame((s) => s.set);
   const setMobileTab = useGame((s) => s.setMobileTab);
 
@@ -51,19 +54,19 @@ export function WatchTab({ connection }: { connection: GameConnection }) {
   // Server-side watch anchor while this tab is active. Re-sent when the
   // watched agent switches or after a reconnect (joined flips).
   useEffect(() => {
-    if (!joined || !watchAgentId) return;
+    if (!joined || !appVisible || !watchAgentId) return;
     connection.send({ t: "WatchAgent", d: { agent_id: watchAgentId } });
     return () => {
       connection.send({ t: "WatchAgent", d: { agent_id: null } });
     };
-  }, [joined, watchAgentId, connection]);
+  }, [joined, appVisible, watchAgentId, connection]);
 
   // Detail stream (1 Hz activity log) feeds the live action ticker.
   useEffect(() => {
-    if (!joined || !watchAgentId) return;
+    if (!joined || !appVisible || !watchAgentId) return;
     agents.openDetail(watchAgentId);
     return () => agents.closeDetail();
-  }, [joined, watchAgentId, agents.openDetail, agents.closeDetail]);
+  }, [joined, appVisible, watchAgentId, agents.openDetail, agents.closeDetail]);
 
   const summary = roster?.find((a) => a.agent_id === watchAgentId) ?? null;
 

@@ -25,15 +25,19 @@ import { BottomSheet } from "./BottomSheet";
 
 export function AgentsTab({ connection }: { connection: GameConnection }) {
   const agents = useAgents(connection, true);
+  // Keyed on `joined` so the sub is re-sent after a reconnect, and gated on
+  // `appVisible` so the stream pauses while the app is backgrounded.
+  const joined = useGame((s) => s.joined);
+  const appVisible = useGame((s) => s.appVisible);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [hireOpen, setHireOpen] = useState(false);
 
   // Detail subscription follows the open detail page.
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedId || !joined || !appVisible) return;
     agents.openDetail(selectedId);
     return () => agents.closeDetail();
-  }, [selectedId, agents.openDetail, agents.closeDetail]);
+  }, [selectedId, joined, appVisible, agents.openDetail, agents.closeDetail]);
 
   // If the selected agent leaves the roster (dismissed / died), back out.
   useEffect(() => {

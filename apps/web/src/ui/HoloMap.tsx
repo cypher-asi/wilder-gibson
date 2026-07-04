@@ -170,14 +170,19 @@ export function HoloMapView({
   const ownedRef = useRef(ownedAgents);
   ownedRef.current = ownedAgents;
 
-  // Whole-map intel (actor blips) streams only while the map is open.
+  // Whole-map intel (actor blips) streams only while the map is open. Keyed
+  // on `joined` so the sub is re-sent after a reconnect (the socket must
+  // finish the JoinWorld handshake before the gateway accepts game messages),
+  // and gated on `appVisible` so a backgrounded mobile app stops the stream.
+  const joined = useGame((s) => s.joined);
+  const appVisible = useGame((s) => s.appVisible);
   useEffect(() => {
-    if (!open) return;
+    if (!open || !joined || !appVisible) return;
     connection.send({ t: "MapIntelSub", d: { on: true } });
     return () => {
       connection.send({ t: "MapIntelSub", d: { on: false } });
     };
-  }, [open, connection]);
+  }, [open, joined, appVisible, connection]);
 
   useEffect(() => {
     if (!handleRef) return;

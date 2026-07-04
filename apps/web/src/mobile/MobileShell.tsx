@@ -7,6 +7,7 @@ import { GameConnection } from "../net/connection";
 import { useGame } from "../state/game";
 import { AgentsTab } from "./AgentsTab";
 import { EconomyTab } from "./EconomyTab";
+import { useAppVisibility } from "./lifecycle";
 import { MapTab } from "./MapTab";
 import "./mobile.css";
 import { TabBar } from "./TabBar";
@@ -14,6 +15,8 @@ import { TradeTab } from "./TradeTab";
 import { WatchTab } from "./WatchTab";
 
 export function MobileShell({ connection }: { connection: GameConnection }) {
+  // Pause rendering + live subscriptions while the app is backgrounded.
+  useAppVisibility();
   const connected = useGame((s) => s.connected);
   const tab = useGame((s) => s.mobileTab);
 
