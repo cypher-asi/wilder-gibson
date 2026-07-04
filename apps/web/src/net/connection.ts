@@ -12,6 +12,7 @@ import {
   playPurchase,
   playSfx,
 } from "../assets/audio";
+import { interiorRegistry } from "../game/interiors";
 import { setTerritory } from "../game/territory";
 import {
   armorShield,
@@ -103,6 +104,7 @@ export class GameConnection {
       }
       case "WorldJoined": {
         game.reset();
+        interiorRegistry.clear();
         game.localEntityId = msg.d.entity_id;
         game.worldSeed = msg.d.world_seed;
         game.predicted = {
@@ -133,16 +135,21 @@ export class GameConnection {
       }
       case "ChunkData": {
         game.chunks.add(msg.d);
+        // Walk-in store interiors are derived from chunk + entity data;
+        // recompute now that this chunk's geometry is available.
+        interiorRegistry.chunkAdded(msg.d);
         ui.set({ chunkVersion: game.chunks.version });
         break;
       }
       case "ChunkUnload": {
         game.chunks.remove(msg.d.coord.x, msg.d.coord.z);
+        interiorRegistry.chunkRemoved(msg.d.coord.x, msg.d.coord.z);
         ui.set({ chunkVersion: game.chunks.version });
         break;
       }
       case "EntitySpawn": {
         spawnEntity(msg.d);
+        interiorRegistry.entitySpawned(msg.d);
         break;
       }
       case "EntityDespawn": {
@@ -186,6 +193,7 @@ export class GameConnection {
         }
         recentLocalHits.delete(msg.d.id);
         game.entities.delete(msg.d.id);
+        interiorRegistry.entityDespawned(msg.d.id);
         bumpEntityRoster();
         break;
       }

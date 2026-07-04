@@ -8,6 +8,7 @@ import {
   TILE_SIZE,
   TILES_PER_CHUNK,
 } from "../net/protocol";
+import type { ChunkInteriors } from "./interiors";
 
 export const WALK_SPEED = 3.0;
 export const RUN_SPEED = 9.0;
@@ -83,16 +84,14 @@ export class ChunkStore {
   propCache = new Map<string, PropCollider[]>();
   /** World-space building front-face buffers per chunk (mirror of server). */
   buildingCache = new Map<string, Aabb[]>();
+  /** Registered walk-in interiors per chunk (mirror of server ChunkCache). */
+  interiorCache = new Map<string, ChunkInteriors>();
   /** bumped on chunk add/remove so React can resync */
   version = 0;
 
   add(chunk: ChunkData) {
     const key = chunkKey(chunk.coord.x, chunk.coord.z);
     this.chunks.set(key, chunk);
-    this.walkableCache.set(
-      key,
-      chunk.tiles.map((t) => t !== "Building" && t !== "Water"),
-    );
     const ox = chunk.coord.x * CHUNK_SIZE;
     const oz = chunk.coord.z * CHUNK_SIZE;
     const colliders: PropCollider[] = [];
@@ -101,6 +100,33 @@ export class ChunkStore {
       if (r > 0) colliders.push({ x: ox + p.x, z: oz + p.z, r });
     }
     this.propCache.set(key, colliders);
+    this.rebuild(key, chunk);
+    this.version++;
+  }
+
+  /**
+   * Register (or clear) the walk-in interiors carved into a chunk's
+   * buildings; takes effect immediately if the chunk is streamed in.
+   */
+  setInteriors(key: string, ints: ChunkInteriors | null) {
+    if (ints) this.interiorCache.set(key, ints);
+    else this.interiorCache.delete(key);
+    const chunk = this.chunks.get(key);
+    if (chunk) {
+      this.rebuild(key, chunk);
+      this.version++;
+    }
+  }
+
+  /**
+   * Walkability + collision boxes with interiors applied: room tiles open
+   * up, host front bands gain door gaps, walls/furniture join the box list
+   * (mirror of the server's `apply_interiors`).
+   */
+  private rebuild(key: string, chunk: ChunkData) {
+    const walkable = chunk.tiles.map((t) => t !== "Building" && t !== "Water");
+    const ox = chunk.coord.x * CHUNK_SIZE;
+    const oz = chunk.coord.z * CHUNK_SIZE;
     // Front-face buffers: the proud storefront band in front of each
     // building's street (-z) face, matching render/building.ts geometry.
     const aabbs: Aabb[] = chunk.buildings.map((b) => {
@@ -109,8 +135,28 @@ export class ChunkStore {
       const lot = oz + b.tz0 * TILE_SIZE;
       return [minx, lot - BUILDING_FRONT_PROUD, maxx, lot];
     });
+    const ints = this.interiorCache.get(key);
+    if (ints) {
+      for (const [building, replacement] of ints.frontBands) {
+        if (replacement.length > 0) {
+          aabbs[building] = replacement[0];
+          for (let i = 1; i < replacement.length; i++) aabbs.push(replacement[i]);
+        } else {
+          aabbs[building] = [0, 0, 0, 0];
+        }
+      }
+      for (const spec of ints.specs) {
+        const [tx0, tz0, tx1, tz1] = spec.tiles;
+        for (let tz = tz0; tz < tz1; tz++) {
+          for (let tx = tx0; tx < tx1; tx++) {
+            walkable[tz * TILES_PER_CHUNK + tx] = true;
+          }
+        }
+        for (const c of spec.colliders) aabbs.push(c);
+      }
+    }
+    this.walkableCache.set(key, walkable);
     this.buildingCache.set(key, aabbs);
-    this.version++;
   }
 
   remove(x: number, z: number) {
@@ -127,6 +173,7 @@ export class ChunkStore {
     this.walkableCache.clear();
     this.propCache.clear();
     this.buildingCache.clear();
+    this.interiorCache.clear();
     this.version++;
   }
 
