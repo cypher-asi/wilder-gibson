@@ -703,11 +703,64 @@ struct Player {
     /// Last (wild, shards, energy) sent as a WalletUpdate; None forces the
     /// initial send after join. Checked once per tick in replicate().
     wallet_sent: Option<(u32, u32, u32)>,
+    /// Quantized state last sent per entity: replicate() sends an entity in
+    /// the tick snapshot only when this changed (delta replication). Loot,
+    /// statics and idle actors cost nothing per tick.
+    sent_snaps: HashMap<EntityId, SentSnap>,
     /// Subscribed to whole-map agent blips (map open). Recorded now; the
     /// MapIntel stream itself ships in Phase 5.
     #[allow(dead_code)]
     map_intel: bool,
     dirty: bool,
+}
+
+/// Quantized replication state: centimetre positions, centiradian yaw and
+/// 8-bit health/shield fractions. Two jobs: change detection for delta
+/// snapshots (an entity is resent only when its quantized state moves), and
+/// short wire text (the rounded values are what actually get sent, so JSON
+/// floats stay a few digits instead of full f32 precision).
+#[derive(Clone, Copy, PartialEq)]
+struct SentSnap {
+    qx: i32,
+    qy: i32,
+    qz: i32,
+    qyaw: i16,
+    anim: AnimState,
+    qhp: u8,
+    qshield: u8,
+}
+
+impl SentSnap {
+    fn quantize(snap: &EntitySnapshot) -> Self {
+        Self {
+            qx: (snap.position.x * 100.0).round() as i32,
+            qy: (snap.position.y * 100.0).round() as i32,
+            qz: (snap.position.z * 100.0).round() as i32,
+            // Yaw is wrapped (-pi..pi], so centiradians fit i16.
+            qyaw: (snap.yaw * 100.0).round() as i16,
+            anim: snap.anim,
+            qhp: (snap.health_pct.clamp(0.0, 1.0) * 255.0).round() as u8,
+            qshield: (snap.shield_pct.clamp(0.0, 1.0) * 255.0).round() as u8,
+        }
+    }
+
+    /// The snapshot as actually sent: the entity's wire values are the
+    /// quantized ones, so client state and the server's change detection
+    /// can never drift apart.
+    fn to_wire(&self, id: EntityId) -> EntitySnapshot {
+        EntitySnapshot {
+            id,
+            position: Vec3::new(
+                self.qx as f32 / 100.0,
+                self.qy as f32 / 100.0,
+                self.qz as f32 / 100.0,
+            ),
+            yaw: self.qyaw as f32 / 100.0,
+            anim: self.anim,
+            health_pct: self.qhp as f32 / 255.0,
+            shield_pct: self.qshield as f32 / 255.0,
+        }
+    }
 }
 
 struct ProductionJobState {
@@ -1173,6 +1226,7 @@ impl World {
             shards,
             energy,
             wallet_sent: None,
+            sent_snaps: HashMap::new(),
             map_intel: false,
             dirty: true,
         };
@@ -6211,11 +6265,23 @@ impl World {
                 if !player.known_entities.contains(&r.id) {
                     let _ = player.tx.send(S2C::EntitySpawn(r.spawn.clone()));
                 }
-                visible.push(r.snap.clone());
+                // Delta replication: resend only entities whose quantized
+                // state changed since this player's last snapshot of them.
+                // The local player's own entity always ships — its snapshot
+                // carries the input-ack reconciliation on the client.
+                let q = SentSnap::quantize(&r.snap);
+                let changed = player.sent_snaps.get(&r.id) != Some(&q);
+                if changed || r.id == player.entity {
+                    if changed {
+                        player.sent_snaps.insert(r.id, q);
+                    }
+                    visible.push(q.to_wire(r.id));
+                }
             }
 
             for gone in player.known_entities.difference(&visible_ids) {
                 let _ = player.tx.send(S2C::EntityDespawn { id: *gone });
+                player.sent_snaps.remove(gone);
             }
             player.known_entities = visible_ids;
 
@@ -6827,6 +6893,7 @@ mod tests {
                 shards: 0,
                 energy: 0,
                 wallet_sent: None,
+                sent_snaps: HashMap::new(),
                 map_intel: false,
                 dirty: true,
             },
