@@ -1570,117 +1570,137 @@ function SafehouseView({ entity }: { entity: GameEntity }) {
   );
 }
 
-function EntityView({ entity }: { entity: GameEntity }) {
-  const group = useRef<THREE.Group>(null);
+/** Scene group per entity id, positioned by the central EntityDriver. */
+const entityGroups = new Map<number, THREE.Group>();
+/** Previous render position per entity, for velocity estimation. */
+const prevPositions = new WeakMap<GameEntity, { x: number; z: number }>();
+
+/**
+ * Per-frame transform update for one entity: prediction/interpolation,
+ * velocity smoothing for the locomotion blender, and the scene-group
+ * position/rotation write. Runs from the single EntityDriver loop — one
+ * useFrame for the whole roster instead of one hook per entity.
+ */
+function driveEntity(entity: GameEntity, group: THREE.Group, dt: number, now: number) {
   const isCharacter =
     entity.kind === "Player" || entity.kind === "Npc" || entity.kind === "Agent";
-  /** Previous render position, for velocity estimation. */
-  const prevPos = useRef<{ x: number; z: number } | null>(null);
-
-  useFrame((_, dt) => {
-    if (!group.current) return;
-    perf.begin("entities.move");
-    const isLocal = entity.id === game.localEntityId;
-    const now = performance.now();
-
-    if (!isCharacter) {
-      group.current.position.set(
-        entity.x,
-        entity.y + groundHeightAt(entity.x, entity.z),
-        entity.z,
-      );
-      perf.end("entities.move");
-      return;
-    }
-
-    const predicting =
-      isLocal && entity.healthPct > 0 && now - game.lastDirectInputAt < PREDICT_WINDOW;
-    if (predicting) {
-      // Prediction drives the local player during WASD movement; render the
-      // smoothed position so the 20 Hz sim steps don't show on screen.
-      entity.x = game.rendered.x;
-      entity.z = game.rendered.z;
-      entity.yaw = game.rendered.yaw;
-      // Snapshot sampling is skipped here, so derive the anim from input
-      // instead of waiting for the server (which froze the old state).
-      if (game.roll) entity.anim = "Roll";
-      else if (game.input.moving) {
-        entity.anim = game.crouching ? "CrouchWalk" : game.input.run ? "Run" : "Walk";
-      } else {
-        entity.anim = game.crouching ? "Crouch" : "Idle";
-      }
-    } else {
-      sampleTransform(entity, now - INTERP_DELAY);
-      if (isLocal) {
-        // Keep prediction in sync while server-driven (click-to-move).
-        game.predicted.x = entity.x;
-        game.predicted.z = entity.z;
-        game.predicted.yaw = entity.yaw;
-        game.rendered.x = entity.x;
-        game.rendered.z = entity.z;
-        game.rendered.yaw = entity.yaw;
-      }
-    }
-
-    // Twin-stick facing: the local player always points at the mouse
-    // (except mid-roll, where the body follows the dash direction).
-    if (isLocal && game.aim.active && !game.roll) {
-      entity.yaw = game.aim.yaw;
-    }
-
-    // Smoothed world velocity for the directional locomotion blender. The
-    // local player uses input intent (instant response); remotes and NPCs
-    // differentiate the interpolated transform.
-    if (dt > 0) {
-      let tx = 0;
-      let tz = 0;
-      if (predicting && game.input.moving && !game.roll) {
-        const speed = game.crouching
-          ? CROUCH_SPEED
-          : game.input.run
-            ? RUN_SPEED
-            : WALK_SPEED;
-        tx = game.input.dx * speed;
-        tz = game.input.dz * speed;
-      } else if (prevPos.current) {
-        const ddx = (entity.x - prevPos.current.x) / dt;
-        const ddz = (entity.z - prevPos.current.z) / dt;
-        // Ignore teleport spikes (respawn, chunk snap).
-        if (Math.hypot(ddx, ddz) < 20) {
-          tx = ddx;
-          tz = ddz;
-        }
-      }
-      const k = 1 - Math.exp(-dt * 12);
-      entity.vx += (tx - entity.vx) * k;
-      entity.vz += (tz - entity.vz) * k;
-    }
-    // Mutate in place: a fresh object here was one allocation per character
-    // per frame.
-    if (prevPos.current) {
-      prevPos.current.x = entity.x;
-      prevPos.current.z = entity.z;
-    } else {
-      prevPos.current = { x: entity.x, z: entity.z };
-    }
-
-    // Stand on the visual ground surface (raised sidewalks vs road grade).
-    group.current.position.set(
+  if (!isCharacter) {
+    group.position.set(
       entity.x,
       entity.y + groundHeightAt(entity.x, entity.z),
       entity.z,
     );
-    // Model faces +Z at yaw 0 in three.js convention; our yaw is atan2(dz,dx).
-    group.current.rotation.y = -entity.yaw + Math.PI / 2;
+    return;
+  }
 
+  const isLocal = entity.id === game.localEntityId;
+  const predicting =
+    isLocal && entity.healthPct > 0 && now - game.lastDirectInputAt < PREDICT_WINDOW;
+  if (predicting) {
+    // Prediction drives the local player during WASD movement; render the
+    // smoothed position so the 20 Hz sim steps don't show on screen.
+    entity.x = game.rendered.x;
+    entity.z = game.rendered.z;
+    entity.yaw = game.rendered.yaw;
+    // Snapshot sampling is skipped here, so derive the anim from input
+    // instead of waiting for the server (which froze the old state).
+    if (game.roll) entity.anim = "Roll";
+    else if (game.input.moving) {
+      entity.anim = game.crouching ? "CrouchWalk" : game.input.run ? "Run" : "Walk";
+    } else {
+      entity.anim = game.crouching ? "Crouch" : "Idle";
+    }
+  } else {
+    sampleTransform(entity, now - INTERP_DELAY);
     if (isLocal) {
-      // Crouch-walking and rolling stay quiet (sneaking / tumbling).
-      const moving = entity.anim === "Walk" || entity.anim === "Run";
-      void setFootsteps(moving, entity.anim === "Run");
+      // Keep prediction in sync while server-driven (click-to-move).
+      game.predicted.x = entity.x;
+      game.predicted.z = entity.z;
+      game.predicted.yaw = entity.yaw;
+      game.rendered.x = entity.x;
+      game.rendered.z = entity.z;
+      game.rendered.yaw = entity.yaw;
+    }
+  }
+
+  // Twin-stick facing: the local player always points at the mouse
+  // (except mid-roll, where the body follows the dash direction).
+  if (isLocal && game.aim.active && !game.roll) {
+    entity.yaw = game.aim.yaw;
+  }
+
+  // Smoothed world velocity for the directional locomotion blender. The
+  // local player uses input intent (instant response); remotes and NPCs
+  // differentiate the interpolated transform.
+  const prevPos = prevPositions.get(entity);
+  if (dt > 0) {
+    let tx = 0;
+    let tz = 0;
+    if (predicting && game.input.moving && !game.roll) {
+      const speed = game.crouching
+        ? CROUCH_SPEED
+        : game.input.run
+          ? RUN_SPEED
+          : WALK_SPEED;
+      tx = game.input.dx * speed;
+      tz = game.input.dz * speed;
+    } else if (prevPos) {
+      const ddx = (entity.x - prevPos.x) / dt;
+      const ddz = (entity.z - prevPos.z) / dt;
+      // Ignore teleport spikes (respawn, chunk snap).
+      if (Math.hypot(ddx, ddz) < 20) {
+        tx = ddx;
+        tz = ddz;
+      }
+    }
+    const k = 1 - Math.exp(-dt * 12);
+    entity.vx += (tx - entity.vx) * k;
+    entity.vz += (tz - entity.vz) * k;
+  }
+  // Mutate in place: a fresh object here was one allocation per character
+  // per frame.
+  if (prevPos) {
+    prevPos.x = entity.x;
+    prevPos.z = entity.z;
+  } else {
+    prevPositions.set(entity, { x: entity.x, z: entity.z });
+  }
+
+  // Stand on the visual ground surface (raised sidewalks vs road grade).
+  group.position.set(
+    entity.x,
+    entity.y + groundHeightAt(entity.x, entity.z),
+    entity.z,
+  );
+  // Model faces +Z at yaw 0 in three.js convention; our yaw is atan2(dz,dx).
+  group.rotation.y = -entity.yaw + Math.PI / 2;
+
+  if (isLocal) {
+    // Crouch-walking and rolling stay quiet (sneaking / tumbling).
+    const moving = entity.anim === "Walk" || entity.anim === "Run";
+    void setFootsteps(moving, entity.anim === "Run");
+  }
+}
+
+/**
+ * The one movement hook: interpolates/predicts every entity and writes its
+ * scene-group transform. Replaces the previous one-useFrame-per-EntityView
+ * pattern, whose per-hook overhead scaled with the replicated entity count.
+ */
+function EntityDriver() {
+  useFrame((_, dt) => {
+    perf.begin("entities.move");
+    const now = performance.now();
+    for (const entity of game.entities.values()) {
+      const group = entityGroups.get(entity.id);
+      if (group) driveEntity(entity, group, dt, now);
     }
     perf.end("entities.move");
   });
+  return null;
+}
 
+function EntityView({ entity }: { entity: GameEntity }) {
   let body: React.ReactNode;
   switch (entity.kind) {
     case "LootContainer":
@@ -1733,7 +1753,19 @@ function EntityView({ entity }: { entity: GameEntity }) {
       body = <CharacterModel entity={entity} />;
   }
 
-  return <group ref={group}>{body}</group>;
+  return (
+    <group
+      // Register with the central EntityDriver, which owns this group's
+      // per-frame transform. Callback ref: registration happens the moment
+      // the group exists, unregistration the moment it unmounts.
+      ref={(g: THREE.Group | null) => {
+        if (g) entityGroups.set(entity.id, g);
+        else if (entityGroups.get(entity.id)) entityGroups.delete(entity.id);
+      }}
+    >
+      {body}
+    </group>
+  );
 }
 
 /** Camera distances (m) between which the bar fades from full to faint. */
@@ -2106,6 +2138,7 @@ export function Entities() {
       {[...game.entities.values()].map((entity) => (
         <MemoEntityView key={entity.id} entity={entity} />
       ))}
+      <EntityDriver />
       <AgentLodArbiter />
       <AgentImpostors />
       <CrowdChatter />
