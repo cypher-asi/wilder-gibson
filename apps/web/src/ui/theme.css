@@ -2159,23 +2159,40 @@ body {
   top: 250px;
   left: 44px;
   pointer-events: auto;
-  font: 800 13px/1 var(--font-display);
-  letter-spacing: 0.18em;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
   color: var(--accent);
   background: rgba(6, 14, 22, 0.8);
   border: 1px solid var(--accent-dim);
   clip-path: var(--clip-notch-sm);
-  padding: 6px 12px;
+  padding: 5px 12px;
   cursor: pointer;
   opacity: 0.9;
   text-shadow: 0 0 10px rgba(79, 195, 255, 0.7);
   transition: opacity 0.15s;
+  font-variant-numeric: tabular-nums;
+}
+
+.perf-chip-fps {
+  font: 800 15px/1 var(--font-display);
+  letter-spacing: 0.04em;
+  color: var(--white);
+}
+
+.perf-chip-unit {
+  font: 700 9px/1 var(--font-display);
+  letter-spacing: 0.16em;
+  color: var(--text-dim);
 }
 
 .perf-chip:hover {
   opacity: 1;
-  color: var(--accent-bright);
   border-color: var(--accent);
+}
+
+.perf-chip:hover .perf-chip-fps {
+  color: var(--accent-bright);
 }
 
 .perf-panel {

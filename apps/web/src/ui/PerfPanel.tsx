@@ -80,9 +80,11 @@ export function PerfPanel() {
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    // Poll whether open or not: frame stats (fps/ms) are always tracked, so
+    // the closed chip shows a live readout. Slower cadence when closed to keep
+    // the idle HUD cost negligible.
     setSnap(perf.snapshot());
-    const timer = setInterval(() => setSnap(perf.snapshot()), 250);
+    const timer = setInterval(() => setSnap(perf.snapshot()), open ? 250 : 500);
     return () => clearInterval(timer);
   }, [open]);
 
@@ -93,7 +95,8 @@ export function PerfPanel() {
         onClick={() => setOpen(true)}
         title="Performance panel (F3)"
       >
-        FPS
+        <span className="perf-chip-fps">{snap ? snap.fps.toFixed(0) : "--"}</span>
+        <span className="perf-chip-unit">fps</span>
       </button>
     );
   }
