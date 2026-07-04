@@ -5,6 +5,7 @@
 
 mod chunks;
 pub mod factions;
+pub mod interiors;
 mod ledger;
 mod npc;
 
