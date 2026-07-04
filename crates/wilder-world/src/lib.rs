@@ -651,21 +651,41 @@ fn vendor_sell_value(agent: &FactionAgent, store_kind: EntityKind) -> u32 {
         .sum()
 }
 
-/// Whether an agent would put `kind` on the market book: raw resources and
-/// valuables, never the personal kit that keeps it combat-effective.
+/// Whether `kind` ever goes on the market book: raw resources, valuables,
+/// and gear (weapons/ammo/meds trade too — agents list what's above their
+/// personal kit reserve, see [`market_surplus`]).
 fn market_listable(kind: ItemKind) -> bool {
-    !agents::is_kit(kind)
-        && (wilder_economy::RESOURCES.contains(&kind) || base_value(kind) >= 5)
+    agents::is_kit(kind)
+        || wilder_economy::RESOURCES.contains(&kind)
+        || base_value(kind) >= 5
+}
+
+/// Per-kind sellable surplus in an agent's pack: listable kinds only, with
+/// the personal kit reserve (best weapon, ammo/medkit buffer) subtracted so
+/// an agent never sells itself defenseless.
+fn market_surplus(agent: &FactionAgent) -> Vec<(ItemKind, u32)> {
+    let mut totals: Vec<(ItemKind, u32)> = Vec::new();
+    for s in &agent.inventory {
+        if !market_listable(s.kind) {
+            continue;
+        }
+        match totals.iter_mut().find(|(k, _)| *k == s.kind) {
+            Some((_, c)) => *c += s.count,
+            None => totals.push((s.kind, s.count)),
+        }
+    }
+    totals
+        .into_iter()
+        .filter_map(|(k, c)| {
+            let surplus = c.saturating_sub(agents::kit_reserve(agent, k));
+            (surplus > 0).then_some((k, surplus))
+        })
+        .collect()
 }
 
 /// Reference value of everything the agent would list on the market book.
 fn market_list_value(agent: &FactionAgent) -> u32 {
-    agent
-        .inventory
-        .iter()
-        .filter(|s| market_listable(s.kind))
-        .map(|s| base_value(s.kind) * s.count)
-        .sum()
+    market_surplus(agent).iter().map(|&(k, c)| base_value(k) * c).sum()
 }
 
 /// Zone kind of the octant at index `oct`, where octant 0 points along +X
@@ -5790,11 +5810,9 @@ impl World {
     /// listable cargo at today's floating ask. The Sell scorer compares this
     /// against the Bodega's fixed floor to pick the errand's channel.
     fn market_sell_value(&self, idx: usize) -> u32 {
-        let gross: u32 = self.agents[idx]
-            .inventory
+        let gross: u32 = market_surplus(&self.agents[idx])
             .iter()
-            .filter(|s| market_listable(s.kind))
-            .map(|s| self.agent_ask_price(s.kind).saturating_mul(s.count))
+            .map(|&(k, c)| self.agent_ask_price(k).saturating_mul(c))
             .sum();
         gross.saturating_mul(100 - MARKET_FEE_PCT) / 100
     }
@@ -5822,16 +5840,12 @@ impl World {
         true
     }
 
-    /// List the agent's carried resources on the market book at the current
+    /// List the agent's sellable surplus (resources, valuables, and gear
+    /// above the personal kit reserve) on the market book at the current
     /// floating market price.
     fn agent_market_list(&mut self, idx: usize) {
         let market_agent = self.market_party();
-        let carried: Vec<(ItemKind, u32)> = self.agents[idx]
-            .inventory
-            .iter()
-            .filter(|s| market_listable(s.kind))
-            .map(|s| (s.kind, s.count))
-            .collect();
+        let carried = market_surplus(&self.agents[idx]);
         for (kind, count) in carried {
             // Full book: scrap dead floor-priced agent stock to make room;
             // if none exists the book really is full and listing stops.

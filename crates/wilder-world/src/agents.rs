@@ -419,6 +419,24 @@ pub fn is_kit(kind: ItemKind) -> bool {
     )
 }
 
+/// How many of `kind` this agent keeps for itself; anything above the
+/// reserve is sellable surplus. One copy of the best carried weapon stays
+/// (lesser weapons are cargo — `weapon()` only ever uses the strongest),
+/// plus a working buffer of ammo and medkits. Everything else: no reserve.
+pub fn kit_reserve(agent: &FactionAgent, kind: ItemKind) -> u32 {
+    const WEAPONS: [ItemKind; 4] =
+        [ItemKind::Smg, ItemKind::Pistol, ItemKind::Pipe, ItemKind::Knife];
+    match kind {
+        ItemKind::Ammo9mm => 90,
+        ItemKind::Medkit => 2,
+        k if WEAPONS.contains(&k) => {
+            let best = WEAPONS.into_iter().find(|&w| agent.count_item(w) > 0);
+            if best == Some(k) { 1 } else { 0 }
+        }
+        _ => 0,
+    }
+}
+
 pub struct FactionAgent {
     pub entity: EntityId,
     pub agent_id: AgentId,
