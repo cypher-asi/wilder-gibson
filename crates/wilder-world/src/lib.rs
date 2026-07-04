@@ -714,6 +714,15 @@ struct Player {
     dirty: bool,
 }
 
+/// Max hot faction agents replicated to one player per tick. The client only
+/// draws ~24 full rigs plus a few hundred instanced silhouettes, so shipping
+/// every hot agent in view past that is pure wire cost. Nearest-first.
+const REPLICATED_AGENT_CAP: usize = 192;
+/// Hysteresis headroom: agents this client already knows about stay
+/// replicated up to this softer cap, so the nearest-K boundary doesn't
+/// strobe spawn/despawn as relative distances jitter tick to tick.
+const REPLICATED_AGENT_KEEP: usize = 240;
+
 /// Quantized replication state: centimetre positions, centiradian yaw and
 /// 8-bit health/shield fractions. Two jobs: change detection for delta
 /// snapshots (an entity is resent only when its quantized state moves), and
@@ -6082,6 +6091,8 @@ impl World {
             chunk: ChunkCoord,
             spawn: EntitySpawnData,
             snap: EntitySnapshot,
+            /// Hot faction agent: subject to the per-player nearest-K cap.
+            is_agent: bool,
         }
 
         let mut all: Vec<Replicated> = Vec::new();
@@ -6091,6 +6102,7 @@ impl World {
                 chunk: ChunkCoord::from_world(p.character.position),
                 spawn: p.spawn_data(),
                 snap: p.snapshot(),
+                is_agent: false,
             });
         }
         for npc in self.npcs.values() {
@@ -6102,6 +6114,7 @@ impl World {
                 chunk: ChunkCoord::from_world(npc.position),
                 spawn: npc.spawn_data(),
                 snap: npc.snapshot(),
+                is_agent: false,
             });
         }
         // Hot faction agents replicate like NPCs (cold agents don't exist as
@@ -6116,6 +6129,7 @@ impl World {
                 chunk: agent.chunk(),
                 spawn: agent.spawn_data(factions::faction_color(agent.faction)),
                 snap: agent.snapshot(),
+                is_agent: true,
             });
         }
         for container in self.loot.values() {
@@ -6148,6 +6162,7 @@ impl World {
                     health_pct: 1.0,
                     shield_pct: 0.0,
                 },
+                is_agent: false,
             });
         }
         for pickup in self.pickups.values() {
@@ -6180,6 +6195,7 @@ impl World {
                     health_pct: 1.0,
                     shield_pct: 0.0,
                 },
+                is_agent: false,
             });
         }
         for node in self.nodes.values() {
@@ -6212,6 +6228,7 @@ impl World {
                     health_pct: health,
                     shield_pct: 0.0,
                 },
+                is_agent: false,
             });
         }
         for s in self.statics.values() {
@@ -6239,6 +6256,7 @@ impl World {
                     health_pct: 1.0,
                     shield_pct: 0.0,
                 },
+                is_agent: false,
             });
         }
 
@@ -6257,9 +6275,46 @@ impl World {
             let mut visible: Vec<EntitySnapshot> = Vec::new();
             let mut visible_ids: HashSet<EntityId> = HashSet::new();
 
+            // Cap the hot agents shipped to this player to the nearest K.
+            // The pre-pass ranks agents in view by distance; `agent_keep`
+            // is None when everyone fits under the cap.
+            let mut agent_rank: Vec<(EntityId, f32)> = Vec::new();
+            let ppos = player.character.position;
+            for r in &all {
+                if r.is_agent && player.view.contains(&r.chunk) {
+                    agent_rank.push((r.id, (r.snap.position - ppos).length_squared()));
+                }
+            }
+            let agent_keep: Option<HashSet<EntityId>> =
+                if agent_rank.len() > REPLICATED_AGENT_CAP {
+                    agent_rank.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+                    let mut keep: HashSet<EntityId> =
+                        agent_rank[..REPLICATED_AGENT_CAP].iter().map(|(id, _)| *id).collect();
+                    // Hysteresis: already-known agents past the cap survive up
+                    // to the softer keep limit instead of despawning at once.
+                    for (id, _) in &agent_rank[REPLICATED_AGENT_CAP..] {
+                        if keep.len() >= REPLICATED_AGENT_KEEP {
+                            break;
+                        }
+                        if player.known_entities.contains(id) {
+                            keep.insert(*id);
+                        }
+                    }
+                    Some(keep)
+                } else {
+                    None
+                };
+
             for r in &all {
                 if !player.view.contains(&r.chunk) {
                     continue;
+                }
+                if r.is_agent {
+                    if let Some(keep) = &agent_keep {
+                        if !keep.contains(&r.id) {
+                            continue;
+                        }
+                    }
                 }
                 visible_ids.insert(r.id);
                 if !player.known_entities.contains(&r.id) {
