@@ -31,15 +31,22 @@ export function AgentsScreen({ connection }: { connection: GameConnection }) {
   const roster = agents.roster;
 
   // Default the detail pane to the first agent once the roster lands, and
-  // drop the selection if the agent leaves the roster.
+  // drop the selection if the agent leaves the roster. A respawn mints a
+  // fresh identity for the same slot — the detail stream keeps flowing with
+  // the new agent_id — so follow it instead of bouncing off the selection.
+  const detailId = agents.detail?.summary.agent_id ?? null;
   useEffect(() => {
     if (!open || roster === null) return;
     if (selectedId && !roster.some((a) => a.agent_id === selectedId)) {
-      setSelectedId(null);
+      if (detailId && roster.some((a) => a.agent_id === detailId)) {
+        setSelectedId(detailId);
+      } else {
+        setSelectedId(null);
+      }
     } else if (!selectedId && roster.length > 0) {
       setSelectedId(roster[0].agent_id);
     }
-  }, [open, roster, selectedId]);
+  }, [open, roster, selectedId, detailId]);
 
   // Detail subscription follows the selected agent while the screen is up.
   // Keyed on `joined` so the detail sub is re-sent after a reconnect.

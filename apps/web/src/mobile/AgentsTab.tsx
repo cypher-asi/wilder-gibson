@@ -39,16 +39,23 @@ export function AgentsTab({ connection }: { connection: GameConnection }) {
     return () => agents.closeDetail();
   }, [selectedId, joined, appVisible, agents.openDetail, agents.closeDetail]);
 
-  // If the selected agent leaves the roster (dismissed / died), back out.
+  // If the selected agent leaves the roster (dismissed / died), back out —
+  // unless it respawned: the same slot comes back under a fresh agent_id and
+  // the detail stream keeps flowing with the new identity, so follow it.
+  const detailId = agents.detail?.summary.agent_id ?? null;
   useEffect(() => {
     if (
       selectedId &&
       agents.roster !== null &&
       !agents.roster.some((a) => a.agent_id === selectedId)
     ) {
-      setSelectedId(null);
+      if (detailId && agents.roster.some((a) => a.agent_id === detailId)) {
+        setSelectedId(detailId);
+      } else {
+        setSelectedId(null);
+      }
     }
-  }, [selectedId, agents.roster]);
+  }, [selectedId, agents.roster, detailId]);
 
   const openHire = () => {
     agents.requestHireList();

@@ -203,6 +203,9 @@ const AGENT_HIRE_TRAIT_RATE: f32 = 250.0;
 const AGENT_HIRE_OFFERS: usize = 20;
 /// Ring capacity of one owned agent's live activity log.
 const AGENT_LOG_CAP: usize = 64;
+/// Ring size of the per-owned-agent personal transaction slice (dossier
+/// TRANSACTIONS pane). Kept above the 20 the snapshot ships.
+const AGENT_TX_CAP: usize = 32;
 /// Re-send `AgentRoster` to subscribers every N ticks (~2 s).
 const AGENT_ROSTER_TICK_INTERVAL: u64 = 40;
 /// Re-push `AgentDetail` to watchers every N ticks (~1 s).
@@ -1162,6 +1165,13 @@ const REPLICATED_AGENT_CAP: usize = 192;
 /// replicated up to this softer cap, so the nearest-K boundary doesn't
 /// strobe spawn/despawn as relative distances jitter tick to tick.
 const REPLICATED_AGENT_KEEP: usize = 240;
+/// Max loot entities (containers + currency pickups) replicated to one
+/// player, nearest-first. A hub battlefield can hold far more drops than a
+/// client can usefully draw; the loot still exists server-side and agents
+/// still see all of it — this only bounds one client's wire and draw cost.
+const REPLICATED_LOOT_CAP: usize = 128;
+/// Hysteresis headroom for the loot cap (see `REPLICATED_AGENT_KEEP`).
+const REPLICATED_LOOT_KEEP: usize = 160;
 
 /// Chunk radius (Chebyshev) of the always-on "agent dot" feed around each
 /// player. Must be greater than `wilder_replication::VIEW_RADIUS` (the inner
@@ -1617,6 +1627,12 @@ pub struct World {
     /// Only owned agents have an entry: created on hire, dropped on dismiss,
     /// carried across respawn (re-keyed to the fresh identity).
     agent_logs: HashMap<AgentId, VecDeque<AgentLogEntry>>,
+    /// Personal ledger slice per OWNED agent (ring of `AGENT_TX_CAP` txs).
+    /// The global ledger ring is world-wide and short-lived, so the dossier
+    /// keeps its own slice, routed in `flush_economy`. Same lifecycle as
+    /// `agent_logs`: created on hire, dropped on dismiss, re-keyed on
+    /// respawn, persisted inside the agent shard saves.
+    agent_txs: HashMap<AgentId, VecDeque<EconTx>>,
     /// Per-system wall-time accounting for `step()`.
     timings: TickTimings,
 }
@@ -1740,6 +1756,7 @@ fn new_world(store: Arc<RocksStore>, rx: mpsc::UnboundedReceiver<WorldCmd>) -> W
         district_spots: Vec::new(),
         owned_agents: HashMap::new(),
         agent_logs: HashMap::new(),
+        agent_txs: HashMap::new(),
         timings: TickTimings::default(),
     };
     // Seed the spawn district up front so PoiList is complete on every join.
@@ -6204,9 +6221,16 @@ impl World {
             match event {
                 AgentEvent::Attack { target, damage } => {
                     if !self.deal_damage(self.agents[idx].entity, target, damage, None) {
-                        // Target became invalid (sanctuary, died, gone):
-                        // give up the hunt on the next decision.
+                        // Target became invalid (sanctuary, spawn-protected,
+                        // died, gone): drop the hunt and re-score right away
+                        // instead of parking in Idle until the stagger timer
+                        // fires — a rational combatant picks another target
+                        // or repositions, it doesn't freeze mid-fight.
                         self.agents[idx].goal = Goal::Idle;
+                        if !self.agents[idx].decision_queued {
+                            self.agents[idx].decision_queued = true;
+                            self.agent_decision_queue.push_back(idx as u32);
+                        }
                     }
                 }
                 AgentEvent::Act => self.agent_act(idx),
@@ -6226,7 +6250,13 @@ impl World {
         // once); the queue spreads that spike over a few ticks instead of
         // stalling one.
         const DECISION_BUDGET: usize = 256;
-        let n = self.agent_decision_queue.len().min(DECISION_BUDGET);
+        // Adaptive drain: the fixed budget covers normal churn, but a blob
+        // of agents all arriving at a front and emitting NeedsGoal at once
+        // would wait queue_len/256 ticks — visibly standing statue-still
+        // through no choice of their own. Scale the budget so the backlog
+        // always clears within ~1 second.
+        let budget = DECISION_BUDGET.max(self.agent_decision_queue.len() / TICK_HZ as usize);
+        let n = self.agent_decision_queue.len().min(budget);
         for _ in 0..n {
             let idx = self.agent_decision_queue.pop_front().unwrap() as usize;
             self.agents[idx].decision_queued = false;
@@ -6440,6 +6470,17 @@ impl World {
         let (agent_id, name) = mint_agent_name(faction);
         let old_entity = self.agents[idx].entity;
         let old_agent_id = self.agents[idx].agent_id;
+        // Fold the dead identity's competition record into the slot's
+        // carried counters first: the dossier reports carried + current
+        // life, so RECORD accumulates across lives instead of resetting.
+        if let Some(row) = self.stats.actors.get(&old_agent_id) {
+            let cs = &mut self.agents[idx].carried_stats;
+            cs.kills += row.kills;
+            cs.deaths += row.deaths;
+            cs.resources += row.resources;
+            cs.trades += row.trades;
+            cs.crafted += row.crafted;
+        }
         // The dead identity leaves the boards; its faction/guild legacy stays
         // — and so do its learned traits (death already charged the fatal
         // activity in kill_agent), so agents grow and evolve across lives.
@@ -6480,6 +6521,9 @@ impl World {
                 text: format!("Respawned as {name}"),
             });
             self.agent_logs.insert(agent_id, log);
+            // The personal transaction slice carries over the same way.
+            let txs = self.agent_txs.remove(&old_agent_id).unwrap_or_default();
+            self.agent_txs.insert(agent_id, txs);
         }
         // Alive again at the staging ground: back into the spatial grid.
         self.regrid_agent(idx);
@@ -7275,7 +7319,15 @@ impl World {
         if has_weapon {
             let fight_mult = traits.mult(Activity::Fight);
             if let Some(target) = self.find_hostile_target(entity, pos, faction) {
-                let score = 30.0 * fight_mult * 2.0 * advantage;
+                // Expected-gain pricing: a fight at parity risks about as
+                // much as it stands to win, so its utility is discounted
+                // toward what the agent expects to keep. (2*advantage)^2/2
+                // halves the old flat score at parity while a strong local
+                // majority still presses at full weight — which is what
+                // lets scavenging a fresh battlefield rationally beat
+                // re-engaging a coin-flip fight.
+                let odds = (2.0 * advantage).min(2.0);
+                let score = 30.0 * fight_mult * odds * odds * 0.5;
                 if score > best.0 {
                     best = (score, Goal::Hunt { target });
                 }
@@ -7444,13 +7496,42 @@ impl World {
         fronts
     }
 
-    /// Patrol destination for a fight-leaning agent: a jittered spot at its
-    /// assigned front. Hub-cohort agents (fixed `home_spot` inside the combat
-    /// ring) always fight over the hub front so the war stays visible on the
-    /// starter playfield. Everyone else hashes their identity — NOT home
-    /// geography — across the shared front list, so Rebel and Forum
-    /// combatants converge on the same contested regions and the cold
+    /// Living same-faction agents within `radius` of `pos`, counted off the
+    /// agent grid (chunk ring sized to the radius). Cheap enough to price
+    /// crowding inside goal scoring.
+    fn local_ally_count(&self, pos: Vec3, faction: FactionId, radius: f32) -> u32 {
+        let ring = (radius / CHUNK_SIZE).ceil() as i32;
+        let center = ChunkCoord::from_world(pos);
+        let mut count = 0;
+        for dz in -ring..=ring {
+            for dx in -ring..=ring {
+                let coord = ChunkCoord::new(center.x + dx, center.z + dz);
+                for &i in self.agent_grid.get(&coord).into_iter().flatten() {
+                    let a = &self.agents[i as usize];
+                    if a.alive()
+                        && a.faction == faction
+                        && (a.position - pos).length() <= radius
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Patrol destination for a fight-leaning agent: a spot near its front,
+    /// picked by the agent itself. Hub-cohort agents (fixed `home_spot`
+    /// inside the combat ring) fight over the hub front so the war stays
+    /// visible on the starter playfield. Everyone else hashes their identity
+    /// — NOT home geography — across the shared front list, so Rebel and
+    /// Forum combatants converge on the same contested regions and the cold
     /// statistical war actually finds both sides in one bucket.
+    ///
+    /// The exact spot is chosen among sampled candidates priced by distance
+    /// and ally crowding: a body adds nothing to ground ten allies already
+    /// hold, so the line spreads out along the front through each agent's
+    /// own pick instead of everyone piling onto one scripted point.
     fn patrol_front(&mut self, idx: usize) -> Vec3 {
         let hub_local = self.agents[idx]
             .home_spot
@@ -7462,7 +7543,18 @@ impl World {
             let pick = (self.agents[idx].agent_id.as_u128() % fronts.len() as u128) as usize;
             fronts[pick]
         };
-        self.walkable_spot_near(front, 40.0)
+        let (pos, faction) = (self.agents[idx].position, self.agents[idx].faction);
+        let mut best: Option<(f32, Vec3)> = None;
+        for _ in 0..5 {
+            let spot = self.walkable_spot_near(front, 100.0);
+            let allies = self.local_ally_count(spot, faction, 24.0);
+            let dist = (spot - pos).length();
+            let score = 1.0 / (1.0 + dist / 200.0) / (1.0 + allies as f32 / 6.0);
+            if best.map(|(s, _)| score > s).unwrap_or(true) {
+                best = Some((score, spot));
+            }
+        }
+        best.map(|(_, s)| s).unwrap_or(front)
     }
 
     /// Short wander destination around the agent's current position.
@@ -7531,11 +7623,38 @@ impl World {
         agent.goal = Goal::Idle;
     }
 
-    /// Drain a loot container into the agent's pack (it walked onto the
-    /// drop). Mirrors the player walk-over pickup, including the ledger
-    /// attribution; whatever doesn't fit stays on the ground.
+    /// Loot errand arrival: drain the container, then — if the pile the
+    /// agent chose this errand for extends further and the pack still has
+    /// room — chain straight to the next wanted drop instead of dropping to
+    /// Idle. Agents clear a battlefield the way a person would: crate by
+    /// crate, not one grab per brain cycle.
     fn agent_loot_pickup(&mut self, idx: usize, container_id: EntityId) {
         self.agents[idx].goal = Goal::Idle;
+        self.agent_take_loot(idx, container_id);
+        let agent = &self.agents[idx];
+        if agent.capacity().saturating_sub(agent.used_volume()) == 0 {
+            return;
+        }
+        let pos = agent.position;
+        // Chain radius: the rest of a scattered death pile, not a new trek.
+        const LOOT_CHAIN_RANGE: f32 = 16.0;
+        let next = self
+            .loot
+            .values()
+            .filter(|c| c.variant == 0 && c.entity != container_id && !c.items.is_empty())
+            .map(|c| (c.entity, c.position, (c.position - pos).length()))
+            .filter(|&(.., d)| d <= LOOT_CHAIN_RANGE)
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        if let Some((entity, cpos, _)) = next {
+            self.agents[idx].goal = Goal::Loot { container: entity, pos: cpos };
+        }
+    }
+
+    /// Drain a loot container into the agent's pack (it walked onto the
+    /// drop). Mirrors the player walk-over pickup, including the ledger
+    /// attribution; whatever doesn't fit stays on the ground. Goal-agnostic:
+    /// both the Loot errand arrival and the opportunistic walk-over share it.
+    fn agent_take_loot(&mut self, idx: usize, container_id: EntityId) {
         let Some(container) = self.loot.get_mut(&container_id) else { return };
         let items: Vec<ItemStack> = container.items.drain(..).collect();
         let owner = container.owner.clone();
@@ -8148,7 +8267,18 @@ impl World {
                     save.position = self.walkable_spot_near(spot, 25.0);
                 }
                 let entity = self.alloc_entity();
+                let activity_log: VecDeque<AgentLogEntry> =
+                    std::mem::take(&mut save.activity_log).into();
+                let recent_txs: VecDeque<EconTx> =
+                    std::mem::take(&mut save.recent_txs).into();
                 let agent = FactionAgent::from_save(entity, save);
+                // Owned agents always get live feed entries (push_agent_log
+                // and the tx router are no-ops without one), restored from
+                // the save so restarts don't freeze the dossier.
+                if agent.owner.is_some() {
+                    self.agent_logs.insert(agent.agent_id, activity_log);
+                    self.agent_txs.insert(agent.agent_id, recent_txs);
+                }
                 let idx = self.agents.len();
                 self.agent_by_entity.insert(entity, idx);
                 self.agents.push(agent);
@@ -8283,6 +8413,9 @@ impl World {
                     resting_orders: Vec::new(),
                     owner: None,
                     lifetime_owner_earnings: 0,
+                    carried_stats: AgentStats::default(),
+                    activity_log: Vec::new(),
+                    recent_txs: Vec::new(),
                     position,
                     health: 100.0,
                     max_health: 100.0,
@@ -8347,6 +8480,9 @@ impl World {
                     resting_orders: Vec::new(),
                     owner: None,
                     lifetime_owner_earnings: 0,
+                    carried_stats: AgentStats::default(),
+                    activity_log: Vec::new(),
+                    recent_txs: Vec::new(),
                     position,
                     health: 100.0,
                     max_health: 100.0,
@@ -8529,6 +8665,39 @@ impl World {
             if grabbed_any && variant == 1 {
                 self.grant_energy(pid, 1);
             }
+        }
+
+        // Hot agents walking directly over a death drop take it in passing
+        // (players got first grab above). This is agent-level perception and
+        // action, not a world vacuum: only drops (variant 0 — ammo caches
+        // stay for players) and only when the pack has room. The agent grid
+        // bounds the candidate set to the drop's own chunk ring.
+        let mut agent_grabs: Vec<(usize, EntityId)> = Vec::new();
+        for container in self.loot.values() {
+            if container.variant != 0 || container.items.is_empty() {
+                continue;
+            }
+            let c = ChunkCoord::from_world(container.position);
+            'found: for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let coord = ChunkCoord::new(c.x + dx, c.z + dz);
+                    for &i in self.agent_grid.get(&coord).into_iter().flatten() {
+                        let agent = &self.agents[i as usize];
+                        if agent.tier == Tier::Hot
+                            && agent.alive()
+                            && agent.used_volume() < agent.capacity()
+                            && (container.position - agent.position).length()
+                                <= LOOT_PICKUP_RADIUS
+                        {
+                            agent_grabs.push((i as usize, container.entity));
+                            break 'found;
+                        }
+                    }
+                }
+            }
+        }
+        for (idx, cid) in agent_grabs {
+            self.agent_take_loot(idx, cid);
         }
 
         let mut expired = Vec::new();
@@ -8939,6 +9108,33 @@ impl World {
             return;
         }
         let txs = self.ledger.take_pending();
+        // Route every tx touching an owned agent into that agent's personal
+        // slice (the dossier TRANSACTIONS pane): the global ring churns too
+        // fast in a busy economy to filter reliably, and respawns re-key
+        // this slice so it survives identity changes.
+        if !self.agent_txs.is_empty() {
+            for tx in &txs {
+                let from_id = match &tx.from {
+                    TxParty::Agent { id, .. } => Some(*id),
+                    _ => None,
+                };
+                let to_id = match &tx.to {
+                    TxParty::Agent { id, .. } => Some(*id),
+                    _ => None,
+                };
+                for id in [from_id, to_id.filter(|id| Some(*id) != from_id)]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(ring) = self.agent_txs.get_mut(&id) {
+                        if ring.len() >= AGENT_TX_CAP {
+                            ring.pop_front();
+                        }
+                        ring.push_back(tx.clone());
+                    }
+                }
+            }
+        }
         self.econ_subs.retain(|id| self.players.contains_key(id));
         if self.econ_subs.is_empty() {
             return;
@@ -9095,6 +9291,7 @@ impl World {
             },
         });
         self.agent_logs.insert(agent_id, log);
+        self.agent_txs.insert(agent_id, VecDeque::with_capacity(AGENT_TX_CAP));
         self.send_agent_result(entity, true, None);
         self.refresh_agent_roster(entity);
     }
@@ -9120,6 +9317,7 @@ impl World {
             }
         }
         self.agent_logs.remove(&agent_id);
+        self.agent_txs.remove(&agent_id);
         // Anyone watching this agent (detail stream or follow camera) loses
         // access with the dismissal.
         for p in self.players.values_mut() {
@@ -9228,30 +9426,24 @@ impl World {
     /// log + its slice of the recent ledger.
     fn agent_detail_snapshot(&self, idx: usize) -> AgentDetail {
         let a = &self.agents[idx];
-        let stats = self
-            .stats
-            .actors
-            .get(&a.agent_id)
-            .map(|s| AgentStats {
-                kills: s.kills,
-                deaths: s.deaths,
-                resources: s.resources,
-                trades: s.trades,
-                crafted: s.crafted,
-            })
-            .unwrap_or_default();
+        // RECORD = counters carried over from previous lives + the current
+        // identity's live row (which retires into `carried_stats` on respawn).
+        let mut stats = a.carried_stats;
+        if let Some(s) = self.stats.actors.get(&a.agent_id) {
+            stats.kills += s.kills;
+            stats.deaths += s.deaths;
+            stats.resources += s.resources;
+            stats.trades += s.trades;
+            stats.crafted += s.crafted;
+        }
         let mut blueprints: Vec<String> = a.blueprints.iter().cloned().collect();
         blueprints.sort();
-        let me = a.agent_id;
-        let is_me = |p: &TxParty| matches!(p, TxParty::Agent { id, .. } if *id == me);
+        // Personal ledger slice (routed in `flush_economy`), newest first.
         let recent_txs: Vec<EconTx> = self
-            .ledger
-            .recent()
-            .into_iter()
-            .rev()
-            .filter(|tx| is_me(&tx.from) || is_me(&tx.to))
-            .take(20)
-            .collect();
+            .agent_txs
+            .get(&a.agent_id)
+            .map(|ring| ring.iter().rev().take(20).cloned().collect())
+            .unwrap_or_default();
         AgentDetail {
             summary: self.agent_summary(idx, None),
             goal: self.agent_goal_description(idx),
@@ -9671,6 +9863,8 @@ impl World {
             snap: EntitySnapshot,
             /// Hot faction agent: subject to the per-player nearest-K cap.
             is_agent: bool,
+            /// Loot container / currency pickup: subject to the loot cap.
+            is_loot: bool,
         }
 
         let mut all: Vec<Replicated> = Vec::new();
@@ -9686,6 +9880,7 @@ impl World {
                 spawn: p.spawn_data(),
                 snap: p.snapshot(),
                 is_agent: false,
+                is_loot: false,
             });
         }
         // Hot faction agents replicate as full entities (cold agents don't
@@ -9703,6 +9898,7 @@ impl World {
                 spawn: agent.spawn_data(factions::faction_color(agent.faction)),
                 snap: agent.snapshot(),
                 is_agent: true,
+                is_loot: false,
             });
         }
         for container in self.loot.values() {
@@ -9736,6 +9932,7 @@ impl World {
                     shield_pct: 0.0,
                 },
                 is_agent: false,
+                is_loot: true,
             });
         }
         for pickup in self.pickups.values() {
@@ -9769,6 +9966,7 @@ impl World {
                     shield_pct: 0.0,
                 },
                 is_agent: false,
+                is_loot: true,
             });
         }
         // Nodes: only chunks in some player's view are walked, so this costs
@@ -9817,6 +10015,7 @@ impl World {
                             shield_pct: 0.0,
                         },
                         is_agent: false,
+                        is_loot: false,
                     });
                 }
             }
@@ -9847,6 +10046,7 @@ impl World {
                     shield_pct: 0.0,
                 },
                 is_agent: false,
+                is_loot: false,
             });
         }
 
@@ -9913,12 +10113,46 @@ impl World {
                     None
                 };
 
+            // Same nearest-K cap for loot: a hub battlefield can carry more
+            // drops than one client can usefully draw. The loot still exists
+            // server-side (agents see and clear all of it); this only bounds
+            // the wire and the client's entity count.
+            let mut loot_rank: Vec<(EntityId, f32)> = Vec::new();
+            for r in &all {
+                if r.is_loot && player.view.contains(&r.chunk) {
+                    loot_rank.push((r.id, (r.snap.position - ppos).length_squared()));
+                }
+            }
+            let loot_keep: Option<HashSet<EntityId>> = if loot_rank.len() > REPLICATED_LOOT_CAP {
+                loot_rank.sort_unstable_by(|a, b| a.1.total_cmp(&b.1));
+                let mut keep: HashSet<EntityId> =
+                    loot_rank[..REPLICATED_LOOT_CAP].iter().map(|(id, _)| *id).collect();
+                for (id, _) in &loot_rank[REPLICATED_LOOT_CAP..] {
+                    if keep.len() >= REPLICATED_LOOT_KEEP {
+                        break;
+                    }
+                    if player.known_entities.contains(id) {
+                        keep.insert(*id);
+                    }
+                }
+                Some(keep)
+            } else {
+                None
+            };
+
             for r in &all {
                 if !player.view.contains(&r.chunk) {
                     continue;
                 }
                 if r.is_agent {
                     if let Some(keep) = &agent_keep {
+                        if !keep.contains(&r.id) {
+                            continue;
+                        }
+                    }
+                }
+                if r.is_loot {
+                    if let Some(keep) = &loot_keep {
                         if !keep.contains(&r.id) {
                             continue;
                         }
@@ -10063,7 +10297,23 @@ impl World {
     fn save_agent_shard(&self, shard: usize) {
         let lo = shard * AGENT_SAVE_SHARD;
         let hi = (lo + AGENT_SAVE_SHARD).min(self.agents.len());
-        let saves: Vec<AgentSave> = self.agents[lo..hi].iter().map(|a| a.save()).collect();
+        let saves: Vec<AgentSave> = self.agents[lo..hi]
+            .iter()
+            .map(|a| {
+                let mut save = a.save();
+                // The dossier feeds live on the world keyed by identity;
+                // stash them with the agent so restarts don't blank them.
+                if a.owner.is_some() {
+                    if let Some(log) = self.agent_logs.get(&a.agent_id) {
+                        save.activity_log = log.iter().cloned().collect();
+                    }
+                    if let Some(txs) = self.agent_txs.get(&a.agent_id) {
+                        save.recent_txs = txs.iter().cloned().collect();
+                    }
+                }
+                save
+            })
+            .collect();
         if let Err(e) = self.store.save_meta(&format!("faction_agents_shard_{shard}"), &saves) {
             tracing::error!("agent shard save failed: {e}");
         }
@@ -10609,6 +10859,7 @@ mod tests {
             district_spots: Vec::new(),
             owned_agents: HashMap::new(),
             agent_logs: HashMap::new(),
+            agent_txs: HashMap::new(),
             timings: TickTimings::default(),
         };
         (world, dir)
@@ -10648,6 +10899,9 @@ mod tests {
                 resting_orders: Vec::new(),
                 owner: None,
                 lifetime_owner_earnings: 0,
+                carried_stats: AgentStats::default(),
+                activity_log: Vec::new(),
+                recent_txs: Vec::new(),
                 position,
                 health: 100.0,
                 max_health: 100.0,
@@ -10802,6 +11056,98 @@ mod tests {
         world.agents[a].spawn_protection = 0.0;
         assert!(world.deal_damage(eb, ea, 10.0, None));
         assert!(world.deal_damage(ea, eb, 10.0, None));
+    }
+
+    #[test]
+    fn record_and_tx_slice_survive_respawn() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let victim = spawn_test_agent(&mut world, FACTION_FORUM, Traits::fighter(), contested);
+        // Wire ownership the way hire_agent does: owner + live feed entries.
+        world.agents[idx].owner = Some(uuid::Uuid::new_v4());
+        world.agent_logs.insert(world.agents[idx].agent_id, VecDeque::new());
+        world.agent_txs.insert(world.agents[idx].agent_id, VecDeque::new());
+        // A kill lands on the current identity's stats row.
+        let killer = world.agent_actor_ref(idx);
+        let victim_ref = world.agent_actor_ref(victim);
+        world.stats.record_kill(Some(&killer), &victim_ref);
+        // A ledger tx touching the agent routes into its personal slice.
+        world.ledger.record(
+            TxKind::Mint,
+            TxParty::Mint,
+            world.agents[idx].party(),
+            TxAmount::Wild { amount: 25 },
+            0,
+        );
+        world.flush_economy();
+        let detail = world.agent_detail_snapshot(idx);
+        assert_eq!(detail.stats.kills, 1);
+        assert_eq!(detail.recent_txs.len(), 1);
+        // Death + respawn mints a fresh identity; the dossier record and the
+        // tx slice must carry over instead of resetting to zero/empty.
+        let old_id = world.agents[idx].agent_id;
+        world.kill_agent(idx, false);
+        world.agents[idx].respawn_in = 0.0;
+        world.respawn_agent(idx);
+        let new_id = world.agents[idx].agent_id;
+        assert_ne!(new_id, old_id, "respawn should mint a fresh identity");
+        assert!(!world.stats.actors.contains_key(&old_id), "old row retires");
+        assert_eq!(world.agents[idx].carried_stats.kills, 1, "kill folded into the slot");
+        let detail = world.agent_detail_snapshot(idx);
+        assert_eq!(detail.stats.kills, 1, "RECORD survives the respawn");
+        assert_eq!(detail.recent_txs.len(), 1, "tx slice survives the respawn");
+        assert!(
+            world.agent_txs.contains_key(&new_id) && !world.agent_txs.contains_key(&old_id),
+            "tx slice re-keys to the fresh identity"
+        );
+        // New-life events keep accumulating on top of the carried record.
+        let killer = world.agent_actor_ref(idx);
+        world.stats.record_kill(Some(&killer), &victim_ref);
+        assert_eq!(world.agent_detail_snapshot(idx).stats.kills, 2);
+    }
+
+    #[test]
+    fn owned_agent_dossier_feeds_survive_restart() {
+        let (mut world, _dir) = test_world();
+        world.seed_neighborhood_stores();
+        let contested = district_anchor("NEXUS");
+        let idx = spawn_test_agent(&mut world, FACTION_REBELS, Traits::fighter(), contested);
+        let agent_id = world.agents[idx].agent_id;
+        world.agents[idx].owner = Some(uuid::Uuid::new_v4());
+        world.agents[idx].carried_stats.kills = 3;
+        world.agent_logs.insert(agent_id, VecDeque::new());
+        world.agent_txs.insert(agent_id, VecDeque::new());
+        world.push_agent_log(agent_id, "Hired for test".into());
+        world.ledger.record(
+            TxKind::Mint,
+            TxParty::Mint,
+            world.agents[idx].party(),
+            TxAmount::Wild { amount: 10 },
+            0,
+        );
+        world.flush_economy();
+        world.save_agent_shards_full();
+        // Simulate a restart: wipe live state, restore from disk.
+        world.agents.clear();
+        world.agent_by_entity.clear();
+        world.agent_grid.clear();
+        world.agent_logs.clear();
+        world.agent_txs.clear();
+        world.store.save_meta("agent_seed_layout", &AGENT_SEED_LAYOUT).unwrap();
+        world.load_or_seed_agents();
+        world.rebuild_owned_agents();
+        assert_eq!(world.agents.len(), 1);
+        assert_eq!(world.agents[0].carried_stats.kills, 3, "carried record survives");
+        let log = world.agent_logs.get(&agent_id).expect("activity log restored");
+        assert!(log.iter().any(|e| e.text == "Hired for test"));
+        let txs = world.agent_txs.get(&agent_id).expect("tx slice restored");
+        assert_eq!(txs.len(), 1);
+        // The live map entry exists again, so post-restart events keep
+        // appending instead of silently dropping.
+        world.push_agent_log(agent_id, "Still alive".into());
+        assert!(world.agent_logs[&agent_id].iter().any(|e| e.text == "Still alive"));
     }
 
     #[test]
@@ -11470,6 +11816,9 @@ mod tests {
             resting_orders: Vec::new(),
             owner: None,
             lifetime_owner_earnings: 0,
+            carried_stats: AgentStats::default(),
+            activity_log: Vec::new(),
+            recent_txs: Vec::new(),
             // Far off the baked map: open water (pre-fix drift artifacts).
             position: Vec3::new(1.0e6, 0.0, 1.0e6),
             health: 80.0,

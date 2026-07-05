@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use wilder_combat::{weapon_stats, WeaponStats, FIST};
 use wilder_inventory as inv;
 use wilder_physics::{step_move_speed, CollisionWorld};
+use wilder_protocol::{AgentLogEntry, AgentStats};
 use wilder_types::*;
 
 use crate::econ::{Currency, Purse};
@@ -458,6 +459,18 @@ pub struct AgentSave {
     /// Total MILD paid to the owner via the bank-deposit share.
     #[serde(default)]
     pub lifetime_owner_earnings: u64,
+    /// Competition record carried over from this slot's previous lives
+    /// (respawn retires the per-identity leaderboard row; the dossier
+    /// reports carried + current so RECORD never resets to zero).
+    #[serde(default)]
+    pub carried_stats: AgentStats,
+    /// Owned-agent activity log, stashed at shard-save time so the dossier
+    /// feed survives server restarts (empty for unowned agents).
+    #[serde(default)]
+    pub activity_log: Vec<AgentLogEntry>,
+    /// Owned-agent personal transaction slice, stashed like `activity_log`.
+    #[serde(default)]
+    pub recent_txs: Vec<EconTx>,
     pub position: Vec3,
     pub health: f32,
     pub max_health: f32,
@@ -595,6 +608,8 @@ pub struct FactionAgent {
     pub owner: Option<CharacterId>,
     /// Total MILD paid to the owner via the bank-deposit share.
     pub lifetime_owner_earnings: u64,
+    /// Competition record folded in from previous lives (see `AgentSave`).
+    pub carried_stats: AgentStats,
     pub position: Vec3,
     pub yaw: f32,
     pub health: f32,
@@ -824,6 +839,11 @@ impl FactionAgent {
             resting_orders: self.resting_orders.clone(),
             owner: self.owner,
             lifetime_owner_earnings: self.lifetime_owner_earnings,
+            carried_stats: self.carried_stats,
+            // The live log/tx feeds live on the world (keyed by identity);
+            // `World::save_agent_shard` patches them in for owned agents.
+            activity_log: Vec::new(),
+            recent_txs: Vec::new(),
             position: self.position,
             health: self.health,
             max_health: self.max_health,
@@ -864,6 +884,7 @@ impl FactionAgent {
             resting_orders: save.resting_orders,
             owner: save.owner,
             lifetime_owner_earnings: save.lifetime_owner_earnings,
+            carried_stats: save.carried_stats,
             position: save.position,
             yaw: 0.0,
             health: save.health.max(1.0),
@@ -1229,6 +1250,9 @@ mod tests {
                 resting_orders: Vec::new(),
                 owner: None,
                 lifetime_owner_earnings: 0,
+                carried_stats: AgentStats::default(),
+                activity_log: Vec::new(),
+                recent_txs: Vec::new(),
                 position: Vec3::new(10.0, 0.0, 10.0),
                 health: 100.0,
                 max_health: 100.0,
@@ -1306,6 +1330,7 @@ mod tests {
         a.pending_jobs.push((42, 7));
         a.owner = Some(uuid::Uuid::new_v4());
         a.lifetime_owner_earnings = 1234;
+        a.carried_stats.kills = 7;
         let json = serde_json::to_string(&a.save()).unwrap();
         let back: AgentSave = serde_json::from_str(&json).unwrap();
         let b = FactionAgent::from_save(99, back);
@@ -1324,6 +1349,7 @@ mod tests {
         assert_eq!(b.pending_jobs, vec![(42, 7)], "queued work notes must survive");
         assert_eq!(b.owner, a.owner, "ownership must survive the save");
         assert_eq!(b.lifetime_owner_earnings, 1234);
+        assert_eq!(b.carried_stats.kills, 7, "carried record must survive the save");
         assert_eq!(b.entity, 99);
     }
 
