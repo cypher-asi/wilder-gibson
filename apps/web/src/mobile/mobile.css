@@ -107,11 +107,13 @@ body,
 }
 
 /* ---------------------------------------------------------------------------
-   Trade tab: read-only exchange market data — markets list + per-market
-   drill-in (stats, order-book ladder, trades tape). Order entry is desktop.
+   Trade tab: CMC/CoinGecko-style mobile markets. Ranked list with category
+   chips, expandable search, sortable price/1h/24h columns and sparklines;
+   coin-page drill-in with price hero, candle chart, stat cards, order-book
+   ladder and trades tape. Order entry is desktop.
 --------------------------------------------------------------------------- */
 
-.m-trade2 {
+.m-tr {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -119,14 +121,67 @@ body,
   background: #05060a;
 }
 
-.m-trade2-search-wrap {
-  flex: none;
-  padding: 10px 14px 4px;
+.m-tr .num {
+  font-variant-numeric: tabular-nums;
 }
 
-.m-trade2-search {
+/* --- Top bar ----------------------------------------------------------------- */
+
+.m-tr-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--panel-border);
+  background: var(--panel);
+}
+
+.m-tr-title {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 0.26em;
+  color: var(--accent);
+  text-shadow: 0 0 12px var(--accent-dim);
+}
+
+.m-tr-top-sub {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-tr-search-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-height: 44px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.m-tr-search-btn.active,
+.m-tr-search-btn:active {
+  color: var(--accent);
+}
+
+.m-tr-search-wrap {
+  flex: none;
+  padding: 8px 14px 2px;
+}
+
+.m-tr-search {
   width: 100%;
-  min-height: 38px;
+  min-height: 40px;
   background: rgba(5, 9, 15, 0.65);
   border: 1px solid var(--panel-border);
   clip-path: var(--clip-notch-sm);
@@ -136,141 +191,381 @@ body,
   outline: none;
 }
 
-.m-trade2-id {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  overflow: hidden;
-  white-space: nowrap;
-}
+/* --- Filter chips (shared by list categories + detail venue pills) ----------- */
 
-.m-trade2-ticker {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--accent-bright);
-}
-
-.m-trade2-name {
-  font-size: 10px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.m-trade2-numbers {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-
-.m-trade2-last {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.m-trade2-sub {
-  font-size: 10px;
-  color: var(--text-dim);
-}
-
-/* --- Drill-in ---------------------------------------------------------------- */
-
-.m-trade2-detail-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.m-trade2-back {
-  flex: none;
-  width: 36px;
-  min-height: 36px;
-  background: none;
-  border: 1px solid var(--panel-border);
-  clip-path: var(--clip-notch-sm);
-  color: var(--text);
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.m-trade2-headline {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.m-trade2-venues {
+.m-tr-chips,
+.m-tr-venues {
   flex: none;
   display: flex;
   gap: 6px;
-  padding: 10px 14px 6px;
+  padding: 8px 14px 6px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
 }
 
-.m-trade2-venues::-webkit-scrollbar {
+.m-tr-chips::-webkit-scrollbar,
+.m-tr-venues::-webkit-scrollbar {
   display: none;
 }
 
-.m-trade2-stats {
+.m-tr-chip {
   flex: none;
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 4px 14px 8px;
-  font-size: 10px;
+  min-height: 34px;
+  padding: 0 14px;
+  background: rgba(159, 180, 200, 0.07);
+  border: 1px solid transparent;
+  border-radius: 17px;
+  font: 700 11px/1 var(--font-display);
   letter-spacing: 0.06em;
   color: var(--text-dim);
-  border-bottom: 1px solid var(--panel-border);
+  cursor: pointer;
 }
 
-.m-trade2-body {
-  flex: 1;
-  min-height: 0;
-  padding: 6px 14px 16px;
+.m-tr-chip.active {
+  border-color: var(--accent-dim);
+  background: var(--accent-faint);
+  color: var(--accent);
 }
 
-.m-trade2-section {
-  padding: 10px 0 5px;
-  font-size: 9px;
-  letter-spacing: 0.2em;
-  color: var(--text-dim);
-  border-bottom: 1px solid var(--panel-border);
-  margin-bottom: 3px;
+.m-tr-chip:active {
+  background: var(--accent-faint);
 }
 
-.m-trade2-level {
-  position: relative;
+/* --- List grid: # | icon | name | spark | price | 1h% | 24h% ------------------ */
+
+.m-tr-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr 60px;
-  gap: 8px;
+  grid-template-columns: 18px 26px minmax(0, 1fr) 38px 66px 48px 50px;
+  gap: 6px;
   align-items: center;
-  padding: 3px 6px;
-  font-size: 12px;
-  border-bottom: 1px solid rgba(159, 180, 200, 0.06);
+  padding: 0 12px;
 }
 
-.m-trade2-level .num {
-  font-variant-numeric: tabular-nums;
+.m-tr-head {
+  flex: none;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--panel-border);
 }
 
-.m-trade2-level .num:last-child {
+.m-tr-col,
+.m-tr-col-label {
+  background: none;
+  border: none;
+  padding: 6px 0;
+  text-align: left;
+  font: 700 9px/1 var(--font-display);
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.m-tr-col-label {
+  cursor: default;
+}
+
+.m-tr-head .num {
   text-align: right;
 }
 
-.m-trade2-level-bar {
+.m-tr-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-tr-row {
+  flex: none;
+  min-height: 64px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.08);
+  font-family: var(--font-display);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  contain: layout style;
+}
+
+.m-tr-row:active {
+  background: var(--accent-faint);
+}
+
+.m-tr-rank {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.m-tr-id {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.m-tr-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.m-tr-ticker {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.m-tr-spark {
+  width: 38px;
+  height: 18px;
+  display: block;
+}
+
+.m-tr-price {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.m-tr-pct {
+  font-size: 11px;
+  font-weight: 700;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.m-tr-pct.up { color: #7be0c2; }
+.m-tr-pct.down { color: #ff6a7c; }
+.m-tr-pct.flat { color: var(--text-dim); }
+.m-tr-pct.dim { color: rgba(127, 142, 160, 0.5); }
+
+/* --- Coin-page drill-in -------------------------------------------------------- */
+
+.m-tr-detail-top {
+  gap: 8px;
+}
+
+.m-tr-back {
+  flex: none;
+  width: 44px;
+  min-height: 44px;
+  margin-left: -12px;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.m-tr-detail-id {
+  flex: 1;
+}
+
+.m-tr-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.m-tr-hero {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 14px 14px 4px;
+}
+
+.m-tr-hero-price {
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--white);
+}
+
+.m-tr-hero-cur {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+
+.m-tr-hero-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.m-tr-hero-chip.up {
+  color: #7be0c2;
+  background: rgba(123, 224, 194, 0.12);
+}
+
+.m-tr-hero-chip.down {
+  color: #ff6a7c;
+  background: rgba(255, 106, 124, 0.12);
+}
+
+.m-tr-hero-chip.flat {
+  color: var(--text-dim);
+  background: rgba(159, 180, 200, 0.1);
+}
+
+.m-tr-hero-chip-sub {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  opacity: 0.7;
+}
+
+/* --- Chart + timeframe pills ---------------------------------------------------- */
+
+.m-tr-tfs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px 6px;
+}
+
+.m-tr-tf {
+  flex: 1;
+  min-height: 32px;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  font: 700 11px/1 var(--font-display);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.m-tr-tf.active {
+  background: var(--accent-faint);
+  color: var(--accent);
+}
+
+.m-tr-chart {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  height: 40dvh;
+  min-height: 220px;
+  padding: 0 6px;
+}
+
+/* --- Stat cards ------------------------------------------------------------------ */
+
+.m-tr-stats {
+  flex: none;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 12px 14px 4px;
+}
+
+.m-tr-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  clip-path: var(--clip-notch-sm);
+}
+
+.m-tr-stat-label {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+}
+
+.m-tr-stat-value {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Book / trades tabs ----------------------------------------------------------- */
+
+.m-tr-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 14px 4px;
+}
+
+.m-tr-tab {
+  min-height: 38px;
+  padding: 0 14px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font: 800 11px/1 var(--font-display);
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.m-tr-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.m-tr-tabs-venue {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Ladder + tape ------------------------------------------------------------------ */
+
+.m-tr-ladder,
+.m-tr-tape {
+  flex: none;
+  padding: 2px 14px 8px;
+}
+
+.m-tr-level {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(159, 180, 200, 0.06);
+  contain: layout style;
+}
+
+.m-tr-level .num:last-child {
+  text-align: right;
+}
+
+.m-tr-level-bar {
   position: absolute;
   right: 0;
   top: 0;
@@ -278,19 +573,59 @@ body,
   pointer-events: none;
 }
 
-.m-trade2-level-bar.ask {
+.m-tr-level-bar.ask {
   background: rgba(255, 106, 124, 0.12);
 }
 
-.m-trade2-level-bar.bid {
+.m-tr-level-bar.bid {
   background: rgba(123, 224, 194, 0.12);
 }
 
-.m-trade2-footnote {
-  padding: 14px 4px;
+.m-tr-spread {
+  padding: 5px 8px;
   font-size: 10px;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  border-top: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.m-tr-print {
+  grid-template-columns: 56px 1fr 1fr;
+}
+
+.m-tr-print-age {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* --- Desktop-only order entry note --------------------------------------------------- */
+
+.m-tr-desk-note {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 24px calc(20px + env(safe-area-inset-bottom));
+  text-align: center;
+}
+
+.m-tr-desk-pill {
+  padding: 10px 26px;
+  border: 1px solid var(--steel-border);
+  border-radius: 22px;
+  background: var(--steel-fill);
+  font: 800 12px/1 var(--font-display);
+  letter-spacing: 0.2em;
+  color: var(--text-dim);
+}
+
+.m-tr-desk-sub {
+  max-width: 300px;
+  font-size: 10px;
   line-height: 1.5;
+  letter-spacing: 0.06em;
   color: var(--text-dim);
 }
 
@@ -722,10 +1057,11 @@ body,
   gap: 8px;
 }
 
-/* FOLLOW / EXPLORE camera mode toggle, floats under the agent card. */
+/* FOLLOW / EXPLORE camera mode toggle + zoom buttons, under the agent card. */
 .m-watch-modes {
   align-self: flex-start;
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   pointer-events: auto;
 }
