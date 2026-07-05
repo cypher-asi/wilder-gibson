@@ -1207,7 +1207,17 @@ impl FactionAgent {
             }
             Goal::Retreat { to } => {
                 if self.move_toward(world, to, 4.0, dt, hot) > 8.0 {
-                    return AgentEvent::None;
+                    // Still in transit: re-score on the brain timer like other
+                    // errands. A retreater that can't physically close on its
+                    // sanctuary spot (pinned by geometry, destination beyond
+                    // pathfinding range) otherwise stays committed forever;
+                    // the health override in `decide_agent` re-commits Retreat
+                    // with a freshly computed nearest sanctuary instead.
+                    return if self.decision_timer <= 0.0 {
+                        AgentEvent::NeedsGoal
+                    } else {
+                        AgentEvent::None
+                    };
                 }
                 // Resting in the sanctuary: heal up, then get back to work.
                 self.health = (self.health + SANCTUARY_HEAL_RATE * dt).min(self.max_health);
@@ -1450,6 +1460,27 @@ mod tests {
         assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::None);
         // Timer fired well short of the store: ask for a fresh decision so
         // live congestion can reroute the errand instead of locking it in.
+        assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::NeedsGoal);
+    }
+
+    #[test]
+    fn retreat_transit_rescores_when_the_decision_timer_fires() {
+        struct Open;
+        impl CollisionWorld for Open {
+            fn walkable(&self, _: f32, _: f32) -> bool {
+                true
+            }
+        }
+        let mut a = sample_agent();
+        a.health = a.max_health * 0.2;
+        a.goal = Goal::Retreat { to: Vec3::new(500.0, 0.0, 10.0) };
+        a.decision_timer = 1.5;
+        // Timer still alive mid-transit: keep walking toward the sanctuary.
+        assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::None);
+        // Timer fired well short of the spot: ask for a fresh decision so a
+        // blocked retreat re-routes (the health override re-commits Retreat
+        // to the freshly computed nearest sanctuary) instead of staying
+        // committed to an unreachable destination forever.
         assert_eq!(a.tick(&Open, 1.0, false, None), AgentEvent::NeedsGoal);
     }
 
